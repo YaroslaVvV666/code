@@ -536,3 +536,209 @@ struct ScreenSpace<Content: View>: View {
         }
     }
 }
+
+// MARK: - Сворачивание аватарки в островок (как в Telegram)
+
+/// Вся геометрия «аватарка → капля → островок» в экранных координатах. Считается только от прокрутки,
+/// поэтому фото и капля всегда совпадают: их рисуют по одним и тем же числам.
+///
+/// Ход по `c` (0 — шапка раскрыта, 1 — свёрнута):
+/// - аватарка едет со страницей и уменьшается, у островка сверху вырастает маленькая капля;
+/// - аватарка подъезжает под островок и «повисает» на нём, капля тянется к её верху и срастается;
+/// - с места срастания фото чернеет сверху вниз; полностью чёрное — фото убирается (под ним уже чёрный круг);
+/// - чёрный круг чуть набухает, затем сжимается и втекает в островок.
+struct AvatarCollapse {
+    /// островок (чуть меньше настоящего, чтобы края не выглядывали): центр и размер
+    static let islandCY: CGFloat = 29.5
+    static let islandSize = CGSize(width: 118, height: 30)
+    static var islandBottom: CGFloat { islandCY + islandSize.height / 2 }
+
+    static let travel: CGFloat = 150          // столько прокрутки на всё сворачивание
+    static let size: CGFloat = 112
+    static let lift: CGFloat = 34             // аватарка едет чуть быстрее страницы (34·c²)
+    static let blackAt: CGFloat = 0.74        // к этому моменту фото полностью чёрное
+    static let goneAt: CGFloat = 0.94         // капля целиком в островке
+
+    let c: CGFloat
+    let center: CGPoint
+    let diameter: CGFloat
+    /// 0 — без затемнения, 1 — фото полностью чёрное
+    var dark: CGFloat { 0.5 * touch + 0.5 * sweep }
+    /// верх кружка темнеет, пока к нему тянется капля (0…1)
+    let touch: CGFloat
+    /// затем тёмный фронт ползёт сверху вниз (0…1)
+    let sweep: CGFloat
+    /// фронт затемнения в долях высоты кружка: выше `front` — чёрное, ниже `front + band` — фото
+    var front: CGFloat { -Self.band + Self.band * touch + sweep }
+    static let band: CGFloat = 0.5
+    let photo: Double
+    let blur: CGFloat
+    let opacity: Double
+    /// капля под островком и перемычка до верха аватарки
+    let drop: CGFloat
+    let neckTip: CGFloat
+    let neckWidth: CGFloat
+
+    var top: CGFloat { center.y - diameter / 2 }
+
+    /// restTop — верх кружка на экране, когда страница не прокручена; pull — насколько оттянули вниз (0…80)
+    init(raw: CGFloat, restTop: CGFloat, screenWidth: CGFloat, pull: CGFloat) {
+        let c = Self.clamp(raw / Self.travel)
+        self.c = c
+        let ib = Self.islandBottom
+        let grow: CGFloat = 1 + 0.32 * min(1, pull / 62)          // тянем вниз — кружок растёт вместе с пальцем
+
+        // верх кружка: со страницей, пока не упрётся под островок (плавно, без излома)
+        let pageTop: CGFloat = restTop - raw - Self.lift * c * c
+        let hangTop: CGFloat = ib - 2
+        let top: CGFloat = Self.smoothMax(pageTop, hangTop, k: 24)
+
+        // размер: к моменту, когда стал чёрным, — 45 % от исходного; потом чуть набухает и втягивается
+        let shrunk: CGFloat = Self.size * grow * (1 - 0.55 * Self.smooth(c / Self.blackAt))
+        let s: CGFloat = Self.clamp((c - Self.blackAt) / (Self.goneAt - Self.blackAt))
+        let swell: CGFloat = shrunk * (1 + 0.1 * Self.smooth(s / 0.3))
+        let d: CGFloat = swell + (8 - swell) * Self.smooth((s - 0.3) / 0.7)
+        let hangCY: CGFloat = top + d / 2
+        let cy: CGFloat = hangCY + (Self.islandCY + 2 - hangCY) * Self.smooth((s - 0.05) / 0.95)
+        center = CGPoint(x: screenWidth / 2, y: cy)
+        diameter = d
+
+        // чернеет от места срастания: сначала верх (пока капля тянется к нему), потом фронт ползёт вниз
+        let gap: CGFloat = top - ib
+        touch = Self.smooth((50 - gap) / 32)
+        let hangC: CGFloat = Self.progress(whenTopReaches: ib + 10, restTop: restTop)
+        sweep = Self.smooth((c - hangC) / max(0.05, Self.blackAt - 0.02 - hangC))
+        photo = Double(1 - Self.smooth((c - (Self.blackAt - 0.02)) / 0.02))
+        blur = 3 * Self.smooth((c - 0.1) / 0.6)                       // слабо: фото узнаётся почти до конца
+        opacity = Double(1 - Self.smooth((c - Self.goneAt) / (1 - Self.goneAt)))
+
+        // капля: маленькая, появляется рано; когда аватарка близко — тянется к её верху и срастается;
+        // в конце втягивается в островок вместе с аватаркой
+        let drop: CGFloat = 26 * Self.smooth((c - 0.04) / 0.3) * (1 - Self.smooth(s))
+        self.drop = drop
+        let join: CGFloat = Self.smooth((36 - gap) / 28)
+        neckTip = (ib + 0.55 * drop) + (top + 0.2 * d - (ib + 0.55 * drop)) * join
+        neckWidth = 0.75 * drop + (0.62 * d - 0.75 * drop) * join
+    }
+
+    /// при каком c верх аватарки (если ехать со страницей) окажется на высоте y
+    static func progress(whenTopReaches y: CGFloat, restTop: CGFloat) -> CGFloat {
+        // restTop − travel·c − lift·c² = y
+        let k: CGFloat = restTop - y
+        guard k > 0 else { return 0 }
+        let disc: CGFloat = travel * travel + 4 * lift * k
+        return clamp((-travel + disc.squareRoot()) / (2 * lift))
+    }
+
+    static func clamp(_ x: CGFloat) -> CGFloat { min(1, max(0, x)) }
+
+    static func smooth(_ x: CGFloat) -> CGFloat {
+        let t = clamp(x)
+        return t * t * (3 - 2 * t)
+    }
+
+    /// максимум со скруглённым «углом» шириной k; дальше k от угла совпадает с обычным max
+    static func smoothMax(_ a: CGFloat, _ b: CGFloat, k: CGFloat) -> CGFloat {
+        let h: CGFloat = max(k - abs(a - b), 0) / k
+        return max(a, b) + h * h * k / 4
+    }
+}
+
+/// Капля островка: островок, капля под ним, перемычка и чёрный круг под фото — склеены как жидкость
+/// (blur + alphaThreshold). Фото рисуется поверх, по той же геометрии.
+struct IslandBlob: View {
+    let g: AvatarCollapse
+    let screen: CGSize
+
+    var body: some View {
+        Canvas { ctx, size in
+            let midX: CGFloat = size.width / 2
+            let island = CGRect(x: midX - AvatarCollapse.islandSize.width / 2,
+                                y: AvatarCollapse.islandCY - AvatarCollapse.islandSize.height / 2,
+                                width: AvatarCollapse.islandSize.width, height: AvatarCollapse.islandSize.height)
+            let ib: CGFloat = AvatarCollapse.islandBottom
+            let dropRect = CGRect(x: midX - g.drop / 2, y: ib + 0.05 * g.drop - g.drop / 2,
+                                  width: g.drop, height: g.drop)
+            let neckH: CGFloat = max(0, g.neckTip - AvatarCollapse.islandCY)
+            let neck = CGRect(x: midX - g.neckWidth / 2, y: AvatarCollapse.islandCY,
+                              width: g.neckWidth, height: neckH)
+            // под фото: на 2 pt меньше, чтобы чёрный край не выглядывал из-под ещё светлого низа
+            let inset: CGFloat = min(2, g.diameter / 4)
+            let under = CGRect(x: g.center.x - g.diameter / 2 + inset, y: g.center.y - g.diameter / 2 + inset,
+                              width: g.diameter - 2 * inset, height: g.diameter - 2 * inset)
+            ctx.addFilter(.alphaThreshold(min: 0.5, color: .black))
+            ctx.addFilter(.blur(radius: 8))
+            ctx.drawLayer { layer in
+                layer.fill(Path(roundedRect: island, cornerRadius: island.height / 2), with: .color(.black))
+                if g.drop > 0.5 {
+                    layer.fill(Path(ellipseIn: dropRect), with: .color(.black))
+                }
+                if g.neckWidth > 0.5, neckH > 0 {
+                    layer.fill(Path(roundedRect: neck, cornerRadius: g.neckWidth / 2), with: .color(.black))
+                }
+                layer.fill(Path(ellipseIn: under), with: .color(.black))
+            }
+        }
+        .frame(width: screen.width, height: screen.height)
+        .allowsHitTesting(false)
+    }
+}
+
+/// Слой «аватарка + капля островка» на весь экран. Капля снизу, фото поверх неё — по одной геометрии,
+/// поэтому полупрозрачной капли поверх живого фото не бывает: фото всегда непрозрачное, а чёрное — это его затемнение.
+struct CollapsingAvatarLayer: View {
+    let raw: CGFloat
+    let restTop: CGFloat
+    let screen: CGSize
+    let pull: CGFloat
+    let island: Bool
+    let name: String
+    let photoID: String?
+    let ring: Color
+
+    var body: some View {
+        let g = AvatarCollapse(raw: raw, restTop: restTop, screenWidth: screen.width, pull: pull)
+        return ZStack(alignment: .topLeading) {
+            if island, g.c > 0.005 { IslandBlob(g: g, screen: screen) }
+            avatar(g)
+        }
+        .frame(width: screen.width, height: screen.height, alignment: .topLeading)
+    }
+
+    private func avatar(_ g: AvatarCollapse) -> some View {
+        let size: CGFloat = AvatarCollapse.size
+        let k: CGFloat = g.diameter / size
+        // без островка: без чернения, просто уменьшается и растворяется
+        let dark: CGFloat = island ? g.dark : 0
+        let front: CGFloat = island ? g.front : -AvatarCollapse.band
+        let fade: Double = island ? g.opacity : Double(1 - AvatarCollapse.smooth((g.c - 0.5) / 0.35))
+        let photoAlpha: Double = island ? g.photo : 1
+        let shade = LinearGradient(colors: [.black, .clear],
+                                   startPoint: UnitPoint(x: 0.5, y: front),
+                                   endPoint: UnitPoint(x: 0.5, y: front + AvatarCollapse.band))
+        let ringAlpha: Double = Double(1 - min(1, dark * 3))
+        return ZStack {
+            face
+                .frame(width: size, height: size)
+                .clipped()
+                .blur(radius: g.blur, opaque: true)          // края не прозрачнеют — чёрное снизу не просвечивает
+                .opacity(photoAlpha)
+            Rectangle().fill(shade)                           // фронт затемнения ползёт сверху вниз
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(Circle().stroke(ring, lineWidth: 1).opacity(ringAlpha))
+        .scaleEffect(k)
+        .position(g.center)
+        .opacity(fade)
+    }
+
+    @ViewBuilder
+    private var face: some View {
+        if let photoID {
+            RemoteImage(id: photoID)
+        } else {
+            AvatarView(name: name, size: AvatarCollapse.size)
+        }
+    }
+}
