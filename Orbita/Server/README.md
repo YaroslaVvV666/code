@@ -1,0 +1,101 @@
+# Сервер Orbita
+
+Один файл на Python, без фреймворков. Зависимость одна — `cryptography`.
+
+```bash
+pip3 install -r requirements.txt
+python3 server.py            # порт 8080, слушает всю локальную сеть
+```
+
+Переменные окружения: `ORBITA_PORT`, `ORBITA_HOST`, `ORBITA_DATA` (папка данных),
+`ORBITA_DEMO=0` (не создавать демо-посты), `ORBITA_MASTER_KEY` / `ORBITA_MASTER_KEY_FILE`.
+
+## Проверка с iPhone, сервер на Mac
+
+1. Mac и iPhone — в одной Wi-Fi сети.
+2. На Mac: `cd Server && pip3 install -r requirements.txt && python3 server.py`.
+3. Адрес Mac: `ipconfig getifaddr en0` (например `192.168.1.20`).
+4. В приложении: Профиль → Сервер → `http://192.168.1.20:8080` → «Проверить подключение».
+5. iPhone спросит доступ к локальной сети — разрешите. Если соединения нет, проверьте брандмауэр macOS.
+6. В симуляторе достаточно `http://localhost:8080`.
+
+## Шифрование
+
+- AES-256-GCM для всех пользовательских полей (имя, @username, био, тексты постов и комментариев) и для медиа (чанки по 64 КиБ, поддержка Range).
+- Поиск по @username — через слепой индекс (HMAC), открытого текста в базе нет.
+- Иерархия ключей (HKDF-SHA256): мастер-ключ → ключ пользователя → ключ области (`profile`, `posts`, `comments`, `media`) → ключ файла.
+- Мастер-ключ: `keys/master.key` (создаётся при первом запуске, права 0600) или переменные окружения. **Сделайте его резервную копию отдельно от данных — без него данные не прочитать.**
+
+## Выдача ключей без мастер-ключа
+
+```bash
+python3 keytool.py users
+python3 keytool.py export --user @name --reason "основание" --scope posts,comments --out bundle.json
+python3 keytool.py decrypt --bundle bundle.json
+python3 keytool.py log
+```
+
+Пакет содержит только производные ключи одного пользователя: по нему нельзя получить мастер-ключ или данные других людей.
+Каждая выдача записывается в `data/disclosure.log`.
+
+## API (версия 5)
+
+`/v1/ping`, `/v1/session`, `/v1/me`, `/v1/username/check`, `/v1/users/{id}`, `/v1/lookup?u=`, `/v1/media`, `/media/{id}`,
+`/v1/posts` (+ `/like`, `/comments`), `/v1/comments/{id}/like`, `/v1/comments/{id}/pin`.
+
+Фотографии профиля: `GET /v1/users/{id}/avatars`, `POST /v1/me/avatars`, `PUT /v1/me/avatars/order`, `DELETE /v1/me/avatars/{id}`.
+
+Сеансы: `GET /v1/sessions`, `DELETE /v1/sessions/{id}`, `DELETE /v1/sessions` (все, кроме текущего).
+
+Вход по QR: `POST /v1/qr` (новое устройство), `GET /v1/qr/{id}?secret=` (опрос),
+`GET /v1/qr/{id}/info` и `POST /v1/qr/{id}/approve` (вошедшее устройство). Незавершённые QR хранятся только в памяти.
+
+Имя, фамилия, день рождения, названия устройств и IP шифруются так же, как остальные поля; у каждого устройства свой токен (в базе — SHA-256).
+Старая база обновляется сама: единственный токен превращается в сеанс, аватар — в галерею.
+
+Ответы на комментарии — всегда в ветке корневого комментария. Закреплять может только автор поста и только корневые комментарии.
+
+## Настоящие SMS и письма с кодом
+
+Приложение само ничего не отправляет: оно просит сервер (`POST /v1/otp/send`), а сервер шлёт код через вашего провайдера.
+Ключи провайдера лежат только в окружении сервера. Если сервер недоступен или провайдер не настроен, приложение
+по-прежнему работает в учебном режиме: код показывается баннером на экране.
+
+**Почта** — любой SMTP (Gmail «пароль приложения», Яндекс, Mail.ru, Mailgun, Postbox, свой Postfix):
+
+```
+export ORBITA_SMTP_HOST=smtp.yandex.ru
+export ORBITA_SMTP_PORT=465            # 465 = SSL, 587 = STARTTLS
+export ORBITA_SMTP_USER=no-reply@your-domain.ru
+export ORBITA_SMTP_PASS=********
+export ORBITA_SMTP_FROM="Orbita <no-reply@your-domain.ru>"
+```
+
+**SMS** — выберите провайдера (`ORBITA_SMS_PROVIDER`):
+
+| Провайдер | Переменные |
+|---|---|
+| `smsru` (sms.ru) | `ORBITA_SMS_API_ID`, `ORBITA_SMS_FROM` (имя отправителя, необязательно) |
+| `smsc` (smsc.ru) | `ORBITA_SMS_LOGIN`, `ORBITA_SMS_PASSWORD`, `ORBITA_SMS_FROM` |
+| `twilio` | `ORBITA_TWILIO_SID`, `ORBITA_TWILIO_TOKEN`, `ORBITA_TWILIO_FROM` |
+| `webhook` | `ORBITA_SMS_WEBHOOK` — ваш шлюз получает POST `{"phone": "+7…", "text": "…"}` |
+
+Нужны: договор или аккаунт у провайдера, пополненный баланс; для российских номеров — согласованное имя отправителя
+(иначе SMS уходят с общего номера или блокируются). Проверьте: `curl localhost:8080/v1/ping` → `"otp": {"sms": true, "email": true}`.
+
+Защита: код 6 цифр, живёт 5 минут, хранится только в виде HMAC, 5 попыток, повтор не чаще раза в 45 секунд,
+не больше 5 кодов в час на адрес и 20 в час на IP. Для разработки без провайдера: `ORBITA_OTP_DEV=1` — сервер вернёт код
+в ответе (`debug_code`), приложение покажет его баннером. В продакшене эту переменную не включать.
+
+## Публикации, стена, приватность, плейлист (версия 5)
+
+- `PUT /v1/posts/{id}` — правка (текст, форматирование, набор медиа), в ответе `edited_at`; удалённые из поста файлы стираются.
+- `GET /v1/users/{id}/posts` — стена пользователя; `{"posts": [], "private": true}`, если стена закрыта от вас.
+- `PUT /v1/me` с `"privacy": {"phone","last_seen","photos","bio","birthday","music","wall","calls","forwards","invites","comments"}`,
+  значения `"all"` или `"nobody"`. «Закрытый профиль» — это `"wall": "nobody"`: прячется только стена.
+  `calls`, `forwards`, `invites` пока только сохраняются — мессенджера ещё нет.
+- Чёрный список: `GET /v1/me/blocks`, `PUT|DELETE /v1/me/blocks/{user_id}`. Заблокированные не видят друг друга в ленте
+  и комментариях; заблокировавший для них — «пустая» страница (имя, @username).
+- Плейлист: загрузка `POST /v1/media?kind=audio` (mp3 / m4a, до 40 МБ), затем `POST /v1/me/playlist`,
+  `PUT /v1/me/playlist/order`, `PUT|DELETE /v1/me/playlist/{id}`, `GET /v1/users/{id}/playlist`.
+  Названия и исполнители шифруются как остальные поля профиля.

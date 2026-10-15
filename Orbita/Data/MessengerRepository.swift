@@ -1,0 +1,985 @@
+import Foundation
+
+// MARK: - Модели
+
+struct ChatPeer: Equatable, Hashable {
+    let id: String
+    var name: String
+    var username: String?
+    var avatarID: String?
+    var isGroup = false
+    var kind: String? = nil             // группа: "open" | "closed"
+    var memberCount = 0
+    var type: String? = nil             // "group" | "channel"
+    var handle: String? = nil           // публичная ссылка @имя
+    var noForward = false               // запрет копирования
+    var isChannel: Bool { type == "channel" }
+}
+
+struct GroupMember: Identifiable, Equatable, Hashable {
+    let id: String
+    var name: String
+    var username: String?
+    var avatarID: String?
+    var role: String
+}
+
+struct GroupInfo: Equatable {
+    let id: String
+    var name: String
+    var about: String
+    var kind: String
+    var members: [GroupMember]
+    var myRole: String?
+    var code: String?
+    var type = "group"
+    var handle: String? = nil
+    var approve = false                 // вступление по заявкам
+    var noForward = false               // запретить копирование
+    var slow = 0                        // медленный режим, секунд
+    var whoWrites = "all"               // "all" | "admins"
+    var history = true                  // новые участники видят историю
+    var count = 0
+    var muted = false
+    var canWrite = true
+    var requests = 0
+    var pending = false
+    var discussion: DiscussionRef? = nil    // чат для комментариев канала
+    var isOwner: Bool { myRole == "owner" }
+    var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
+    var isOpen: Bool { kind == "open" }
+    var isChannel: Bool { type == "channel" }
+    /// Публичная ссылка: @имя, иначе код приглашения
+    var linkRef: String? { handle ?? code }
+}
+
+/// Чат, привязанный к каналу для комментариев
+struct DiscussionRef: Equatable {
+    let id: String
+    let name: String
+}
+
+/// Комментарии к посту канала
+struct CommentThread {
+    var messages: [ChatMessage]
+    var canComment: Bool
+}
+
+/// Параметры новой группы или канала
+struct GroupDraft: Equatable {
+    var type = "group"
+    var title = ""
+    var about = ""
+    var kind = "closed"
+    var handle = ""
+    var approve = false
+    var noForward = false
+    var slow = 0
+    var whoWrites = "all"
+    var history = true
+}
+
+/// Что изменить в группе (nil — не трогать)
+struct GroupPatch {
+    var title: String?
+    var about: String?
+    var kind: String?
+    var handle: String?
+    var approve: Bool?
+    var noForward: Bool?
+    var slow: Int?
+    var whoWrites: String?
+    var history: Bool?
+    var discussion: String?         // id чата для комментариев; "" — отвязать
+}
+
+/// Заявка на вступление
+struct JoinRequest: Identifiable, Equatable {
+    var id: String { member.id }
+    let member: GroupMember
+    let createdAt: Date
+}
+
+/// Открытая группа в поиске или по ссылке-приглашению
+struct GroupPreview: Identifiable, Equatable {
+    let id: String
+    var name: String
+    var about: String
+    var kind: String
+    var members: Int
+    var joined: Bool
+    var type = "group"
+    var handle: String? = nil
+    var approve = false
+    var code: String? = nil
+    var pending = false
+    var isChannel: Bool { type == "channel" }
+}
+
+/// Запись из записной книги телефона
+struct BookEntry: Equatable {
+    let name: String
+    let phone: String
+}
+
+/// Человек из записной книги, который уже в Orbita
+struct ImportMatch: Identifiable, Equatable {
+    let id: String
+    var name: String
+    var username: String?
+    var avatarID: String?
+    var bookName: String
+    var inContacts: Bool
+}
+
+/// «Ваш знакомый теперь в Orbita»
+struct JoinNotice: Identifiable, Equatable {
+    let id: String
+    let userID: String
+    var name: String
+    var username: String?
+    var avatarID: String?
+    let createdAt: Date
+}
+
+/// Человек, сохранённый в контактах под своим именем
+struct Contact: Identifiable, Equatable {
+    let id: String
+    var name: String
+    var realName: String
+    var username: String?
+    var avatarID: String?
+}
+
+struct ChatSummary: Identifiable, Equatable {
+    var id: String { peer.id }
+    let peer: ChatPeer
+    let unread: Int
+    let updatedAt: Date
+    let lastText: String
+    let lastMine: Bool
+    let lastRead: Bool
+    let typing: String?             // "typing", "voice", "video", … или nil
+    var muted = false
+    var mentions = 0                // непрочитанные «тэги» (@username) — вместо числа ставится значок @
+}
+
+struct ReplyRef: Equatable {
+    let id: String
+    let name: String
+    let text: String
+    let fromMe: Bool
+}
+
+/// Вложение сообщения: фото, видео, кружок, голосовое, файл или стикер
+struct ChatAttachment: Identifiable, Equatable {
+    enum Kind: String { case photo, video, circle, voice, file, sticker, audio }
+
+    let kind: Kind
+    var mediaID: String? = nil
+    var thumbID: String? = nil
+    var width = 0
+    var height = 0
+    var duration = 0.0
+    var size = 0
+    var name: String? = nil
+    var mime: String? = nil
+    var waveform: [Int] = []
+    var sticker: String? = nil
+    var title: String? = nil                // музыка: название и исполнитель из тегов
+    var artist: String? = nil
+    var localPreview: Data? = nil           // миниатюра, пока вложение загружается
+
+    var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? name ?? "local") }
+    var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
+
+    /// Для просмотрщика фото и видео
+    var mediaItem: MediaItem? {
+        guard let mediaID, kind == .photo || kind == .video else { return nil }
+        return MediaItem(id: mediaID, kind: kind == .photo ? .image : .video, width: width, height: height,
+                         duration: duration > 0 ? duration : nil, thumbID: thumbID)
+    }
+}
+
+struct MessageReaction: Equatable, Hashable {
+    let emoji: String
+    var count: Int
+    var mine: Bool
+}
+
+struct StoryReplyRef: Equatable {
+    var id: String
+    var mediaID: String
+    var isVideo: Bool
+}
+
+struct ForwardRef: Equatable {
+    var id: String?
+    var name: String
+    var postID: String?
+}
+
+struct PollVoter: Equatable, Identifiable {
+    var id: String
+    var name: String
+    var avatarID: String?
+    var at: Date
+}
+
+struct PollOption: Equatable, Identifiable {
+    var id: Int
+    var text: String
+    var votes: Int
+    var mine: Bool
+    var voters: [PollVoter]
+}
+
+struct PollInfo: Equatable {
+    var multiple: Bool
+    var anonymous: Bool
+    var closed: Bool
+    var total: Int
+    var options: [PollOption]
+    var mine: Bool          // я создатель
+}
+
+struct MessageInfo: Equatable {
+    struct Entry: Equatable, Identifiable {
+        var id: String { user.id + (emoji ?? "") }
+        var user: ChatPeer
+        var emoji: String?
+        var at: Date
+    }
+    var readers: [Entry]
+    var total: Int
+    var reactions: [Entry]
+    var sentAt: Date
+}
+
+struct ChatMessage: Identifiable, Equatable {
+    var key: String                 // устойчивый идентификатор для списка (не меняется при отправке)
+    var id: String
+    let mine: Bool
+    var text: String
+    var entities: [TextEntity]
+    let createdAt: Date
+    var editedAt: Date?
+    var read: Bool
+    var reply: ReplyRef?
+    var attachments: [ChatAttachment] = []
+    var isPending = false
+    var sender: ChatPeer? = nil     // в группах — кто написал
+    var views: Int? = nil           // в каналах — просмотры
+    var reactions: [MessageReaction] = []
+    var forwarded: ForwardRef? = nil
+    var system: String? = nil       // служебное сообщение в группе: left / joined / removed
+    var poll: PollInfo? = nil
+    var storyReply: StoryReplyRef? = nil
+    var comments: Int? = nil        // в канале с обсуждением — число комментариев
+
+    var summary: String {
+        if system != nil { return "" }
+        if poll != nil { return "📊 " + text }
+        if text.hasPrefix("\u{200B}call:") { return "Звонок" }
+        if !text.isEmpty { return text }
+        guard let first = attachments.first else { return "" }
+        switch first.kind {
+        case .photo: return "Фото"
+        case .video: return "Видео"
+        case .circle: return "Видеосообщение"
+        case .voice: return "Голосовое сообщение"
+        case .sticker: return "Стикер"
+        case .file: return first.name ?? "Файл"
+        case .audio: return first.title ?? first.name ?? "Музыка"
+        }
+    }
+}
+
+struct ChatThread {
+    var messages: [ChatMessage]
+    var peer: ChatPeer
+    var lastSeen: Date?
+    var typing: String?
+    var canWrite: Bool
+    var group: GroupInfo? = nil
+    var isContact = false
+    var realName: String? = nil
+    var pinned: [ChatMessage] = []
+    var firstUnread: String? = nil  // первое непрочитанное при входе — для плашки «Новые сообщения»
+    var isPreview = false           // открытый канал/группа просматривается без вступления
+}
+
+struct Sticker: Identifiable, Equatable, Hashable {
+    let id: String                  // "пак/имя"
+    let emoji: String
+    var url: URL? { ServerConfig.baseURL.flatMap { URL(string: $0.absoluteString + "/stickers/" + id + ".png") } }
+}
+
+struct StickerPack: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let icon: String
+    let stickers: [Sticker]
+}
+
+/// Что загрузить на сервер перед отправкой
+enum OutgoingMedia {
+    case prepared(PreparedMedia)                                  // фото или видео
+    case circle(url: URL, thumb: Data, duration: Double)
+    case voice(url: URL, duration: Double, waveform: [Int])
+    case file(url: URL, name: String, mime: String)
+    case audio(url: URL, name: String, title: String, artist: String, duration: Double, cover: Data?)
+    case sticker(String)
+}
+
+/// Загруженное вложение, готовое к отправке
+struct OutgoingAttachment {
+    let type: String
+    var mediaID: String? = nil
+    var name: String? = nil
+    var sticker: String? = nil
+    var waveform: [Int]? = nil
+    var title: String? = nil
+    var artist: String? = nil
+    var thumb: String? = nil
+
+    var json: [String: Any] {
+        var d: [String: Any] = ["type": type]
+        if let mediaID { d["media_id"] = mediaID }
+        if let name { d["name"] = name }
+        if let sticker { d["sticker"] = sticker }
+        if let waveform { d["waveform"] = waveform }
+        if let title { d["title"] = title }
+        if let artist { d["artist"] = artist }
+        if let thumb { d["thumb"] = thumb }
+        return d
+    }
+}
+
+protocol MessengerRepository: Sendable {
+    func chats() async throws -> (chats: [ChatSummary], unread: Int)
+    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread
+    func react(messageID: String, emoji: String?) async throws -> ChatMessage
+    func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
+    func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
+              replyTo: String?, silent: Bool) async throws -> ChatMessage
+    func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
+    func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage
+    func delete(messageID: String, forEveryone: Bool) async throws
+    func typing(peerID: String, action: String) async
+    func clear(peerID: String) async throws
+    func stickers() async throws -> [StickerPack]
+
+    // контакты
+    func contacts() async throws -> [Contact]
+    func saveContact(id: String, name: String) async throws -> Contact
+    func deleteContact(id: String) async throws
+
+    // группы
+    func createGroup(_ draft: GroupDraft, members: [String]) async throws -> GroupInfo
+    func group(id: String) async throws -> GroupInfo
+    func editGroup(id: String, patch: GroupPatch) async throws -> GroupInfo
+    func invite(groupID: String, userIDs: [String]) async throws -> GroupInfo
+    func removeMember(groupID: String, userID: String) async throws
+    func setRole(groupID: String, userID: String, role: String) async throws -> GroupInfo
+    func joinRequests(groupID: String) async throws -> [JoinRequest]
+    func answerRequest(groupID: String, userID: String, approve: Bool) async throws -> GroupInfo
+    func bannedUsers(groupID: String) async throws -> [GroupMember]
+    func unban(groupID: String, userID: String) async throws
+    func setMuted(groupID: String, muted: Bool) async throws
+    func deleteGroup(id: String) async throws
+    func comments(channelID: String, messageID: String) async throws -> CommentThread
+    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage
+
+    // импорт записной книги и уведомления «теперь в Orbita»
+    func importContacts(_ entries: [BookEntry]) async throws -> [ImportMatch]
+    func forgetImportedContacts() async throws
+    func notices() async throws -> [JoinNotice]
+    func dismissNotices(ids: [String]) async throws
+    func publicGroups(query: String, type: String?) async throws -> [GroupPreview]
+    func groupPreview(code: String) async throws -> GroupPreview
+    func joinGroup(code: String) async throws -> GroupInfo
+    func joinGroup(id: String) async throws -> GroupInfo
+
+    // музыка из переписки — в профиль
+    func addToProfile(messageID: String, mediaID: String, title: String, artist: String) async throws -> Track
+}
+
+extension MessengerRepository {
+    func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
+    func thread(peerID: String, limit: Int) async throws -> ChatThread { try await thread(peerID: peerID, limit: limit, peek: false) }
+
+    /// Обычное текстовое сообщение
+    func send(peerID: String, text: String, replyTo: String?) async throws -> ChatMessage {
+        try await send(peerID: peerID, text: text, entities: [], attachments: [], replyTo: replyTo, silent: false)
+    }
+}
+
+// MARK: - DTO
+
+private struct PeerDTO: Decodable {
+    let id: String
+    let name: String
+    let username: String?
+    let avatar: String?
+    let group: Bool?
+    let kind: String?
+    let members: Int?
+    let type: String?
+    let handle: String?
+    let noForward: Bool?
+    var model: ChatPeer {
+        ChatPeer(id: id, name: name, username: username, avatarID: avatar,
+                 isGroup: group ?? false, kind: kind, memberCount: members ?? 0,
+                 type: type, handle: handle, noForward: noForward ?? false)
+    }
+}
+
+private struct LastDTO: Decodable {
+    let text: String
+    let mine: Bool
+    let read: Bool
+    let createdAt: Double
+}
+
+private struct ChatDTO: Decodable {
+    let peer: PeerDTO
+    let unread: Int
+    let updatedAt: Double
+    let last: LastDTO
+    let typing: String?
+    let muted: Bool?
+    let mentions: Int?
+}
+
+private struct ChatListDTO: Decodable {
+    let chats: [ChatDTO]
+    let unread: Int
+}
+
+private struct ReplyDTO: Decodable {
+    let id: String
+    let fromMe: Bool
+    let name: String
+    let text: String
+}
+
+private struct AttachmentDTO: Decodable {
+    let type: String
+    let mediaId: String?
+    let thumb: String?
+    let width: Int?
+    let height: Int?
+    let duration: Double?
+    let size: Int?
+    let name: String?
+    let mime: String?
+    let waveform: [Int]?
+    let sticker: String?
+    let title: String?
+    let artist: String?
+
+    var model: ChatAttachment? {
+        guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
+        return ChatAttachment(kind: kind, mediaID: mediaId, thumbID: thumb, width: width ?? 0, height: height ?? 0,
+                              duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
+                              waveform: waveform ?? [], sticker: sticker, title: title, artist: artist)
+    }
+}
+
+private struct ReactionDTO: Decodable { let emoji: String; let count: Int; let mine: Bool }
+
+struct StoryReplyDTO: Decodable { let id: String; let mediaId: String; let kind: String }
+struct ForwardDTO: Decodable { let id: String?; let name: String; let post: String? }
+
+struct PollVoterDTO: Decodable {
+    let id: String; let name: String; let avatar: String?; let at: Double
+}
+struct PollOptionDTO: Decodable {
+    let idx: Int; let text: String; let votes: Int; let mine: Bool; let voters: [PollVoterDTO]?
+}
+struct PollDTO: Decodable {
+    let multiple: Bool; let anonymous: Bool; let closed: Bool; let total: Int
+    let options: [PollOptionDTO]; let mineCreated: Bool
+    var model: PollInfo {
+        PollInfo(multiple: multiple, anonymous: anonymous, closed: closed, total: total,
+                 options: options.map { o in
+                     PollOption(id: o.idx, text: o.text, votes: o.votes, mine: o.mine,
+                                voters: (o.voters ?? []).map { PollVoter(id: $0.id, name: $0.name, avatarID: $0.avatar, at: Date(timeIntervalSince1970: $0.at)) })
+                 }, mine: mineCreated)
+    }
+}
+
+struct InfoEntryDTO: Decodable {
+    let id: String; let name: String; let username: String?; let avatar: String?
+    let emoji: String?; let at: Double
+}
+struct MessageInfoDTO: Decodable {
+    let readers: [InfoEntryDTO]; let total: Int; let reactions: [InfoEntryDTO]; let sentAt: Double
+    var model: MessageInfo {
+        func map(_ e: InfoEntryDTO) -> MessageInfo.Entry {
+            MessageInfo.Entry(user: ChatPeer(id: e.id, name: e.name, username: e.username, avatarID: e.avatar),
+                              emoji: e.emoji, at: Date(timeIntervalSince1970: e.at))
+        }
+        return MessageInfo(readers: readers.map(map), total: total, reactions: reactions.map(map),
+                           sentAt: Date(timeIntervalSince1970: sentAt))
+    }
+}
+
+private struct MessageDTO: Decodable {
+    let id: String
+    let mine: Bool
+    let text: String
+    let entities: [TextEntity]
+    let createdAt: Double
+    let editedAt: Double?
+    let read: Bool
+    let reply: ReplyDTO?
+    let attachments: [AttachmentDTO]?
+    let sender: PeerDTO?
+    let views: Int?
+    let reactions: [ReactionDTO]?
+    let forwarded: ForwardDTO?
+    let system: String?
+    let poll: PollDTO?
+    let storyReply: StoryReplyDTO?
+    let comments: Int?
+
+    var model: ChatMessage {
+        ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
+                    createdAt: Date(timeIntervalSince1970: createdAt),
+                    editedAt: editedAt.map { Date(timeIntervalSince1970: $0) }, read: read,
+                    reply: reply.map { ReplyRef(id: $0.id, name: $0.name, text: $0.text, fromMe: $0.fromMe) },
+                    attachments: (attachments ?? []).compactMap(\.model), sender: sender?.model, views: views,
+                    reactions: (reactions ?? []).map { MessageReaction(emoji: $0.emoji, count: $0.count, mine: $0.mine) },
+                    forwarded: forwarded.map { ForwardRef(id: $0.id, name: $0.name, postID: $0.post) },
+                    system: system, poll: poll?.model,
+                    storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
+                    comments: comments)
+    }
+}
+
+private struct ThreadPeerDTO: Decodable {
+    let id: String
+    let name: String
+    let username: String?
+    let avatar: String?
+    let lastSeen: Double?
+    let group: Bool?
+    let kind: String?
+    let members: Int?
+    let type: String?
+    let handle: String?
+    let noForward: Bool?
+    let isContact: Bool?
+    let firstName: String?
+    let lastName: String?
+}
+
+private struct MemberDTO: Decodable {
+    let id: String
+    let name: String
+    let username: String?
+    let avatar: String?
+    let role: String
+    var model: GroupMember { GroupMember(id: id, name: name, username: username, avatarID: avatar, role: role) }
+}
+
+private struct DiscussionDTO: Decodable { let id: String; let name: String }
+private struct CommentThreadDTO: Decodable { let messages: [MessageDTO]; let canComment: Bool }
+
+private struct GroupDTO: Decodable {
+    let id: String
+    let name: String
+    let about: String
+    let kind: String
+    let members: [MemberDTO]
+    let myRole: String?
+    let code: String?
+    let type: String?
+    let handle: String?
+    let approve: Bool?
+    let noForward: Bool?
+    let slow: Int?
+    let whoWrites: String?
+    let history: Bool?
+    let count: Int?
+    let muted: Bool?
+    let canWrite: Bool?
+    let requests: Int?
+    let pending: Bool?
+    let discussion: DiscussionDTO?
+    var model: GroupInfo {
+        GroupInfo(id: id, name: name, about: about, kind: kind, members: members.map(\.model), myRole: myRole, code: code,
+                  type: type ?? "group", handle: handle, approve: approve ?? false, noForward: noForward ?? false,
+                  slow: slow ?? 0, whoWrites: whoWrites ?? "all", history: history ?? true, count: count ?? members.count,
+                  muted: muted ?? false, canWrite: canWrite ?? true, requests: requests ?? 0, pending: pending ?? false,
+                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) })
+    }
+}
+
+private struct JoinRequestDTO: Decodable {
+    let user: MemberDTOLite
+    let createdAt: Double
+}
+private struct MemberDTOLite: Decodable {
+    let id: String
+    let name: String
+    let username: String?
+    let avatar: String?
+    var model: GroupMember { GroupMember(id: id, name: name, username: username, avatarID: avatar, role: "member") }
+}
+private struct ImportMatchDTO: Decodable {
+    let user: MemberDTOLite
+    let bookName: String?
+    let inContacts: Bool?
+}
+private struct ImportDTO: Decodable { let matches: [ImportMatchDTO] }
+private struct NoticeDTO: Decodable {
+    let id: String
+    let name: String?
+    let createdAt: Double
+    let user: MemberDTOLite
+}
+private struct NoticeListDTO: Decodable { let notices: [NoticeDTO] }
+private struct JoinRequestListDTO: Decodable { let requests: [JoinRequestDTO] }
+private struct BanListDTO: Decodable { let users: [MemberDTOLite] }
+
+private struct GroupPreviewDTO: Decodable {
+    let id: String
+    let name: String
+    let about: String?
+    let kind: String?
+    let members: Int?
+    let joined: Bool?
+    let type: String?
+    let handle: String?
+    let approve: Bool?
+    let code: String?
+    let pending: Bool?
+    var model: GroupPreview {
+        GroupPreview(id: id, name: name, about: about ?? "", kind: kind ?? "closed", members: members ?? 0,
+                     joined: joined ?? false, type: type ?? "group", handle: handle, approve: approve ?? false,
+                     code: code, pending: pending ?? false)
+    }
+}
+
+private struct GroupPreviewListDTO: Decodable { let groups: [GroupPreviewDTO] }
+
+private struct ContactDTO: Decodable {
+    let id: String
+    let name: String
+    let realName: String
+    let username: String?
+    let avatar: String?
+    var model: Contact { Contact(id: id, name: name, realName: realName, username: username, avatarID: avatar) }
+}
+
+private struct ContactListDTO: Decodable { let contacts: [ContactDTO] }
+
+private struct ThreadDTO: Decodable {
+    let messages: [MessageDTO]
+    let peer: ThreadPeerDTO
+    let typing: String?
+    let canWrite: Bool
+    let group: GroupDTO?
+    let pinned: [MessageDTO]?
+    let preview: Bool?
+    let firstUnread: String?
+}
+
+private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
+
+private struct StickerDTO: Decodable { let id: String; let emoji: String }
+private struct PackDTO: Decodable { let id: String; let title: String; let icon: String; let stickers: [StickerDTO] }
+private struct PackListDTO: Decodable { let packs: [PackDTO] }
+private struct UploadedDTO: Decodable { let id: String }
+
+// MARK: - Реализация
+
+struct RemoteMessengerRepository: MessengerRepository {
+    let api: ServerAPI
+
+    func chats() async throws -> (chats: [ChatSummary], unread: Int) {
+        let data = try await api.request("GET", "/v1/chats")
+        let dto = try decodeAPI(ChatListDTO.self, from: data)
+        let list = dto.chats.map {
+            ChatSummary(peer: $0.peer.model, unread: $0.unread, updatedAt: Date(timeIntervalSince1970: $0.updatedAt),
+                        lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing, muted: $0.muted ?? false,
+                        mentions: $0.mentions ?? 0)
+        }
+        return (list, dto.unread)
+    }
+
+    func react(messageID: String, emoji: String?) async throws -> ChatMessage {
+        let body = ServerAPI.json(["emoji": emoji ?? ""] as [String: Any])
+        let data = try await api.request("PUT", "/v1/messages/\(messageID)/reaction", body: body)
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage] {
+        let body = ServerAPI.json(["pinned": pinned] as [String: Any])
+        let data = try await api.request("PUT", "/v1/messages/\(messageID)/pin", body: body)
+        return try decodeAPI(PinnedDTO.self, from: data).pinned.map(\.model)
+    }
+
+    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
+        var query = ["limit": String(limit)]
+        if peek { query["peek"] = "1" }
+        let data = try await api.request("GET", "/v1/chats/\(peerID)/messages", query: query)
+        let dto = try decodeAPI(ThreadDTO.self, from: data)
+        let peer = ChatPeer(id: dto.peer.id, name: dto.peer.name, username: dto.peer.username, avatarID: dto.peer.avatar,
+                            isGroup: dto.peer.group ?? false, kind: dto.peer.kind, memberCount: dto.peer.members ?? 0,
+                            type: dto.peer.type, handle: dto.peer.handle, noForward: dto.peer.noForward ?? false)
+        let real = [dto.peer.firstName, dto.peer.lastName].compactMap { $0 }.joined(separator: " ")
+        return ChatThread(messages: dto.messages.map(\.model), peer: peer,
+                          lastSeen: dto.peer.lastSeen.map { Date(timeIntervalSince1970: $0) },
+                          typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
+                          isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
+                          pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
+                          isPreview: dto.preview ?? false)
+    }
+
+    static func entityJSON(_ entities: [TextEntity]) -> [[String: Any]] {
+        entities.map { e in
+            var item: [String: Any] = ["type": e.type, "offset": e.offset, "length": e.length]
+            if let url = e.url { item["url"] = url }
+            return item
+        }
+    }
+
+    func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
+              replyTo: String?, silent: Bool) async throws -> ChatMessage {
+        var body: [String: Any] = ["text": text, "entities": Self.entityJSON(entities)]
+        if silent { body["silent"] = true }
+        if !attachments.isEmpty { body["attachments"] = attachments.map(\.json) }
+        if let replyTo { body["reply_to"] = replyTo }
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment {
+        switch media {
+        case .prepared(let prepared):
+            let item = try await RemoteFeedRepository(api: api).uploadMedia(prepared)
+            return OutgoingAttachment(type: prepared.isVideo ? "video" : "photo", mediaID: item.id)
+
+        case .circle(let url, let thumb, let duration):
+            let thumbData = try await api.upload("/v1/media", query: ["kind": "image", "w": "480", "h": "480"],
+                                                 payload: .data(thumb), contentType: "image/jpeg")
+            let thumbID = try decodeAPI(UploadedDTO.self, from: thumbData).id
+            let mime = url.pathExtension.lowercased() == "mov" ? "video/quicktime" : "video/mp4"
+            let data = try await api.upload("/v1/media", query: ["kind": "video", "w": "480", "h": "480",
+                                                                 "dur": String(duration), "thumb": thumbID],
+                                            payload: .file(url), contentType: mime)
+            return OutgoingAttachment(type: "circle", mediaID: try decodeAPI(UploadedDTO.self, from: data).id)
+
+        case .voice(let url, let duration, let waveform):
+            let data = try await api.upload("/v1/media", query: ["kind": "audio", "dur": String(duration)],
+                                            payload: .file(url), contentType: "audio/mp4")
+            return OutgoingAttachment(type: "voice", mediaID: try decodeAPI(UploadedDTO.self, from: data).id,
+                                      waveform: waveform)
+
+        case .file(let url, let name, let mime):
+            let data = try await api.upload("/v1/media", query: ["kind": "file"], payload: .file(url), contentType: mime)
+            return OutgoingAttachment(type: "file", mediaID: try decodeAPI(UploadedDTO.self, from: data).id, name: name)
+
+        case .audio(let url, let name, let title, let artist, let duration, let cover):
+            var coverID: String? = nil
+            if let cover {
+                let data = try await api.upload("/v1/media", query: ["kind": "image", "w": "600", "h": "600"],
+                                                payload: .data(cover), contentType: "image/jpeg")
+                coverID = try decodeAPI(UploadedDTO.self, from: data).id
+            }
+            let ext = url.pathExtension.lowercased()
+            let mime = ["m4a": "audio/mp4", "mp4": "audio/mp4", "aac": "audio/aac"][ext] ?? "audio/mpeg"
+            let data = try await api.upload("/v1/media", query: ["kind": "audio", "dur": String(duration)],
+                                            payload: .file(url), contentType: mime)
+            return OutgoingAttachment(type: "audio", mediaID: try decodeAPI(UploadedDTO.self, from: data).id, name: name,
+                                      title: title, artist: artist, thumb: coverID)
+
+        case .sticker(let id):
+            return OutgoingAttachment(type: "sticker", sticker: id)
+        }
+    }
+
+    func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage {
+        let body = ServerAPI.json(["text": text, "entities": Self.entityJSON(entities)] as [String: Any])
+        let data = try await api.request("PUT", "/v1/messages/\(messageID)", body: body)
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func delete(messageID: String, forEveryone: Bool) async throws {
+        _ = try await api.request("DELETE", "/v1/messages/\(messageID)", query: forEveryone ? ["all": "1"] : [:])
+    }
+
+    func typing(peerID: String, action: String) async {
+        _ = try? await api.request("POST", "/v1/chats/\(peerID)/typing", body: ServerAPI.json(["action": action]))
+    }
+
+    func clear(peerID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/chats/\(peerID)")
+    }
+
+    func stickers() async throws -> [StickerPack] {
+        let data = try await api.request("GET", "/v1/stickers")
+        return try decodeAPI(PackListDTO.self, from: data).packs.map { pack in
+            StickerPack(id: pack.id, title: pack.title, icon: pack.icon,
+                        stickers: pack.stickers.map { Sticker(id: $0.id, emoji: $0.emoji) })
+        }
+    }
+
+    // MARK: Контакты
+
+    func contacts() async throws -> [Contact] {
+        let data = try await api.request("GET", "/v1/contacts")
+        return try decodeAPI(ContactListDTO.self, from: data).contacts.map(\.model)
+    }
+
+    func saveContact(id: String, name: String) async throws -> Contact {
+        let data = try await api.request("PUT", "/v1/contacts/\(id)", body: ServerAPI.json(["name": name]))
+        return try decodeAPI(ContactDTO.self, from: data).model
+    }
+
+    func deleteContact(id: String) async throws {
+        _ = try await api.request("DELETE", "/v1/contacts/\(id)")
+    }
+
+    // MARK: Группы
+
+    private static func draftBody(_ d: GroupDraft) -> [String: Any] {
+        ["title": d.title, "about": d.about, "type": d.type, "kind": d.kind, "handle": d.handle, "approve": d.approve,
+         "no_forward": d.noForward, "slow": d.slow, "who_writes": d.whoWrites, "history": d.history]
+    }
+
+    func createGroup(_ draft: GroupDraft, members: [String]) async throws -> GroupInfo {
+        var body = Self.draftBody(draft)
+        body["members"] = members
+        return try decodeAPI(GroupDTO.self, from: try await api.request("POST", "/v1/groups", body: ServerAPI.json(body))).model
+    }
+
+    func group(id: String) async throws -> GroupInfo {
+        try decodeAPI(GroupDTO.self, from: try await api.request("GET", "/v1/groups/\(id)")).model
+    }
+
+    func editGroup(id: String, patch: GroupPatch) async throws -> GroupInfo {
+        var body: [String: Any] = [:]
+        if let v = patch.title { body["title"] = v }
+        if let v = patch.about { body["about"] = v }
+        if let v = patch.kind { body["kind"] = v }
+        if let v = patch.handle { body["handle"] = v }
+        if let v = patch.approve { body["approve"] = v }
+        if let v = patch.noForward { body["no_forward"] = v }
+        if let v = patch.slow { body["slow"] = v }
+        if let v = patch.whoWrites { body["who_writes"] = v }
+        if let v = patch.history { body["history"] = v }
+        if let v = patch.discussion { body["discussion"] = v }
+        return try decodeAPI(GroupDTO.self, from: try await api.request("PUT", "/v1/groups/\(id)", body: ServerAPI.json(body))).model
+    }
+
+    func comments(channelID: String, messageID: String) async throws -> CommentThread {
+        let data = try await api.request("GET", "/v1/groups/\(channelID)/comments/\(messageID)")
+        let dto = try decodeAPI(CommentThreadDTO.self, from: data)
+        return CommentThread(messages: dto.messages.map(\.model), canComment: dto.canComment)
+    }
+
+    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage {
+        let body = ServerAPI.json(["text": text, "entities": [Any]()] as [String: Any])
+        let data = try await api.request("POST", "/v1/groups/\(channelID)/comments/\(messageID)", body: body)
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func invite(groupID: String, userIDs: [String]) async throws -> GroupInfo {
+        let data = try await api.request("POST", "/v1/groups/\(groupID)/members", body: ServerAPI.json(["user_ids": userIDs]))
+        return try decodeAPI(GroupDTO.self, from: data).model
+    }
+
+    func removeMember(groupID: String, userID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/members/\(userID)")
+    }
+
+    func setRole(groupID: String, userID: String, role: String) async throws -> GroupInfo {
+        let data = try await api.request("PUT", "/v1/groups/\(groupID)/members/\(userID)", body: ServerAPI.json(["role": role]))
+        return try decodeAPI(GroupDTO.self, from: data).model
+    }
+
+    func joinRequests(groupID: String) async throws -> [JoinRequest] {
+        let data = try await api.request("GET", "/v1/groups/\(groupID)/requests")
+        return try decodeAPI(JoinRequestListDTO.self, from: data).requests.map {
+            JoinRequest(member: $0.user.model, createdAt: Date(timeIntervalSince1970: $0.createdAt))
+        }
+    }
+
+    func answerRequest(groupID: String, userID: String, approve: Bool) async throws -> GroupInfo {
+        let data = try await api.request("POST", "/v1/groups/\(groupID)/requests/\(userID)", body: ServerAPI.json(["approve": approve]))
+        return try decodeAPI(GroupDTO.self, from: data).model
+    }
+
+    func bannedUsers(groupID: String) async throws -> [GroupMember] {
+        try decodeAPI(BanListDTO.self, from: try await api.request("GET", "/v1/groups/\(groupID)/bans")).users.map(\.model)
+    }
+
+    func unban(groupID: String, userID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/bans/\(userID)")
+    }
+
+    func setMuted(groupID: String, muted: Bool) async throws {
+        _ = try await api.request("POST", "/v1/groups/\(groupID)/mute", body: ServerAPI.json(["muted": muted]))
+    }
+
+    func deleteGroup(id: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(id)")
+    }
+
+    func importContacts(_ entries: [BookEntry]) async throws -> [ImportMatch] {
+        let items = entries.map { ["name": $0.name, "phone": $0.phone] }
+        let data = try await api.request("POST", "/v1/import/contacts", body: ServerAPI.json(["contacts": items]))
+        return try decodeAPI(ImportDTO.self, from: data).matches.map {
+            ImportMatch(id: $0.user.id, name: $0.user.name, username: $0.user.username, avatarID: $0.user.avatar,
+                        bookName: $0.bookName ?? "", inContacts: $0.inContacts ?? false)
+        }
+    }
+
+    func forgetImportedContacts() async throws {
+        _ = try await api.request("DELETE", "/v1/import/contacts")
+    }
+
+    func notices() async throws -> [JoinNotice] {
+        let data = try await api.request("GET", "/v1/notices")
+        return try decodeAPI(NoticeListDTO.self, from: data).notices.map {
+            JoinNotice(id: $0.id, userID: $0.user.id, name: $0.name ?? $0.user.name, username: $0.user.username,
+                       avatarID: $0.user.avatar, createdAt: Date(timeIntervalSince1970: $0.createdAt))
+        }
+    }
+
+    func dismissNotices(ids: [String]) async throws {
+        _ = try await api.request("POST", "/v1/notices/dismiss", body: ServerAPI.json(["ids": ids]))
+    }
+
+    func publicGroups(query: String, type: String?) async throws -> [GroupPreview] {
+        var params: [String: String] = [:]
+        if !query.isEmpty { params["q"] = query }
+        if let type { params["type"] = type }
+        let data = try await api.request("GET", "/v1/groups/public", query: params)
+        return try decodeAPI(GroupPreviewListDTO.self, from: data).groups.map(\.model)
+    }
+
+    func groupPreview(code: String) async throws -> GroupPreview {
+        try decodeAPI(GroupPreviewDTO.self, from: try await api.request("GET", "/v1/groups/code/\(code)")).model
+    }
+
+    func joinGroup(code: String) async throws -> GroupInfo {
+        try decodeAPI(GroupDTO.self, from: try await api.request("POST", "/v1/groups/code/\(code)/join")).model
+    }
+
+    func joinGroup(id: String) async throws -> GroupInfo {
+        try decodeAPI(GroupDTO.self, from: try await api.request("POST", "/v1/groups/\(id)/join")).model
+    }
+
+    // MARK: Музыка из переписки
+
+    func addToProfile(messageID: String, mediaID: String, title: String, artist: String) async throws -> Track {
+        let body = ServerAPI.json(["message_id": messageID, "media_id": mediaID, "title": title, "artist": artist])
+        return try decodeAPI(TrackDTO.self, from: try await api.request("POST", "/v1/me/playlist/from-chat", body: body)).model
+    }
+}

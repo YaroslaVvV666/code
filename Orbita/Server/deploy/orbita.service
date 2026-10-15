@@ -1,0 +1,19 @@
+[Unit]
+Description=Orbita server
+After=network.target
+
+[Service]
+User=orbita
+WorkingDirectory=/opt/orbita/app
+Environment=ORBITA_HOST=127.0.0.1
+Environment=ORBITA_PORT=8080
+Environment=ORBITA_DATA=/var/lib/orbita
+Environment=ORBITA_MASTER_KEY_FILE=/etc/orbita.key
+Environment=ORBITA_DEMO=0
+ExecStart=/opt/orbita/venv/bin/python server.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

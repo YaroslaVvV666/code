@@ -1,0 +1,88 @@
+[
+ {
+  "id": "cosmos",
+  "title": "Космос",
+  "icon": "planet",
+  "stickers": [
+   {
+    "id": "planet",
+    "emoji": "🪐"
+   },
+   {
+    "id": "rocket",
+    "emoji": "🚀"
+   },
+   {
+    "id": "astro",
+    "emoji": "👨‍🚀"
+   },
+   {
+    "id": "star",
+    "emoji": "⭐"
+   },
+   {
+    "id": "moon",
+    "emoji": "🌙"
+   },
+   {
+    "id": "ufo",
+    "emoji": "🛸"
+   },
+   {
+    "id": "comet",
+    "emoji": "☄️"
+   },
+   {
+    "id": "earth",
+    "emoji": "🌍"
+   }
+  ]
+ },
+ {
+  "id": "mood",
+  "title": "Реакции",
+  "icon": "like",
+  "stickers": [
+   {
+    "id": "like",
+    "emoji": "👍"
+   },
+   {
+    "id": "heart",
+    "emoji": "❤️"
+   },
+   {
+    "id": "laugh",
+    "emoji": "😂"
+   },
+   {
+    "id": "cool",
+    "emoji": "😎"
+   },
+   {
+    "id": "sad",
+    "emoji": "😢"
+   },
+   {
+    "id": "love",
+    "emoji": "😍"
+   },
+   {
+    "id": "wow",
+    "emoji": "😮"
+   },
+   {
+    "id": "privet",
+    "emoji": "👋"
+   },
+   {
+    "id": "ok",
+    "emoji": "👌"
+   },
+   {
+    "id": "spasibo",
+    "emoji": "🙏"
+   }
+  ]
+ }
+]

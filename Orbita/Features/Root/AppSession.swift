@@ -1,0 +1,100 @@
+import SwiftUI
+import Combine
+
+enum ProfileRoute: Hashable {
+    case name, username, bio
+    case privacy, appearance, language, data, server, twoFA, devices
+    case wall, blacklist, loginEmail, style, interests
+    case visibility(String)
+}
+
+/// Всё, что живёт, пока пользователь вошёл: клиент сервера, лента, профиль
+@MainActor
+final class AppSession: ObservableObject {
+    @Published var profileRoute: ProfileRoute?
+    /// Просьба из любого экрана переключить вкладку (MainTabView её исполняет)
+    @Published var tabRequest: MainTab?
+    /// Двухфакторный экран открыт из «Конфиденциальности» — «назад» вернёт туда
+    var privacyOrigin = false
+
+    let feed: FeedViewModel
+    let taste: TasteTracker
+    let profile: ProfileStore
+    let devices: DevicesStore
+    let profileRepo: ProfileRepository
+    let feedRepo: FeedRepository
+    let socialRepo: SocialRepository
+    let messengerRepo: MessengerRepository
+    let extras: ExtrasAPI
+    let chats: ChatsModel
+    let player = AudioPlayer()
+    let calls: CallManager
+    let userID: String
+    /// Идентификатор в формате сервера (нижний регистр): им сравниваются «я» и чужие id
+    let serverID: String
+    private let api: ServerAPI
+
+    init(userID: String, userName: String) {
+        let api = ServerAPI(userID: userID, displayName: userName)
+        self.api = api
+        self.userID = userID
+        self.serverID = userID.lowercased()
+        profileRepo = RemoteProfileRepository(api: api)
+        feedRepo = RemoteFeedRepository(api: api)
+        socialRepo = RemoteSocialRepository(api: api)
+        messengerRepo = RemoteMessengerRepository(api: api)
+        extras = ExtrasAPI(api: api)
+        taste = TasteTracker(extras: extras)
+        chats = ChatsModel(repo: messengerRepo)
+        calls = CallManager(repo: CallRepository(api: api))
+        feed = FeedViewModel(repo: feedRepo)
+        profile = ProfileStore(repo: profileRepo)
+        devices = DevicesStore(repo: profileRepo)
+        let ex = extras
+        BookmarkStore.onChange = { id, saved in Task { await ex.setSaved(id: id, saved: saved) } }
+    }
+
+    /// Разовая выгрузка локальных закладок на сервер (идемпотентно)
+    func syncSaves() async { await extras.syncSaves(ids: BookmarkStore.shared.ids) }
+
+    /// Выход: завершаем этот сеанс на сервере
+    func signOutRemote() async {
+        if let token = await PushManager.shared.token {          // устройство больше не получает уведомления
+            _ = try? await api.request("DELETE", "/v1/me/push", body: ServerAPI.json(["token": token]))
+        }
+        await api.signOut()
+    }
+
+    /// Передаёт серверу токен устройства для push
+    func uploadPush(token: String) async {
+        _ = try? await api.request("PUT", "/v1/me/push",
+                                   body: ServerAPI.json(["token": token, "env": PushManager.environment]))
+    }
+
+    /// Интересы для ленты «Для вас»
+    func pushInterests(_ topics: [String]) async {
+        _ = try? await api.request("PUT", "/v1/me/interests", body: ServerAPI.json(["topics": topics]))
+        await feed.load()
+    }
+
+    /// При входе: локальный выбор уходит на сервер, а на новом устройстве подтягивается с сервера
+    func syncInterests() async {
+        if InterestsStore.hasAnswered(userID) {
+            _ = try? await api.request("PUT", "/v1/me/interests", body: ServerAPI.json(["topics": InterestsStore.load(userID)]))
+        } else if let data = try? await api.request("GET", "/v1/me/interests"),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["set"] as? Bool == true, let topics = obj["topics"] as? [String] {
+            InterestsStore.save(topics, user: userID)
+        }
+    }
+
+    /// После смены адреса сервера
+    func reloadAll() async {
+        await profile.load()
+        await feed.load()
+    }
+
+    func deleteRemoteAccount() async {
+        try? await profileRepo.deleteAccount()
+    }
+}
