@@ -9,11 +9,12 @@ struct RemoteImage: View {
     let id: String
     var fill = true
     var maxPixel: CGFloat = 1280
+    var backdrop = true                       // false — без подложки (вокруг вписанного фото виден фон снизу)
     @Environment(\.theme) private var theme
 
     var body: some View {
         ZStack {
-            theme.surface
+            if backdrop { theme.surface }
             CachedImage(url: ServerConfig.mediaURL(id), maxPixel: maxPixel) { image, failed in
                 if let image {
                     if fill { Image(uiImage: image).resizable().scaledToFill() }

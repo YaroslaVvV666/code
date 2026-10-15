@@ -229,33 +229,61 @@ struct ProfileView: View {
             .padding(.top, 8)
     }
 
-    /// Ник: едет вверх вместе со страницей, постепенно уменьшается и останавливается в панели.
-    /// Считается только от прокрутки (без замеров), тень появляется лишь когда ник уже встал на место.
+    /// Ник: едет со страницей, но не выше низа аватарки — пока она висит под островком, ник держится под ней;
+    /// аватарка втянулась — ник встаёт в панель между «Изм.» и QR. Всё считается от прокрутки, без замеров и теней.
     private var floatingName: some View {
-        let restY: CGFloat = 218                                   // где центр ника в покое (в координатах этого экрана)
-        let dockY: CGFloat = 29                                    // центр панели с кнопками «Изм.» и QR
-        // до `a` едет ровно со страницей (не наезжает на аватарку), потом плавно ускоряется
-        // и встаёт в панель к концу сворачивания — когда аватарка уже втянулась
-        let r: CGFloat = max(0, rawOffset)
-        let a: CGFloat = 50
-        let b: CGFloat = AvatarCollapse.travel * 0.96              // аватарка втянулась (goneAt) — ник на месте
-        let y: CGFloat = r <= a ? restY - r : (r >= b ? dockY : Self.nameGlide(t: (r - a) / (b - a), from: restY - a,
-                                                                                to: dockY, length: b - a))
-        let travel: CGFloat = min(1, max(0, (restY - y) / (restY - dockY)))
-        let scale: CGFloat = 1 + 0.53 * (1 - smooth(travel))      // 26 pt в шапке → 17 pt в панели
-        let ink = ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text)
-        let label = shownName.isEmpty ? s.you : shownName
+        let raw: CGFloat = rawOffset
+        let pull: CGFloat = pullAmount
+        let follow: Bool = !photos.isEmpty                          // аватарку с фото рисует collapsingAvatar
+        let ink: Color = ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text)
+        let label: String = shownName.isEmpty ? s.you : shownName
+        return ScreenSpace { screen, origin in
+            Self.nameLabel(label, ink: ink, raw: raw, pull: pull, origin: origin, screen: screen, follow: follow)
+        }
+        .opacity(pullStage == 0 ? 1 : 0)
+        .animation(.easeOut(duration: 0.2), value: pullStage)
+        .allowsHitTesting(false)
+    }
+
+    private static let nameRestY: CGFloat = 218                     // центр ника в покое (в координатах этого экрана)
+    private static let nameDockY: CGFloat = 29                      // центр панели с кнопками «Изм.» и QR
+
+    private static func nameLabel(_ label: String, ink: Color, raw: CGFloat, pull: CGFloat,
+                                  origin: CGPoint, screen: CGSize, follow: Bool) -> some View {
+        let y: CGFloat = nameCenter(raw: raw, pull: pull, origin: origin, screen: screen, follow: follow)
+        let travel: CGFloat = min(1, max(0, (nameRestY - y) / (nameRestY - nameDockY)))
+        let eased: CGFloat = AvatarCollapse.smooth(travel)
+        let scale: CGFloat = 1 + 0.53 * (1 - eased)                 // 26 pt в шапке → 17 pt в панели
         return Text(label)
             .font(.system(size: 17, weight: .bold))
             .foregroundStyle(ink)
             .lineLimit(1)
             .frame(maxWidth: 220)
             .scaleEffect(scale)
-            .frame(height: 32)
-            .padding(.top, y - 16)
-            .opacity(pullStage == 0 ? 1 : 0)
-            .animation(.easeOut(duration: 0.2), value: pullStage)
-            .allowsHitTesting(false)
+            .frame(width: screen.width, height: 32)
+            .position(x: screen.width / 2, y: origin.y + y)
+    }
+
+    /// Центр ника (в координатах экрана профиля)
+    private static func nameCenter(raw: CGFloat, pull: CGFloat, origin: CGPoint, screen: CGSize, follow: Bool) -> CGFloat {
+        // свободный путь: до `a` ровно со страницей (и вниз, когда тянут), потом плавно разгоняется к панели
+        let a: CGFloat = 50
+        let b: CGFloat = AvatarCollapse.travel * 0.96                // к этому моменту капля уже почти вся в островке
+        let free: CGFloat
+        if raw <= a {
+            free = nameRestY - raw
+        } else if raw >= b {
+            free = nameDockY
+        } else {
+            free = nameGlide(t: (raw - a) / (b - a), from: nameRestY - a, to: nameDockY, length: b - a)
+        }
+        guard follow else { return free }
+        // не выше низа аватарки: в покое ровно на своём месте, дальше — с запасом 24 pt до центра строки
+        let g = AvatarCollapse(raw: raw, restTop: origin.y + 82, screenWidth: screen.width, pull: pull)
+        let bottom: CGFloat = g.center.y + g.diameter / 2 - origin.y
+        let ease: CGFloat = 12 * (1 - AvatarCollapse.smooth(g.c / 0.15))   // в покое ограничение не трогает ник
+        let below: CGFloat = bottom + 24 - ease
+        return max(nameDockY, AvatarCollapse.smoothMax(free, below, k: 10))
     }
 
     /// Кривая Эрмита: стартует со скоростью страницы, к панели подходит медленнее (без рывка при остановке)
@@ -518,7 +546,8 @@ struct ProfileView: View {
                 }
             }
             // при раскрытой шапке под фото освобождается место, а содержимое плавно съезжает вниз
-            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - avatarTopRest + 4) : 112,
+            // (верх кружка в покое считаем из раскладки: замер внутри ScrollView приходит нулём — оставалась пустая полоса)
+            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - (TopInset.value + 82) + 4) : 112,
                    alignment: .top)
 
             if pullStage == 0 {

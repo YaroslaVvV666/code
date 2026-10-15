@@ -444,20 +444,27 @@ struct AvatarStage: View, Animatable {
         let shape = RoundedRectangle(cornerRadius: r, style: .continuous)
         return ZStack {
             Color.black
-            photoLayer
+            photoLayer(fit: AvatarCollapse.smooth(t2))
             chrome(w: w, h: h, ui: ui, t2: t2)
         }
         .frame(width: w, height: h)
         .clipShape(shape)
     }
 
+    /// fit: 0 — фото заполняет карточку (кружок, шапка), 1 — целиком по ширине экрана в своих пропорциях (как в просмотре)
     @ViewBuilder
-    private var photoLayer: some View {
+    private func photoLayer(fit: CGFloat) -> some View {
         if photos.indices.contains(page) {
-            RemoteImage(id: photos[page].mediaID)
-                .id(photos[page].id)
-                .transition(.asymmetric(insertion: .move(edge: forward ? .trailing : .leading),
-                                        removal: .move(edge: forward ? .leading : .trailing)))
+            let id: String = photos[page].mediaID
+            let filled: Double = Double(1 - AvatarCollapse.smooth((fit - 0.5) / 0.5))
+            let fitted: Double = Double(AvatarCollapse.smooth(fit / 0.6))
+            ZStack {
+                RemoteImage(id: id).opacity(filled)
+                RemoteImage(id: id, fill: false, backdrop: false).opacity(fitted)
+            }
+            .id(photos[page].id)
+            .transition(.asymmetric(insertion: .move(edge: forward ? .trailing : .leading),
+                                    removal: .move(edge: forward ? .leading : .trailing)))
         }
     }
 
@@ -556,8 +563,8 @@ struct AvatarCollapse {
     static let travel: CGFloat = 150          // столько прокрутки на всё сворачивание
     static let size: CGFloat = 112
     static let lift: CGFloat = 34             // аватарка едет чуть быстрее страницы (34·c²)
-    static let blackAt: CGFloat = 0.74        // к этому моменту фото полностью чёрное
-    static let goneAt: CGFloat = 0.94         // капля целиком в островке
+    static let blackAt: CGFloat = 0.68        // к этому моменту фото полностью чёрное
+    static let goneAt: CGFloat = 0.98         // капля целиком в островке
 
     let c: CGFloat
     let center: CGPoint
@@ -593,8 +600,8 @@ struct AvatarCollapse {
         let hangTop: CGFloat = ib - 2
         let top: CGFloat = Self.smoothMax(pageTop, hangTop, k: 24)
 
-        // размер: к моменту, когда стал чёрным, — 45 % от исходного; потом чуть набухает и втягивается
-        let shrunk: CGFloat = Self.size * grow * (1 - 0.55 * Self.smooth(c / Self.blackAt))
+        // размер: к моменту, когда стал чёрным, — 58 % от исходного; потом чуть набухает и втягивается
+        let shrunk: CGFloat = Self.size * grow * (1 - 0.42 * Self.smooth(c / Self.blackAt))
         let s: CGFloat = Self.clamp((c - Self.blackAt) / (Self.goneAt - Self.blackAt))
         let swell: CGFloat = shrunk * (1 + 0.1 * Self.smooth(s / 0.3))
         let d: CGFloat = swell + (8 - swell) * Self.smooth((s - 0.3) / 0.7)
