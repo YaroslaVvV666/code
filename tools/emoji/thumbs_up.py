@@ -1,4 +1,4 @@
-"""Наш 👍 для Orbita: объёмный кулак с поднятым большим пальцем.
+"""Наш 👍 для Orbita: объёмная жёлтая рука с поднятым большим пальцем.
 
 Анимация (2 с, цикл): замах назад, упругий «тык» вперёд с растяжением, палец
 пружинит с запаздыванием, вокруг вспыхивают звёздочки; во второй половине
@@ -55,6 +55,32 @@ def rc(cx, cy, w, h, r):
     return {"ty": "rc", "p": st([cx, cy]), "s": st([w, h]), "r": st(r), "d": 1}
 
 
+def bpath(pts, dx=0, dy=0, k=1.0, c=None):
+    """Гладкий замкнутый контур по точкам (x, y, гладкость); k — масштаб к центру c."""
+    if c is None:
+        c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+    P = [(c[0] + (x - c[0]) * k + dx, c[1] + (y - c[1]) * k + dy, sm) for x, y, sm in pts]
+    v, ii, oo = [], [], []
+    n = len(P)
+    for j in range(n):
+        x, y, sm = P[j]
+        px, py, _ = P[j - 1]
+        nx, ny, _ = P[(j + 1) % n]
+        tx, ty = (nx - px) * sm / 6, (ny - py) * sm / 6
+        v.append([round(x, 2), round(y, 2)])
+        oo.append([round(tx, 2), round(ty, 2)])
+        ii.append([round(-tx, 2), round(-ty, 2)])
+    return {"ty": "sh", "ks": st({"i": ii, "o": oo, "v": v, "c": True})}
+
+
+def puffy_path(nm, pts, top, bottom, shade, dx=-5, dy=-6, k=0.97, extra=()):
+    ys = [p[1] for p in pts]
+    gs = list(extra)
+    gs.append(group(nm, [bpath(pts, dx, dy, k), grad(top, bottom, (0, min(ys)), (0, max(ys)))]))
+    gs.append(group(nm + " shade", [bpath(pts), solid(shade)]))
+    return gs
+
+
 def group(nm, items):
     return {"ty": "gr", "nm": nm, "it": items + [tr()]}
 
@@ -83,10 +109,9 @@ def layer(ind, nm, shapes, ks=None, parent=None, ty=4):
     return l
 
 
-SKIN = ("#FFDD55", "#FFB320", "#E08A12")
-CUFF = ("#6B98FF", "#3E6BEA", "#2747B8")
+SKIN = ("#FFD84A", "#FFB21E", "#E38D14")
 
-WRIST = (176, 432)
+WRIST = (178, 470)
 hand_ks = {
     "a": st([*WRIST, 0]), "p": st([*WRIST, 0]),
     "r": anim1([(0, 0), (10, -14), (22, 10), (34, -5), (46, 2), (56, 0),
@@ -96,7 +121,7 @@ hand_ks = {
                 (98, (98, 103)), (108, (100, 100)), (120, (100, 100))]),
 }
 
-THUMB_BASE = (222, 236)
+THUMB_BASE = (214, 240)
 thumb_ks = {
     "a": st([*THUMB_BASE, 0]), "p": st([*THUMB_BASE, 0]),
     "r": anim1([(0, -6), (14, -14), (26, 6), (38, -11), (50, -4), (60, -6),
@@ -122,31 +147,39 @@ for i, (x, y, sz, col, t0) in enumerate(stars):
     }
     layers.append(layer(len(layers) + 1, f"Star {i + 1}", [group("Star", [star, solid(col)])], ks))
 
+# рука чуть меньше и по центру холста
+SC = 0.92
+hand_ks["p"] = st([WRIST[0] + 22, WRIST[1] - 12, 0])
+for kf in hand_ks["s"]["k"]:
+    kf["s"] = [kf["s"][0] * SC, kf["s"][1] * SC, 100]
 hand = len(layers) + 1
 layers.append(layer(hand, "Hand", None, hand_ks, ty=3))
 
-# Манжета
-layers.append(layer(len(layers) + 1, "Cuff",
-                    puffy("Cuff", 150, 330, 58, 206, 18, *CUFF, dx=-3, dy=-4,
-                          hl=(138, 300, 10, 120, 40)), parent=hand))
-
 # Четыре пальца, сложенные в кулак (сверху вниз)
 fingers = []
-for k, y in enumerate((252, 304, 356, 406)):
-    w = 138 - k * 8
-    hl = (262, y - 12, 34, 9, 55) if k == 0 else None
-    fingers += puffy(f"Finger {k + 1}", 312 - k * 3, y, w, 54, 27, *SKIN, hl=hl)
+for k, (y, right, h) in enumerate(((248, 382, 64), (300, 388, 62), (352, 380, 60), (400, 358, 54))):
+    w = right - 262
+    hl = (right - 54, y - 15, 32, 10, 55) if k == 0 else None
+    fingers += puffy(f"Finger {k + 1}", right - w / 2, y, w, h, h / 2, *SKIN, hl=hl)
 layers.append(layer(len(layers) + 1, "Fingers", fingers, parent=hand))
 
-# Ладонь
+# Ладонь, плавно переходящая в запястье
+PALM = [(172, 222, 0.8), (240, 208, 0.8), (300, 222, 0.8), (330, 300, 0.8), (326, 400, 0.8),
+        (290, 444, 0.8), (240, 470, 0.8), (190, 478, 0.8), (148, 464, 0.8), (132, 410, 0.8),
+        (140, 320, 0.8)]
 layers.append(layer(len(layers) + 1, "Palm",
-                    puffy("Palm", 252, 320, 196, 226, 58, *SKIN, dx=-6, dy=-7,
-                          hl=(186, 300, 14, 96, 45)), parent=hand))
+                    puffy_path("Palm", PALM, *SKIN, extra=[
+                        group("Palm highlight", [rc(166, 330, 14, 100, 7), solid("#FFFFFF", 45)])]),
+                    parent=hand))
 
-# Большой палец (за ладонью, своя пружинка вокруг основания)
+# Большой палец: толще у основания, чуть изогнут, с ногтем (за ладонью, своя пружинка)
+THUMB = [(170, 262, 0.6), (164, 180, 0.8), (172, 108, 0.8), (204, 62, 0.9), (246, 68, 0.9),
+         (266, 120, 0.8), (262, 190, 0.8), (264, 262, 0.6)]
 layers.append(layer(len(layers) + 1, "Thumb",
-                    puffy("Thumb", 220, 150, 98, 200, 49, *SKIN, dx=-5, dy=-6,
-                          hl=(196, 112, 16, 84, 60)),
+                    puffy_path("Thumb", THUMB, *SKIN, extra=[
+                        group("Thumb highlight", [rc(186, 128, 14, 76, 7), solid("#FFFFFF", 60)]),
+                        group("Nail", [{"ty": "el", "p": st([238, 96]), "s": st([34, 46]), "d": 1},
+                                       solid("#FFF1B8", 75)])]),
                     thumb_ks, parent=hand))
 
 anim = {"v": "5.12.2", "fr": FR, "ip": 0, "op": OP, "w": W, "h": H,
