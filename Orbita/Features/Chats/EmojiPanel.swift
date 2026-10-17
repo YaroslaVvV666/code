@@ -139,7 +139,7 @@ struct EmojiStickerPanel: View {
                             EmojiData.remember(emoji)
                             onEmoji(emoji)
                         } label: {
-                            // все эмодзи анимированные (Lottie); где анимации нет — обычный символ
+                            // наши анимированные эмодзи (Lottie); где своей анимации пока нет — обычный символ
                             LottieEmojiView(emoji: emoji, size: 36, loop: true)
                                 .frame(maxWidth: .infinity, minHeight: 40)
                         }

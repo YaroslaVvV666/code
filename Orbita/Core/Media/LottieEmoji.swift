@@ -3,59 +3,47 @@ import SwiftUI
 import Lottie
 #endif
 
-/// Анимированные эмодзи (Lottie) — как в Telegram: огонь горит, палец показывается, сердце бьётся.
-/// Анимации берутся из набора Noto Animated Emoji (Google, CC BY 4.0) при первом показе и кешируются на телефоне.
-/// Без пакета Lottie или без сети показывается обычный эмодзи — приложение работает и так.
+/// Анимированные эмодзи (Lottie) — только наши собственные, нарисованные для Orbita.
+/// Файлы лежат в приложении: DesignSystem/Emoji/emoji_<код>.json (🔥 → emoji_1f525.json).
+/// Генераторы анимаций — в tools/emoji. Для эмодзи без своей анимации показывается обычный символ,
+/// без пакета Lottie — тоже. Сеть не нужна.
 actor LottieEmojiStore {
     static let shared = LottieEmojiStore()
 
     private var memory: [String: Data] = [:]
     private var missing: Set<String> = []
-    private let dir: URL = {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("lottie-emoji", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base
-    }()
 
-    /// 🔥 → "1f525", ❤️ → "2764_fe0f"
-    static func code(_ emoji: String, keepVariation: Bool = true) -> String {
+    init() {
+        // Раньше анимации скачивались из чужого набора и кешировались — удаляем этот кеш
+        let old = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("lottie-emoji", isDirectory: true)
+        try? FileManager.default.removeItem(at: old)
+    }
+
+    /// 🔥 → "1f525", ❤️ → "2764" (селектор варианта FE0F не учитывается)
+    static func code(_ emoji: String) -> String {
         emoji.unicodeScalars
-            .filter { keepVariation || $0.value != 0xFE0F }
+            .filter { $0.value != 0xFE0F }
             .map { String($0.value, radix: 16) }
             .joined(separator: "_")
     }
 
-    private var inflight: [String: Task<Data?, Never>] = [:]
-
-    /// Одно и то же эмодзи в панели и в чате скачивается один раз, даже если его просят одновременно
-    func data(for emoji: String) async -> Data? {
-        if let task = inflight[emoji] { return await task.value }
-        let task = Task { await self.load(emoji) }
-        inflight[emoji] = task
-        let result = await task.value
-        inflight[emoji] = nil
-        return result
+    /// Есть ли у эмодзи своя анимация в приложении
+    nonisolated static func hasAnimation(_ emoji: String) -> Bool {
+        Bundle.main.url(forResource: "emoji_" + code(emoji), withExtension: "json") != nil
     }
 
-    private func load(_ emoji: String) async -> Data? {
-        for keep in [true, false] {
-            let code = Self.code(emoji, keepVariation: keep)
-            if let d = memory[code] { return d }
-            if missing.contains(code) { continue }
-            let file = dir.appendingPathComponent(code + ".json")
-            if let d = try? Data(contentsOf: file) { memory[code] = d; return d }
-            guard let url = URL(string: "https://fonts.gstatic.com/s/e/notoemoji/latest/\(code)/lottie.json") else { continue }
-            var request = URLRequest(url: url, timeoutInterval: 10)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            if let (d, response) = try? await URLSession.shared.data(for: request),
-               (response as? HTTPURLResponse)?.statusCode == 200, d.count > 100 {
-                try? d.write(to: file)
-                memory[code] = d
-                return d
-            }
+    func data(for emoji: String) async -> Data? {
+        let code = Self.code(emoji)
+        if let d = memory[code] { return d }
+        if missing.contains(code) { return nil }
+        guard let url = Bundle.main.url(forResource: "emoji_" + code, withExtension: "json"),
+              let d = try? Data(contentsOf: url) else {
             missing.insert(code)
+            return nil
         }
-        return nil
+        memory[code] = d
+        return d
     }
 }
 
