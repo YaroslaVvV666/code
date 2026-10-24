@@ -159,7 +159,12 @@ struct MessageActionOverlay: View {
         }
         .ignoresSafeArea()
         // размытый фон ловит все касания, в том числе пока меню плавно уходит: под ним ничего не нажимается
-        .onAppear { appear = true; MessageMenu.isOpen = true }
+        .onAppear {
+            MessageMenu.isOpen = true
+            // меню живёт в своём окне: команда «появиться» приходит ещё до первого кадра, и без задержки
+            // SwiftUI сразу рисовал конечное состояние — анимация появления пропадала. Запускаем со следующего кадра
+            DispatchQueue.main.async { appear = true }
+        }
         .onDisappear { MessageMenu.isOpen = false }
     }
 
@@ -300,7 +305,10 @@ private struct ReactionBarEmoji: View {
             .scaleEffect(popped ? 1 : 0.3)
             .opacity(popped ? 1 : 0)
             .onAppear {
-                withAnimation(.spring(response: 0.36, dampingFraction: 0.62).delay(delay)) { popped = true }
+                // со следующего кадра — иначе в отдельном окне меню «прыжок» не виден (см. MessageActionOverlay)
+                DispatchQueue.main.async {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.62).delay(delay)) { popped = true }
+                }
             }
             .task {
                 // играть начинает вместе с «прыжком» — анимация плавно разгоняется вместе с появлением

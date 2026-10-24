@@ -743,6 +743,8 @@ struct ChatScreen: View {
                     .environmentObject(session)
                     .environmentObject(flow)
                     .environmentObject(session.player)
+                    // без этого в отдельном окне scenePhase = «в фоне», и эмодзи в ряду реакций не играли
+                    .environment(\.scenePhase, scenePhase)
                     .preferredColorScheme(theme.dark ? .dark : .light)
                 }
             }
