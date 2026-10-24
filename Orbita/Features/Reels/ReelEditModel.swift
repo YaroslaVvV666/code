@@ -25,6 +25,12 @@ final class ReelEditModel: ObservableObject {
 
     @Published var filter: ReelFilter = .none { didSet { if oldValue != filter { applyComposition() } } }
     @Published var texts: [ReelText] = []
+    /// Положение и масштаб самого видео в кадре 9:16 (двигается и увеличивается пальцами)
+    @Published var zoom: Double = 1
+    @Published var offsetX: Double = 0
+    @Published var offsetY: Double = 0
+    var moved: Bool { abs(zoom - 1) > 0.01 || abs(offsetX) > 0.005 || abs(offsetY) > 0.005 }
+    func resetPlacement() { zoom = 1; offsetX = 0; offsetY = 0 }
     @Published var stickers: [ReelSticker] = []
 
     @Published private(set) var music: Track?
@@ -42,6 +48,9 @@ final class ReelEditModel: ObservableObject {
     let player = AVPlayer()
     private let musicPlayer = AVPlayer()
     private var fill = true
+    /// Пропорции исходного видео (ширина / высота) и режим «на весь кадр» — для рамки видео в редакторе
+    private(set) var videoAspect: Double = 9.0 / 16.0
+    var videoFills: Bool { fill }
     private var timeObserver: Any?
     private var endObservers: [NSObjectProtocol] = []
     private var rebuildTask: Task<Void, Never>?
@@ -55,7 +64,7 @@ final class ReelEditModel: ObservableObject {
     var hasEdits: Bool {
         guard kind == .video else { return true }
         return trimStart > 0.05 || trimEnd < baseDuration - 0.05 || filter != .none || !texts.isEmpty
-            || !stickers.isEmpty || music != nil || abs(originalVolume - 1) > 0.01
+            || !stickers.isEmpty || music != nil || abs(originalVolume - 1) > 0.01 || moved
     }
 
     init(video: URL) {
@@ -83,6 +92,7 @@ final class ReelEditModel: ObservableObject {
                let natural = try? await track.load(.naturalSize), let tf = try? await track.load(.preferredTransform) {
                 let r = CGRect(origin: .zero, size: natural).applying(tf)
                 let aspect = abs(r.width) / max(1, abs(r.height))
+                videoAspect = Double(aspect)
                 fill = aspect < 0.7        // вертикальное — на весь кадр; горизонтальное — с полосами
             }
             baseURL = url
@@ -247,7 +257,7 @@ final class ReelEditModel: ObservableObject {
         exporting = true
         exportProgress = 0
         defer { exporting = false }
-        let job = ReelRender.Job(baseURL: baseURL, fill: fill, trimStart: trimStart, trimEnd: trimEnd, filter: filter,
+        let job = ReelRender.Job(baseURL: baseURL, fill: fill, zoom: zoom, dx: offsetX, dy: offsetY, trimStart: trimStart, trimEnd: trimEnd, filter: filter,
                                  overlay: overlayImage(), musicFile: music == nil ? nil : musicFile, musicStart: musicStart,
                                  musicVolume: Float(musicVolume), originalVolume: Float(originalVolume))
         do {

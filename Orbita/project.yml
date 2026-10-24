@@ -24,8 +24,12 @@ targets:
     dependencies:
       - package: WebRTC
       - package: Lottie
+      - target: OrbitaBroadcast          # показ всего экрана и в фоне (Broadcast Upload Extension)
+    entitlements:
+      path: App/Orbita.entitlements
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: App/Orbita.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.example.orbita
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
@@ -48,3 +52,14 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: orbita
             CFBundleURLSchemes: [orbita]
+  OrbitaBroadcast:
+    type: app-extension
+    platform: iOS
+    sources: [Extension/Broadcast]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.orbita.broadcast     # = идентификатор приложения + «.broadcast»
+        INFOPLIST_FILE: Extension/Broadcast/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/Broadcast/Broadcast.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES

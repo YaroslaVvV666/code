@@ -162,6 +162,12 @@ struct ChatSummary: Identifiable, Equatable {
     let typing: String?             // "typing", "voice", "video", … или nil
     var muted = false
     var mentions = 0                // непрочитанные «тэги» (@username) — вместо числа ставится значок @
+    var lastThumb: LastThumb? = nil // миниатюра фото/видео из последнего сообщения
+}
+
+struct LastThumb: Equatable {
+    let kind: String                // photo, video, circle
+    let mediaID: String
 }
 
 struct ReplyRef: Equatable {
@@ -268,6 +274,7 @@ struct ChatMessage: Identifiable, Equatable {
     var reply: ReplyRef?
     var attachments: [ChatAttachment] = []
     var isPending = false
+    var failed = false              // отправка не прошла из-за сети: висит «Отправляется…» с красным значком, уйдёт сама
     var sender: ChatPeer? = nil     // в группах — кто написал
     var views: Int? = nil           // в каналах — просмотры
     var reactions: [MessageReaction] = []
@@ -397,6 +404,7 @@ protocol MessengerRepository: Sendable {
     func notices() async throws -> [JoinNotice]
     func dismissNotices(ids: [String]) async throws
     func publicGroups(query: String, type: String?) async throws -> [GroupPreview]
+    func searchMessages(query: String) async throws -> [MessageHit]
     func groupPreview(code: String) async throws -> GroupPreview
     func joinGroup(code: String) async throws -> GroupInfo
     func joinGroup(id: String) async throws -> GroupInfo
@@ -406,6 +414,8 @@ protocol MessengerRepository: Sendable {
 }
 
 extension MessengerRepository {
+    func searchMessages(query: String) async throws -> [MessageHit] { [] }
+
     func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
     func thread(peerID: String, limit: Int) async throws -> ChatThread { try await thread(peerID: peerID, limit: limit, peek: false) }
 
@@ -436,10 +446,12 @@ private struct PeerDTO: Decodable {
 }
 
 private struct LastDTO: Decodable {
+    struct Thumb: Decodable { let type: String; let media: String }
     let text: String
     let mine: Bool
     let read: Bool
     let createdAt: Double
+    let thumb: Thumb?
 }
 
 private struct ChatDTO: Decodable {
@@ -451,6 +463,16 @@ private struct ChatDTO: Decodable {
     let muted: Bool?
     let mentions: Int?
 }
+
+private struct MessageHitDTO: Decodable {
+    let id: String
+    let peer: PeerDTO
+    let text: String
+    let mine: Bool
+    let createdAt: Double
+}
+
+private struct MessageHitListDTO: Decodable { let hits: [MessageHitDTO] }
 
 private struct ChatListDTO: Decodable {
     let chats: [ChatDTO]
@@ -701,12 +723,12 @@ struct RemoteMessengerRepository: MessengerRepository {
     let api: ServerAPI
 
     func chats() async throws -> (chats: [ChatSummary], unread: Int) {
-        let data = try await api.request("GET", "/v1/chats")
+        let data = try await api.requestCached("/v1/chats")
         let dto = try decodeAPI(ChatListDTO.self, from: data)
         let list = dto.chats.map {
             ChatSummary(peer: $0.peer.model, unread: $0.unread, updatedAt: Date(timeIntervalSince1970: $0.updatedAt),
                         lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing, muted: $0.muted ?? false,
-                        mentions: $0.mentions ?? 0)
+                        mentions: $0.mentions ?? 0, lastThumb: $0.last.thumb.map { LastThumb(kind: $0.type, mediaID: $0.media) })
         }
         return (list, dto.unread)
     }
@@ -726,7 +748,9 @@ struct RemoteMessengerRepository: MessengerRepository {
     func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
-        let data = try await api.request("GET", "/v1/chats/\(peerID)/messages", query: query)
+        // быстрый просмотр (предзагрузка) и полная загрузка хранятся отдельно: короткая копия не затирает длинную
+        let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
+                                               slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
         let dto = try decodeAPI(ThreadDTO.self, from: data)
         let peer = ChatPeer(id: dto.peer.id, name: dto.peer.name, username: dto.peer.username, avatarID: dto.peer.avatar,
                             isGroup: dto.peer.group ?? false, kind: dto.peer.kind, memberCount: dto.peer.members ?? 0,
@@ -962,6 +986,14 @@ struct RemoteMessengerRepository: MessengerRepository {
         if let type { params["type"] = type }
         let data = try await api.request("GET", "/v1/groups/public", query: params)
         return try decodeAPI(GroupPreviewListDTO.self, from: data).groups.map(\.model)
+    }
+
+    func searchMessages(query: String) async throws -> [MessageHit] {
+        let data = try await api.request("GET", "/v1/search/messages", query: ["q": query])
+        return try decodeAPI(MessageHitListDTO.self, from: data).hits.map {
+            MessageHit(id: $0.id, peer: $0.peer.model, text: $0.text, mine: $0.mine,
+                       date: Date(timeIntervalSince1970: $0.createdAt))
+        }
     }
 
     func groupPreview(code: String) async throws -> GroupPreview {

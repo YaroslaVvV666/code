@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import UIKit
+import ContactsUI
 
 // MARK: - Кодек: текст + сущности <-> NSAttributedString
 
@@ -68,6 +69,20 @@ enum RichTextCodec {
             for match in regex.matches(in: text, range: NSRange(location: 0, length: length)) {
                 guard let url = URL(string: (text as NSString).substring(with: match.range)),
                       result.attribute(.link, at: match.range.location, effectiveRange: nil) == nil else { continue }
+                result.addAttributes([.link: url, .foregroundColor: linkColor,
+                                      .underlineStyle: NSUnderlineStyle.single.rawValue], range: match.range)
+            }
+        }
+        // номера телефонов: +7981…, 8981…, 8 981 799 02 69, 8-981-799-02-69
+        if let regex = try? NSRegularExpression(pattern: "(?<![\\w+])\\+?\\d(?:[\\s\\-().]?\\d){8,14}(?![\\w])") {
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: length)) {
+                let raw = (text as NSString).substring(with: match.range)
+                let digits = raw.filter(\.isNumber)
+                let plus = raw.hasPrefix("+")
+                let ok = plus ? (10...15).contains(digits.count)
+                              : (digits.count == 11 && (digits.hasPrefix("7") || digits.hasPrefix("8"))) || (digits.count == 10 && digits.hasPrefix("9"))
+                guard ok, result.attribute(.link, at: match.range.location, effectiveRange: nil) == nil,
+                      let url = URL(string: "orbita://phone/" + (plus ? "%2B" : "") + digits) else { continue }
                 result.addAttributes([.link: url, .foregroundColor: linkColor,
                                       .underlineStyle: NSUnderlineStyle.single.rawValue], range: match.range)
             }
@@ -716,5 +731,109 @@ struct FormattingTextView: UIViewRepresentable {
 
         func textViewDidChange(_ tv: UITextView) { controller.refresh() }
         func textViewDidChangeSelection(_ tv: UITextView) { controller.refresh() }
+    }
+}
+
+
+// MARK: - Номер телефона в сообщении: добавить контакт, позвонить, скопировать, перейти в профиль
+
+struct PhoneLookupSheet: View {
+    let phone: String
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var found: UserProfile?
+    @State private var loaded = false
+    @State private var addContact = false
+    @State private var showProfile = false
+    @State private var copied = false
+
+    private var s: Strings { Strings(lang: lang) }
+    private var display: String { phone }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(display)
+                .font(.system(size: 22, weight: .semibold).monospacedDigit())
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 14)
+            VStack(spacing: 0) {
+                row("person.crop.circle.badge.plus", s.t("Добавить контакт", "Add contact")) { addContact = true }
+                divider
+                row("phone", s.t("Позвонить по телефону", "Call")) {
+                    if let url = URL(string: "tel:" + phone.replacingOccurrences(of: "+", with: "%2B")) { UIApplication.shared.open(url) }
+                }
+                row("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать номер", "Copy number")) {
+                    UIPasteboard.general.string = phone
+                    copied = true
+                    Haptics.notify(.success)
+                }
+                if let p = found {
+                    divider
+                    Button { showProfile = true } label: {
+                        HStack(spacing: 14) {
+                            AvatarView(name: p.name, size: 38, avatarID: p.avatarID)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(p.contactName ?? p.name).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                                Text(s.t("Перейти в профиль", "Go to profile")).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                        }
+                        .padding(.horizontal, 22).padding(.vertical, 12).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                } else if !loaded {
+                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 14)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.sheet.ignoresSafeArea())
+        .presentationDetents([.height(found == nil ? 280 : 360)])
+        .presentationDragIndicator(.visible)
+        .task {
+            found = try? await session.profileRepo.lookup(phone: phone)
+            loaded = true
+        }
+        .sheet(isPresented: $addContact) { NewContactView(phone: phone).ignoresSafeArea() }
+        .fullScreenCover(isPresented: $showProfile) {
+            if let p = found { PublicProfileSheet(source: .id(p.id)) }
+        }
+    }
+
+    private var divider: some View { Rectangle().fill(theme.textSecondary.opacity(0.15)).frame(height: 0.5).padding(.leading, 22) }
+
+    private func row(_ icon: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon).font(.system(size: 20)).frame(width: 30).foregroundStyle(theme.text)
+                Text(title).font(.system(size: 18)).foregroundStyle(theme.text)
+                Spacer()
+            }
+            .padding(.horizontal, 22).padding(.vertical, 13).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Системный экран «Новый контакт» с уже подставленным номером (разрешение на контакты не нужно)
+struct NewContactView: UIViewControllerRepresentable {
+    let phone: String
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let contact = CNMutableContact()
+        contact.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: phone))]
+        let vc = CNContactViewController(forNewContact: contact)
+        vc.delegate = context.coordinator
+        return UINavigationController(rootViewController: vc)
+    }
+    func updateUIViewController(_ vc: UINavigationController, context: Context) {}
+    func makeCoordinator() -> Coord { Coord() }
+    final class Coord: NSObject, CNContactViewControllerDelegate {
+        func contactViewController(_ vc: CNContactViewController, didCompleteWith contact: CNContact?) {
+            vc.presentingViewController?.dismiss(animated: true) ?? vc.navigationController?.presentingViewController?.dismiss(animated: true)
+        }
     }
 }

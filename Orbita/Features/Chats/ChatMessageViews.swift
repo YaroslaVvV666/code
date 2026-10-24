@@ -38,7 +38,15 @@ struct MessageMeta: View {
             Text(ChatTime.clock(message.createdAt)).font(.system(size: 11))
             if message.mine {
                 if message.isPending {
+                    if message.failed {
+                        Text(Strings(lang: lang).t("Отправляется…", "Sending…")).font(.system(size: 11))
+                    }
                     SendingIndicator(color: color)
+                    if message.failed {
+                        // нет связи: сообщение уйдёт само, когда она появится
+                        Image(systemName: "exclamationmark.circle.fill").font(.system(size: 14))
+                            .symbolRenderingMode(.palette).foregroundStyle(.white, Color(red: 1, green: 0.23, blue: 0.19))
+                    }
                 } else {
                     Ticks(read: message.read, color: color)
                 }
@@ -65,6 +73,8 @@ struct MessageRow: View {
     var onPlayAudio: (ChatAttachment) -> Void = { _ in }
     var showSender = false
     var noForward = false
+    var onReactionInfo: (() -> Void)? = nil
+    var onJumpToReply: ((String) -> Void)? = nil     // нажали на цитату — перейти к исходному сообщению
     var onReact: ((String) -> Void)? = nil          // двойной тап и нажатие на «чип» реакции
     var onLongPress: (() -> Void)? = nil            // зажатие — реакции и меню
     var interactive = true
@@ -74,10 +84,12 @@ struct MessageRow: View {
     var onOpenStory: ((String) -> Void)? = nil
     var onPollChanged: ((PollInfo) -> Void)? = nil
     var onOpenComments: (() -> Void)? = nil          // канал с обсуждением: «Комментарии»
+    var onCallBack: ((Bool) -> Void)? = nil          // нажали на запись о звонке — перезвонить (true — видео)
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var dragX: CGFloat = 0
+    @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
 
     private var s: Strings { Strings(lang: lang) }
     private var colors: ChatColors { ChatColors(theme: theme) }
@@ -158,9 +170,14 @@ struct MessageRow: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             if interactive, !message.isPending { onReact?("\u{2764}\u{FE0F}") }
         })
-        .simultaneousGesture(LongPressGesture(minimumDuration: 0.32).onEnded { _ in
-            if interactive, !message.isPending, let onLongPress { Haptics.impact(.medium); onLongPress() }
-        })
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .onEnded { _ in
+                if interactive, !message.isPending, let onLongPress {
+                    longFired = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { longFired = false }
+                    Haptics.impact(.medium); onLongPress()
+                }
+            })
         .simultaneousGesture(
             DragGesture(minimumDistance: 18)
                 .onChanged { value in
@@ -217,6 +234,12 @@ struct MessageRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture {
+            guard interactive, let onCallBack else { return }
+            Haptics.impact(.medium)
+            onCallBack(info.video)
+        }
     }
 
     private var reactionChips: some View {
@@ -239,6 +262,9 @@ struct MessageRow: View {
                     })
                 }
                 .buttonStyle(.plain)
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                    if interactive { Haptics.impact(.medium); onReactionInfo?() }
+                })
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -292,13 +318,23 @@ struct MessageRow: View {
             && message.attachments[0].kind == .voice
     }
 
+    /// Один файл или трек без текста: время кладётся в угол блока, без отдельной строки снизу
+    private var fileOnly: Bool {
+        !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
+            && (message.attachments[0].kind == .file || message.attachments[0].kind == .audio)
+    }
+
     private var bubble: some View {
         let textColor = mine ? colors.outgoingText : colors.incomingText
         let secondary = mine ? colors.outgoingSecondary : colors.incomingSecondary
         // место под время/галочки/просмотры: оценка ширины в «узких пробелах» (по 8 пт), чтобы не оставалось лишнего отступа
         let metaWidth: CGFloat = 32 + (mine ? 16 : 0) + (message.editedAt != nil ? 44 : 0)
-            + (message.views.map { 6 + CGFloat($0 >= 1000 ? 4 : String($0).count) * 5 } ?? 0) + 10
-        let filler = String(repeating: "\u{2002}", count: Int((metaWidth / 8).rounded(.up)))
+            + (message.views.map { v -> CGFloat in
+                // глаз + число + «·» + три зазора; число считаем так же, как рисует MessageMeta
+                let text = v >= 1000 ? String(format: "%.1fK", Double(v) / 1000) : "\(v)"
+                return 30 + CGFloat(text.count) * 6.8
+            } ?? 0) + 12
+        let filler = String(repeating: "\u{2007}", count: Int((metaWidth / 8.5).rounded(.up)))  // неразрывные: хвост не «висит» и время не наезжает на последнюю строку
 
         return VStack(alignment: .leading, spacing: 0) {
             if showSender, !mine, isFirst, let sender = message.sender {
@@ -310,7 +346,7 @@ struct MessageRow: View {
                     .padding(.top, 6)
                     .onTapGesture { onOpenProfile?(sender.id) }
             }
-            if let fwd = message.forwarded {
+            if let fwd = message.forwarded, !fwd.name.isEmpty {
                 Button {
                     if let post = fwd.postID { onOpenPost?(post) } else if let id = fwd.id { onOpenProfile?(id) }
                 } label: {
@@ -360,6 +396,8 @@ struct MessageRow: View {
             }
             if let reply = message.reply {
                 ReplyQuote(reply: reply, mine: mine)
+                    .contentShape(Rectangle())
+                    .onTapGesture { Haptics.impact(.light); onJumpToReply?(reply.id) }
                     .padding(.horizontal, 10)
                     .padding(.top, 7)
                     .padding(.bottom, 2)
@@ -375,6 +413,11 @@ struct MessageRow: View {
 
             if !mediaItems.isEmpty {
                 MediaBlock(items: mediaItems, pending: message.isPending) { index in
+                    // присланный шортс: нажатие открывает ленту шортсов на этом видео (как в TikTok)
+                    if longFired { return }
+                    if let pid = message.forwarded?.postID, mediaItems.first?.mediaItem?.kind == .video, let open = onOpenPost {
+                        open(pid); return
+                    }
                     let items = mediaItems.compactMap(\.mediaItem)
                     if !items.isEmpty { onOpenMedia(items, min(index, items.count - 1)) }
                 }
@@ -389,12 +432,12 @@ struct MessageRow: View {
                 Group {
                     switch a.kind {
                     case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
-                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { onPlayAudio(a) }
+                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { if !longFired { onPlayAudio(a) } }
                     case .file:
                         if a.isMusic {
-                            AudioBlock(attachment: a, mine: mine) { onPlayAudio(a) }
+                            AudioBlock(attachment: a, mine: mine) { if !longFired { onPlayAudio(a) } }
                         } else {
-                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { onOpenFile(a) }
+                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !longFired { onOpenFile(a) } }
                         }
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
                     default: StickerImage(sticker: Sticker(id: a.sticker ?? "", emoji: ""), size: 120)
@@ -402,10 +445,12 @@ struct MessageRow: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
-                .padding(.bottom, hasText ? 0 : 6)
+                .padding(.bottom, hasText ? 0 : (fileOnly ? 4 : 6))
                 .overlay(alignment: .bottomTrailing) {
                     if voiceOnly && a.kind == .voice {
                         MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 6)
+                    } else if fileOnly {
+                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 8)
                     }
                 }
             }
@@ -419,10 +464,14 @@ struct MessageRow: View {
                     .overlay(alignment: .bottomTrailing) {
                         MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 5)
                     }
-            } else if !onlyMedia && message.poll == nil && !voiceOnly {
+            } else if !onlyMedia && message.poll == nil && !voiceOnly && !fileOnly {
                 HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
                     .padding(.horizontal, 11)
                     .padding(.bottom, 5)
+            }
+
+            if hasText, message.poll == nil, mediaItems.isEmpty, let link = LinkPreviewCard.firstURL(in: message.text) {
+                LinkPreviewCard(url: link, mine: mine)
             }
 
             if let n = message.comments, !message.isPending, let open = onOpenComments {
@@ -512,51 +561,112 @@ struct MediaBlock: View {
     var pending = false
     let onOpen: (Int) -> Void
 
-    private let width: CGFloat = 262
+    /// Ширина альбома — как у Telegram, около трёх четвертей экрана
+    private var width: CGFloat { min(300, UIScreen.main.bounds.width * 0.76) }
     private let gap: CGFloat = 2
     @AppStorage("autoplay") private var autoplay = true
     @State private var frames = FrameBoxes()
+
+    private func asp(_ i: Int) -> CGFloat {
+        let a = CGFloat(items[i].aspect)
+        return a > 0 ? min(1.8, max(0.55, a)) : 1
+    }
+
+    /// Разбивка на ряды после первых «больших» ячеек: по три в ряд, без одиноких хвостов
+    private func rows(_ ids: [Int]) -> [[Int]] {
+        var out: [[Int]] = []
+        var rest = ids
+        while !rest.isEmpty {
+            if rest.count == 4 { out.append(Array(rest.prefix(2))); out.append(Array(rest.suffix(2))); break }
+            let n = min(3, rest.count)
+            out.append(Array(rest.prefix(n)))
+            rest.removeFirst(n)
+        }
+        return out
+    }
+
+    private func more(_ i: Int, last: Bool) -> some View {
+        cell(items[i], index: i)
+            .overlay {
+                if last, items.count > 10 {
+                    Color.black.opacity(0.5)
+                    Text("+\(items.count - 10)").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
+                }
+            }
+    }
+
+    private func rowView(_ ids: [Int], height: CGFloat? = nil) -> some View {
+        let w = (width - gap * CGFloat(ids.count - 1)) / CGFloat(ids.count)
+        let h = height ?? w * (ids.count == 1 ? 0.7 : (ids.count == 2 ? 0.9 : 1))
+        return HStack(spacing: gap) {
+            ForEach(ids, id: \.self) { i in
+                more(i, last: i == 9).frame(width: w, height: h)
+            }
+        }
+    }
 
     var body: some View {
         Group {
             switch items.count {
             case 1:
-                let a = items[0]
-                let aspect = min(1.5, max(0.65, a.aspect))
-                cell(a, index: 0).frame(width: width, height: width / aspect)
+                let aspect = min(1.5, max(0.65, CGFloat(items[0].aspect)))
+                cell(items[0], index: 0).frame(width: width, height: width / aspect)
             case 2:
-                HStack(spacing: gap) {
-                    cell(items[0], index: 0).frame(width: (width - gap) / 2, height: 190)
-                    cell(items[1], index: 1).frame(width: (width - gap) / 2, height: 190)
+                if asp(0) > 1.25 && asp(1) > 1.25 {
+                    // две горизонтальные — друг под другом
+                    VStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: width, height: min(width * 0.72, width / asp(0)))
+                        cell(items[1], index: 1).frame(width: width, height: min(width * 0.72, width / asp(1)))
+                    }
+                } else {
+                    let w = (width - gap) / 2
+                    let h = w / min(1.0, max(0.62, (asp(0) + asp(1)) / 2))
+                    HStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: w, height: h)
+                        cell(items[1], index: 1).frame(width: w, height: h)
+                    }
                 }
             case 3:
-                VStack(spacing: gap) {
-                    cell(items[0], index: 0).frame(width: width, height: 170)
+                if asp(0) >= 0.95 {
+                    VStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: width, height: min(width * 0.78, width / min(1.6, asp(0))))
+                        let w = (width - gap) / 2
+                        let h = w / min(1.2, max(0.8, (asp(1) + asp(2)) / 2))
+                        HStack(spacing: gap) {
+                            cell(items[1], index: 1).frame(width: w, height: h)
+                            cell(items[2], index: 2).frame(width: w, height: h)
+                        }
+                    }
+                } else {
+                    // вертикальное первое: слева большое, справа два друг под другом
+                    let total = width * 1.15
+                    let left = width * 0.64
+                    let right = width - left - gap
                     HStack(spacing: gap) {
-                        cell(items[1], index: 1).frame(width: (width - gap) / 2, height: 126)
-                        cell(items[2], index: 2).frame(width: (width - gap) / 2, height: 126)
+                        cell(items[0], index: 0).frame(width: left, height: total)
+                        VStack(spacing: gap) {
+                            cell(items[1], index: 1).frame(width: right, height: (total - gap) / 2)
+                            cell(items[2], index: 2).frame(width: right, height: (total - gap) / 2)
+                        }
                     }
                 }
             default:
-                let side = (width - gap) / 2
+                let shown = Array(0..<min(items.count, 10))
                 VStack(spacing: gap) {
-                    HStack(spacing: gap) {
-                        cell(items[0], index: 0).frame(width: side, height: side)
-                        cell(items[1], index: 1).frame(width: side, height: side)
-                    }
-                    HStack(spacing: gap) {
-                        cell(items[2], index: 2).frame(width: side, height: side)
-                        cell(items[3], index: 3).frame(width: side, height: side)
-                            .overlay {
-                                if items.count > 4 {
-                                    Color.black.opacity(0.5)
-                                    Text("+\(items.count - 4)").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
-                                }
-                            }
+                    if items.count == 4 {
+                        // одна большая сверху, три маленьких под ней
+                        cell(items[0], index: 0).frame(width: width, height: width / min(1.5, max(1.0, asp(0))))
+                        rowView([1, 2, 3])
+                    } else {
+                        rowView([0, 1], height: (width - gap) / 2 * 1.05)
+                        ForEach(Array(rows(Array(shown.dropFirst(2))).enumerated()), id: \.offset) { _, ids in
+                            rowView(ids)
+                        }
                     }
                 }
             }
         }
+        .clipped()          // картинка не должна вылезать за свой кадр и налезать на подпись под ней
     }
 
     private func cell(_ a: ChatAttachment, index: Int) -> some View {
@@ -751,47 +861,74 @@ struct FileBlock: View {
     @ObservedObject private var downloads = DownloadCenter.shared
     private var dl: Double? { attachment.mediaID.flatMap { downloads.progress[$0] } }
 
+    /// «7,2 Кб», «1,4 Мб» — как в Telegram
     private var sizeText: String {
-        attachment.size > 0 ? ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file) : ""
+        let n = Double(attachment.size)
+        guard n > 0 else { return "" }
+        func f(_ v: Double, _ unit: String) -> String {
+            let r = (v * 10).rounded() / 10
+            let t = r == r.rounded() ? String(Int(r)) : String(format: "%.1f", r).replacingOccurrences(of: ".", with: ",")
+            return t + " " + unit
+        }
+        if n < 1024 { return "\(Int(n)) Б" }
+        if n < 1024 * 1024 { return f(n / 1024, "Кб") }
+        if n < 1024 * 1024 * 1024 { return f(n / 1024 / 1024, "Мб") }
+        return f(n / 1024 / 1024 / 1024, "Гб")
     }
+
+    private var ext: String {
+        let name = attachment.name ?? ""
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
+        let e = String(name[name.index(after: dot)...])
+        return e.count <= 5 ? e.uppercased() : ""
+    }
+
+    private var fg: Color { mine ? Color.white : theme.text }
+    private var sub: Color { mine ? Color.white.opacity(0.72) : theme.textTertiary }
+    private var disc: Color { mine ? Color.white : theme.accentColor }
+    private var onDisc: Color { mine ? theme.accentColor : Color.white }
 
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 11) {
+            HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(mine ? Color.white : theme.accentColor)
+                    Circle().fill(disc)
                     if pending {
-                        TransferRing(progress: nil, icon: "arrow.up", size: 42, tint: mine ? theme.accentColor : .white,
-                                     track: (mine ? theme.accentColor : Color.white).opacity(0.25))
+                        TransferRing(progress: nil, icon: "arrow.up", size: 52, tint: onDisc, track: onDisc.opacity(0.25))
                     } else if let p = dl {
-                        TransferRing(progress: p, icon: "xmark", size: 42, tint: mine ? theme.accentColor : .white,
-                                     track: (mine ? theme.accentColor : Color.white).opacity(0.25))
+                        TransferRing(progress: p, icon: "xmark", size: 52, tint: onDisc, track: onDisc.opacity(0.25))
                     } else {
-                        Image(systemName: "doc.fill").font(.system(size: 19))
-                            .foregroundStyle(mine ? theme.accentColor : Color.white)
+                        Image(systemName: "doc.fill").font(.system(size: 23, weight: .regular))
+                            .foregroundStyle(onDisc)
                     }
                 }
-                .frame(width: 42, height: 42)
-                VStack(alignment: .leading, spacing: 2) {
+                .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 3) {
                     Text(attachment.name ?? "Файл")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(mine ? Color.white : theme.text)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(fg)
                         .lineLimit(2)
+                        .truncationMode(.middle)
                         .multilineTextAlignment(.leading)
-                    if let p = dl {
-                        Text("\(Int(p * 100))% · \(sizeText)").font(.system(size: 12).monospacedDigit())
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
-                    } else if pending {
-                        Text("\(sizeText)").font(.system(size: 12))
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
-                    } else if !sizeText.isEmpty {
-                        Text(sizeText).font(.system(size: 12))
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
+                    Group {
+                        if let p = dl {
+                            Text("\(Int(p * 100))% · \(sizeText)").monospacedDigit()
+                        } else if pending {
+                            Text(sizeText.isEmpty ? "Отправка…" : "Отправка · \(sizeText)")
+                        } else {
+                            Text([sizeText, ext].filter { !$0.isEmpty }.joined(separator: " · "))
+                        }
                     }
+                    .font(.system(size: 14))
+                    .foregroundStyle(sub)
+                    .lineLimit(1)
+                    .padding(.trailing, 44)       // под время сообщения
                 }
                 Spacer(minLength: 0)
             }
-            .frame(width: 210)
+            .frame(width: 244)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -799,19 +936,34 @@ struct FileBlock: View {
 
 // MARK: - «Кружок»: круглое видеосообщение
 
+/// Какой кружок играет сейчас: он один на всё приложение (голосовые, музыка и другие кружки при этом молчат)
+@MainActor
+final class CircleFocus: ObservableObject {
+    static let shared = CircleFocus()
+    @Published var current: CirclePlayback?
+    func stop() { current?.stop() }
+}
+
 @MainActor
 final class CirclePlayback: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var started = false
     @Published private(set) var progress = 0.0
     private(set) var player: AVPlayer?
+    private(set) var duration = 0.0
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
+
+    private var rate: Float { VoicePlayer.shared.rate }
 
     func toggle(mediaID: String, duration: Double) {
         if player == nil {
             guard let url = ServerConfig.mediaURL(mediaID) else { return }
+            // одновременно звучит что-то одно
+            CircleFocus.shared.current?.stop()
             VoicePlayer.shared.stop()
+            VoicePlayer.shared.onStart?()
+            self.duration = duration
             try? AVAudioSession.sharedInstance().setCategory(.playback)
             AudioSessionGate.willActivate()
             try? AVAudioSession.sharedInstance().setActive(true)
@@ -826,24 +978,42 @@ final class CirclePlayback: ObservableObject {
             }
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
                                                                  queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.player?.seek(to: .zero)
-                    self.isPlaying = false
-                    self.started = false
-                    self.progress = 0
-                }
+                Task { @MainActor in self?.stop() }
             }
+            CircleFocus.shared.current = self
         }
         guard let player else { return }
         if isPlaying {
             player.pause()
             isPlaying = false
         } else {
-            player.play()
+            player.rate = rate
             isPlaying = true
             started = true
         }
+    }
+
+    func resume() { guard let player else { return }; player.rate = rate; isPlaying = true; started = true }
+    func pause() { player?.pause(); isPlaying = false }
+    func applyRate() { if isPlaying { player?.rate = rate } }
+
+    func seek(toFraction f: Double) {
+        let fraction = max(0, min(1, f))
+        progress = fraction
+        player?.seek(to: CMTime(seconds: fraction * duration, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func stop() {
+        if let observer, let player { player.removeTimeObserver(observer) }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        observer = nil
+        endObserver = nil
+        player?.pause()
+        player = nil
+        isPlaying = false
+        started = false
+        progress = 0
+        if CircleFocus.shared.current === self { CircleFocus.shared.current = nil }
     }
 
     deinit {
@@ -857,6 +1027,8 @@ struct CircleVideoBubble: View {
     var size: CGFloat = 214
 
     @StateObject private var playback = CirclePlayback()
+    /// Пока кружок смотрят, он вырастает (как в Telegram)
+    private var shown: CGFloat { playback.started ? max(size, min(300, UIScreen.main.bounds.width - 70)) : size }
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var callToast = false
@@ -886,8 +1058,9 @@ struct CircleVideoBubble: View {
                     .background(Color.black.opacity(0.4), in: Circle())
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: shown, height: shown)
         .clipShape(Circle())
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: playback.started)
         .overlay(Circle().trim(from: 0, to: playback.progress).stroke(theme.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
             .rotationEffect(.degrees(-90)).padding(2))
         .overlay(alignment: .bottomLeading) {
@@ -961,6 +1134,95 @@ enum FileDownloader {
             return target
         } catch {
             return nil
+        }
+    }
+}
+
+
+// MARK: - Удаление: сообщение рассыпается на частицы, как в Telegram
+
+extension View {
+    func dustDissolve(active: Bool, color: Color) -> some View { modifier(DustDissolve(active: active, color: color)) }
+}
+
+private struct DustDissolve: ViewModifier {
+    let active: Bool
+    let color: Color
+    @State private var start: Date?
+    private let duration: Double = 1.15
+    private let pad: CGFloat = 70
+
+    private static func rand(_ x: Int, _ y: Int, _ k: Int) -> Double {
+        var h = UInt32(truncatingIfNeeded: x &* 73856093 ^ y &* 19349663 ^ k &* 83492791)
+        h = (h ^ (h >> 13)) &* 1274126177
+        h ^= h >> 16
+        return Double(h % 10000) / 10000
+    }
+
+    /// Размер «песчинки»: мелкая, но для больших вложений крупнее, чтобы число клеток не росло
+    private static func cell(for size: CGSize) -> CGFloat {
+        max(2, (size.width * size.height / 9000).squareRoot())
+    }
+
+    /// Когда клетка отрывается: волна идёт от нижнего левого края вправо и вверх, с шумом — как в Telegram
+    private static func threshold(_ ix: Int, _ iy: Int, cols: Int, rows: Int) -> Double {
+        let nx = Double(ix) / Double(max(cols, 1)), ny = Double(iy) / Double(max(rows, 1))
+        return 0.50 * (0.65 * nx + 0.35 * (1 - ny)) + 0.30 * rand(ix, iy, 1)
+    }
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if active {
+            TimelineView(.animation) { ctx in
+                let s = start ?? ctx.date
+                let p = min(1, max(0, ctx.date.timeIntervalSince(s) / duration))
+                content
+                    .mask {
+                        Canvas { g, size in
+                            let cell = Self.cell(for: size)
+                            let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
+                            for ix in 0..<cols {
+                                for iy in 0..<rows {
+                                    let th = Self.threshold(ix, iy, cols: cols, rows: rows)
+                                    let k = min(1, max(0, (th - p) * 9))              // песчинка сжимается и пропадает
+                                    guard k > 0 else { continue }
+                                    let d = cell * CGFloat(k)
+                                    g.fill(Path(CGRect(x: CGFloat(ix) * cell + (cell - d) / 2, y: CGFloat(iy) * cell + (cell - d) / 2, width: d, height: d)),
+                                           with: .color(.white))
+                                }
+                            }
+                        }
+                    }
+                    .overlay {
+                        Canvas { g, full in
+                            let size = CGSize(width: full.width - pad * 2, height: full.height - pad * 2)
+                            let cell = Self.cell(for: size)
+                            let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
+                            let light = Color.white.opacity(0.9)
+                            for ix in 0..<cols {
+                                for iy in 0..<rows {
+                                    guard Self.rand(ix, iy, 2) < 0.8 else { continue }
+                                    let th = Self.threshold(ix, iy, cols: cols, rows: rows)
+                                    let age = (p - th) / 0.5                          // 0 — только что оторвалась, 1 — растаяла
+                                    guard age > 0, age < 1 else { continue }
+                                    let r1 = Self.rand(ix, iy, 3), r2 = Self.rand(ix, iy, 4), r3 = Self.rand(ix, iy, 5)
+                                    let ease = CGFloat(age * (0.4 + 0.6 * age))      // разгоняются, как по ветру
+                                    // ветер вправо и чуть вверх; часть песчинок улетает далеко
+                                    let x = pad + CGFloat(ix) * cell + ease * CGFloat(30 + 110 * r1 * r1)
+                                    let y = pad + CGFloat(iy) * cell - ease * CGFloat(10 + 55 * r2) + CGFloat(sin(age * 9 + r1 * 6)) * 3
+                                    let d = cell * CGFloat(0.85 - 0.45 * age)
+                                    g.fill(Path(ellipseIn: CGRect(x: x, y: y, width: d, height: d)),
+                                           with: .color((r3 < 0.28 ? light : color).opacity(0.95 * (1 - age))))
+                                }
+                            }
+                        }
+                        .padding(-pad)
+                        .allowsHitTesting(false)
+                    }
+                    .onAppear { if start == nil { start = ctx.date } }
+            }
+        } else {
+            content
         }
     }
 }

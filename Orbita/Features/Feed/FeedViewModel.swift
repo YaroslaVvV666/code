@@ -71,7 +71,7 @@ final class FeedViewModel: ObservableObject {
         }
     }
 
-    func publish(text: String, entities: [TextEntity], media: [PreparedMedia]) async -> Bool {
+    func publish(text: String, entities: [TextEntity], media: [PreparedMedia], options: PostOptions = PostOptions()) async -> Bool {
         actionError = nil
         uploadProgress = 0
         defer { uploadProgress = nil }
@@ -81,7 +81,7 @@ final class FeedViewModel: ObservableObject {
                 uploaded.append(try await repo.uploadMedia(item))
                 uploadProgress = Double(index + 1) / Double(media.count + 1)
             }
-            let post = try await repo.createPost(text: text, entities: entities, media: uploaded)
+            let post = try await repo.createPost(text: text, entities: entities, media: uploaded, options: options)
             posts.insert(post, at: 0)
             state = .loaded
             return true

@@ -34,6 +34,7 @@ struct ComingSoonView: View {
 struct ProfileView: View {
     @ObservedObject var store: ProfileStore
     @Binding var route: ProfileRoute?
+    private var isInterests: Bool { if case .interests = route { return true } else { return false } }
 
     @EnvironmentObject private var flow: AuthFlow
     @EnvironmentObject private var session: AppSession
@@ -47,6 +48,9 @@ struct ProfileView: View {
     // положение аватарки и имени (экранные y) и место, куда имя «пристыковывается» в панели
     @State private var avatarTopLive: CGFloat = 0
     @State private var avatarTopRest: CGFloat = 0
+    @State private var nameSlotLive: CGFloat = 0      // центр места под ник (экранные координаты)
+    @State private var nameSlotRest: CGFloat = 0
+    @State private var stackTop: CGFloat = 0
     @State private var nameMidLive: CGFloat = 0
     @State private var nameMidRest: CGFloat = 0
     @State private var dockMid: CGFloat = 0
@@ -105,7 +109,7 @@ struct ProfileView: View {
                 main.transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.28), value: route)
+        .animation(.spring(response: 0.36, dampingFraction: 0.9), value: route)
     }
 
     private func openPlaylist() {
@@ -125,10 +129,23 @@ struct ProfileView: View {
                 .offset(y: -inset)
             mainScroll
             if !photos.isEmpty { avatarStage }
+            if pullStage == 2, !photos.isEmpty {
+                // последнее положение — просмотр как в Telegram: назад / ник и дата / «Изм.», миниатюры, «поделиться» и корзина
+                AvatarViewer(name: shownName, photos: photos, start: pageIndex,
+                             onReorder: { ids in Task { _ = await store.reorderPhotos(ids) } },
+                             onDelete: { id in Task { _ = await store.removePhoto(id) } },
+                             onClose: { setStage(0) })
+                    .padding(.top, TopInset.value)          // кнопки — под статус-баром, а не вровень с ним
+                    .background(Color.black.ignoresSafeArea())
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .zIndex(50)
+            }
+            // тёмная «капля» островка: аватарка в неё втекает, пока шапка сворачивается
             // плашка поверх содержимого: прокручиваемое уходит «под потолок»
-            Rectangle().fill(.thinMaterial)
+            Color.clear
             .frame(height: bar)
-            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.45), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))   // без цвета, размытие сходит на нет книзу
+            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.72), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
             .offset(y: -inset)
             .opacity(Double(min(1, max(0, (collapse - 0.55) / 0.3))))
             .overlay {
@@ -136,10 +153,20 @@ struct ProfileView: View {
                 Color.clear.contentShape(Rectangle()).onTapGesture {}
                     .allowsHitTesting(collapse > 0.6)
             }
-            // аватарка и капля островка: поверх страницы и плашки, в одном слое и по одной геометрии
-            if !photos.isEmpty { collapsingAvatar(inset: inset) }
             pinnedBar
             floatingName
+        }
+        .background(GeometryReader { g in
+            Color.clear.preference(key: StackTopKey.self, value: g.frame(in: .global).minY)
+        })
+        .onPreferenceChange(StackTopKey.self) { stackTop = $0 }
+        .onChange(of: pullStage) { _, n in session.tabBarHidden = n == 2 || isInterests }
+        .onChange(of: route) { _, _ in session.tabBarHidden = pullStage == 2 || isInterests }
+        .onDisappear { session.tabBarHidden = false }
+        .onPreferenceChange(NameSlotKey.self) { v in
+            nameSlotLive = v
+            if pullStage == 0 { nameSlotRest = v + max(0, rawOffset) }      // место под ник в покое, независимо от текущей прокрутки
+
         }
         .onPreferenceChange(ScrollTopKey.self) { scrollY = $0 }
         .onPreferenceChange(AvatarTopKey.self) { v in
@@ -150,6 +177,7 @@ struct ProfileView: View {
 
     private func setStage(_ n: Int) {
         guard pullStage != n else { return }
+        Haptics.impact(.light)
         if n == 0 || (pullStage == 0 && n >= 1) { stageForward = false }
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             pullStage = n
@@ -179,13 +207,16 @@ struct ProfileView: View {
         let inset: CGFloat = TopInset.value
         let raw: CGFloat = rawOffset
         return ScreenSpace { screen, origin in
-            AvatarStage(expand: CGFloat(pullStage), circleTop: origin.y + 82 - raw, screen: screen,
+            AvatarStage(expand: CGFloat(pullStage), circleTop: origin.y + 60 - raw, screen: screen,
                         headerHeight: screen.width * 0.96, topInset: inset,
                         photos: photos, page: pageIndex, forward: stageForward,
                         name: shownName.isEmpty ? s.you : shownName, status: subtitle,
                         onStep: { stepPhoto($0) },
                         onCenter: { setStage(pullStage == 1 ? 2 : 1) },
-                        onVertical: { stageDrag($0) })
+                        onVertical: { stageDrag($0) },
+                        onClose: { setStage(0) },
+                        track: store.profile?.track, queue: store.profile?.track.map { [$0] } ?? [], player: session.player,
+                        onMusic: { openPlaylist() })
         }
         .allowsHitTesting(pullStage >= 1)
     }
@@ -199,24 +230,67 @@ struct ProfileView: View {
 
     private var avatarScale: CGFloat {
         let c: CGFloat = collapse
-        let grow: CGFloat = 1 + 0.32 * min(1, pullAmount / 62)               // тянем — кружок растёт вместе с пальцем
-        return grow * (1 - 0.75 * c * c)
+        let grow: CGFloat = 1                                                 // при натяжении кружок не растёт: в нужный момент сразу переходит в средний режим
+        return grow * (1 - 0.62 * c * c)
     }
 
-    /// Аватарка сворачивается в островок (как в Telegram): уменьшается, повисает на капле островка,
-    /// чернеет сверху от места срастания и втекает в островок. Фото и капля — по одной геометрии `AvatarCollapse`.
-    private func collapsingAvatar(inset: CGFloat) -> some View {
-        let island: Bool = inset >= 51                                   // острова нет — просто растворяемся
+    private var avatarBlur: CGFloat {
+        return 14 * smooth(collapse / 0.8)                 // размывается постепенно, пока едет
+    }
+
+    /// Чернеет со стороны острова (сверху) и понемногу вся
+    private var darkSweep: some View {
+        let q: CGFloat = smooth((collapse - 0.12) / 0.6)
+        let front: CGFloat = q * 1.7
+        return Circle().fill(Color.black)
+            .mask(LinearGradient(colors: [.black, .clear],
+                                 startPoint: UnitPoint(x: 0.5, y: front - 0.7),
+                                 endPoint: UnitPoint(x: 0.5, y: front)))
+            .allowsHitTesting(false)
+    }
+
+    private var avatarOpacity: Double {
+        return Double(1 - smooth((collapse - 0.45) / 0.5))   // фото уступает место тёмной капле, когда уже маленькое
+    }
+
+    /// Аватарка темнеет в каплю, та стекает к островку, сливается с ним и исчезает (как «жидкость»)
+    private func islandBlob(inset: CGFloat) -> some View {
+        let c: CGFloat = collapse
+        let off: CGFloat = scrollOffset
         let raw: CGFloat = rawOffset
-        let pull: CGFloat = pullAmount
-        let photoID: String? = photos.first?.mediaID
-        let label: String = name
-        let ring: Color = theme.stroke
+        let ready = inset >= 51                                             // острова нет — просто растворяемся
+        let alpha: Double = Double(smooth((c - 0.1) / 0.05) * (1 - smooth((c - 0.96) / 0.04)))
         return ScreenSpace { screen, origin in
-            CollapsingAvatarLayer(raw: raw, restTop: origin.y + 82, screen: screen, pull: pull,
-                                  island: island, name: label, photoID: photoID, ring: ring)
+            Canvas { ctx, size in
+            guard ready else { return }
+            let top: CGFloat = origin.y + 60 - raw - 34 * c * c       // верх аватарки на экране
+            let scale: CGFloat = 1 - 0.75 * c * c
+            let aD: CGFloat = 112 * scale                              // её диаметр
+            let dock: CGFloat = smooth((c - 0.7) / 0.3)
+            // маленькая капля у верха аватарки, соединена с островком; растёт до размера аватарки, потом втекает и уменьшается
+            let grow: CGFloat = smooth((c - 0.12) / 0.58)
+            let free: CGFloat = 16 + (aD - 16) * grow
+            let diameter: CGFloat = max(6, free * (1 - 0.78 * dock))
+            let islandCY: CGFloat = 29.5
+            let follow: CGFloat = top + free * (0.5 - 0.22 * (1 - grow))      // сначала капля чуть «вдавлена» в верх аватарки — они срастаются
+            let hold: CGFloat = islandCY + 18 + diameter / 2 - 16 - 10 * dock
+            let cy: CGFloat = max(follow, hold)
+            let island = CGRect(x: size.width / 2 - 59, y: islandCY - 15, width: 118, height: 30)
+            let drop = CGRect(x: size.width / 2 - diameter / 2, y: cy - diameter / 2, width: diameter, height: diameter)
+            ctx.addFilter(.alphaThreshold(min: 0.5, color: .black))
+            ctx.addFilter(.blur(radius: 9))
+            ctx.drawLayer { layer in
+                layer.fill(Path(roundedRect: island, cornerRadius: 15), with: .color(.black))
+                layer.fill(Path(ellipseIn: drop), with: .color(.black))
+                // перемычка: от островка тянется к капле, они соединяются
+                let neckW: CGFloat = max(14, diameter * 0.6)
+                let neck = CGRect(x: size.width / 2 - neckW / 2, y: islandCY, width: neckW, height: max(0, cy - islandCY))
+                layer.fill(Path(roundedRect: neck, cornerRadius: neckW / 2), with: .color(.black))
+            }
+            }
+            .frame(width: screen.width, height: screen.height)
         }
-        .opacity(pullStage >= 1 ? 0 : 1)                                 // вместо кружка рисует AvatarStage
+        .opacity(alpha)
         .allowsHitTesting(false)
     }
 
@@ -229,82 +303,32 @@ struct ProfileView: View {
             .padding(.top, 8)
     }
 
-    /// Ник: едет со страницей, но не выше низа аватарки — пока она висит под островком, ник держится под ней;
-    /// аватарка втянулась — ник встаёт в панель между «Изм.» и QR. Всё считается от прокрутки, без замеров и теней.
+    /// Ник: едет вверх вместе со страницей, постепенно уменьшается и останавливается в панели.
+    /// Считается только от прокрутки (без замеров), тень появляется лишь когда ник уже встал на место.
     private var floatingName: some View {
-        let raw: CGFloat = rawOffset
-        let pull: CGFloat = pullAmount
-        let follow: Bool = !photos.isEmpty                          // аватарку с фото рисует collapsingAvatar
-        let ink: Color = ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text)
-        let label: String = shownName.isEmpty ? s.you : shownName
-        return ScreenSpace { screen, origin in
-            Self.nameLabel(label, ink: ink, raw: raw, pull: pull, origin: origin, screen: screen, follow: follow)
-        }
-        .opacity(pullStage == 0 ? 1 : 0)
-        .animation(.easeOut(duration: 0.2), value: pullStage)
-        .allowsHitTesting(false)
-    }
-
-    private static let nameRestY: CGFloat = 218                     // центр ника в покое (в координатах этого экрана)
-    private static let nameDockY: CGFloat = 29                      // центр панели с кнопками «Изм.» и QR
-
-    private static func nameLabel(_ label: String, ink: Color, raw: CGFloat, pull: CGFloat,
-                                  origin: CGPoint, screen: CGSize, follow: Bool) -> some View {
-        let y: CGFloat = nameCenter(raw: raw, pull: pull, origin: origin, screen: screen, follow: follow)
-        let travel: CGFloat = min(1, max(0, (nameRestY - y) / (nameRestY - nameDockY)))
-        let eased: CGFloat = AvatarCollapse.smooth(travel)
-        let scale: CGFloat = 1 + 0.53 * (1 - eased)                 // 26 pt в шапке → 17 pt в панели
+        let dockY: CGFloat = 29                                    // центр панели с кнопками «Изм.» и QR
+        // крупный ник живёт в самой странице (всегда на своём месте); сюда он «переходит» уже маленьким, когда страница уехала вверх
+        let r0: CGFloat = max(0, rawOffset)
+        let appear: Double = Double(smooth((r0 - 80) / 40))
+        let ink = ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text)
+        let label = shownName.isEmpty ? s.you : shownName
         return Text(label)
             .font(.system(size: 17, weight: .bold))
             .foregroundStyle(ink)
             .lineLimit(1)
             .frame(maxWidth: 220)
-            .scaleEffect(scale)
-            .frame(width: screen.width, height: 32)
-            .position(x: screen.width / 2, y: origin.y + y)
-    }
-
-    /// Центр ника (в координатах экрана профиля)
-    private static func nameCenter(raw: CGFloat, pull: CGFloat, origin: CGPoint, screen: CGSize, follow: Bool) -> CGFloat {
-        // свободный путь: до `a` ровно со страницей (и вниз, когда тянут), потом плавно разгоняется к панели
-        let a: CGFloat = 50
-        let b: CGFloat = AvatarCollapse.travel * 0.96                // к этому моменту капля уже почти вся в островке
-        let free: CGFloat
-        if raw <= a {
-            free = nameRestY - raw
-        } else if raw >= b {
-            free = nameDockY
-        } else {
-            free = nameGlide(t: (raw - a) / (b - a), from: nameRestY - a, to: nameDockY, length: b - a)
-        }
-        guard follow else { return free }
-        // не выше низа аватарки: в покое ровно на своём месте, дальше — с запасом 24 pt до центра строки
-        let g = AvatarCollapse(raw: raw, restTop: origin.y + 82, screenWidth: screen.width, pull: pull)
-        let bottom: CGFloat = g.center.y + g.diameter / 2 - origin.y
-        let ease: CGFloat = 12 * (1 - AvatarCollapse.smooth(g.c / 0.15))   // в покое ограничение не трогает ник
-        let below: CGFloat = bottom + 24 - ease
-        return max(nameDockY, AvatarCollapse.smoothMax(free, below, k: 10))
-    }
-
-    /// Кривая Эрмита: стартует со скоростью страницы, к панели подходит медленнее (без рывка при остановке)
-    private static func nameGlide(t: CGFloat, from p0: CGFloat, to p1: CGFloat, length: CGFloat) -> CGFloat {
-        let t2: CGFloat = t * t
-        let t3: CGFloat = t2 * t
-        let h00: CGFloat = 2 * t3 - 3 * t2 + 1
-        let h10: CGFloat = t3 - 2 * t2 + t
-        let h01: CGFloat = -2 * t3 + 3 * t2
-        let h11: CGFloat = t3 - t2
-        let startSpeed: CGFloat = -1                               // pt ника на pt прокрутки
-        let endSpeed: CGFloat = -0.4
-        return h00 * p0 + h10 * length * startSpeed + h01 * p1 + h11 * length * endSpeed
+            .frame(height: 32)
+            .padding(.top, dockY - 16)
+            .opacity(pullStage == 0 ? appear : 0)
+            .allowsHitTesting(false)
     }
 
     private var mainScroll: some View {
         ScrollViewReader { proxy in
-        ScrollView {
+        ScrollView(showsIndicators: false) {
             VStack(spacing: 16) {
                 Color.clear.frame(height: 0).id("profileTop")
-                Color.clear.frame(height: 42)                      // место под закреплённую панель
+                Color.clear.frame(height: 20)                      // место под закреплённую панель (аватарка ближе к верху)
                 header
 
                 SettingsGroup {
@@ -407,7 +431,7 @@ struct ProfileView: View {
                 }
             }
             .background {
-                ScrollOffsetProbe(lockTop: photos.isEmpty) { offset in
+                ScrollOffsetProbe(lockTop: true, reportPull: !photos.isEmpty) { offset in
                     probeY = max(0, offset)
                     if abs(offset - rawOffset) > 0.3 { rawOffset = offset }
                     if offset > -8 { if !pullArmed { pullArmed = true } }
@@ -417,6 +441,7 @@ struct ProfileView: View {
                     if abs(amount - pullAmount) > 0.5 { pullAmount = amount }
                     // ступень 1: аватарка плавно вырастает в шапку на всю ширину (и остаётся, пока не пролистать вверх)
                     if pull > 62, pullStage == 0, pullArmed {
+                        pullArmed = false                // в третье — только новым жестом, после отпускания
                         Haptics.impact(.medium)
                         setStage(1)
                     }
@@ -525,34 +550,44 @@ struct ProfileView: View {
     private var header: some View {
         VStack(spacing: 8) {
             ZStack(alignment: .top) {
-                if photos.isEmpty {
-                    // без фото: буква с «+», просто уменьшается и растворяется
-                    AvatarPager(name: name, photos: photos, size: 112, index: $pageIndex, addStore: store)
+                if let orbit = store.profile?.orbit, !orbit.isEmpty {
+                    OrbitRing(friends: orbit, avatarSize: 112, front: false, mine: true)              // пузыри, залетевшие за аватарку
                         .scaleEffect(avatarScale, anchor: .top)
                         .offset(y: -34 * collapse * collapse)
-                        .opacity(Double(1 - smooth((collapse - 0.5) / 0.35)))
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: AvatarTopKey.self, value: g.frame(in: .global).minY)
-                        })
-                } else {
-                    // саму аватарку рисует collapsingAvatar (поверх, в экранных координатах); здесь — место и нажатие
-                    Color.clear
-                        .frame(width: 112, height: 112)
-                        .contentShape(Circle())
-                        .onTapGesture { setStage(1) }
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: AvatarTopKey.self, value: g.frame(in: .global).minY)
-                        })
+                        .opacity(pullStage >= 1 ? 0 : avatarOpacity)
+                }
+                AvatarPager(name: name, photos: photos, size: 112, index: $pageIndex, addStore: store, isMine: true) {
+                    if !photos.isEmpty { setStage(1) }
+                }
+                // листаем вверх: аватарка уменьшается, размывается и «втягивается» в островок
+                .scaleEffect(avatarScale, anchor: .top)
+                .offset(y: -34 * collapse * collapse)
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: AvatarTopKey.self, value: g.frame(in: .global).minY)
+                })
+                .blur(radius: avatarBlur)
+                .opacity(pullStage >= 1 ? 0 : avatarOpacity)        // вместо кружка рисует AvatarStage
+                if let orbit = store.profile?.orbit, !orbit.isEmpty {
+                    OrbitRing(friends: orbit, avatarSize: 112, front: true, mine: true)
+                        .scaleEffect(avatarScale, anchor: .top)
+                        .offset(y: -34 * collapse * collapse)
+                        .opacity(pullStage >= 1 ? 0 : avatarOpacity)
                 }
             }
             // при раскрытой шапке под фото освобождается место, а содержимое плавно съезжает вниз
-            // (верх кружка в покое считаем из раскладки: замер внутри ScrollView приходит нулём — оставалась пустая полоса)
-            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - (TopInset.value + 82) + 4) : 112,
+            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - (TopInset.value + 60) - 10) : 112,
                    alignment: .top)
+            .zIndex(1)                                                  // орбита пролетает поверх никнейма
 
             if pullStage == 0 {
                 // само имя рисует floatingName (поверх плашки); здесь — место под него
-                Color.clear.frame(height: 32)
+                NameWithStatus(name: name.isEmpty ? s.you : name, emoji: store.profile?.statusEmoji, fontSize: 26)
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundStyle(ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text))
+                    .lineLimit(1).minimumScaleFactor(0.6)
+                    .padding(.horizontal, 24)
+                    .frame(height: 32)
+                    .opacity(1 - Double(smooth((rawOffset - 50) / 50)))     // уходит вместе со страницей, пока в панели появляется маленький
 
                 Text(subtitle)
                     .font(.system(size: 15))
@@ -560,9 +595,11 @@ struct ProfileView: View {
                     .opacity(Double(1 - max(0, collapse - 0.35) * 2.5))
             }
 
+            if pullStage == 0 {
             MusicStrip(track: store.profile?.track, queue: store.profile?.track.map { [$0] } ?? [],
                        canAdd: true, player: session.player) { openPlaylist() }
                 .padding(.top, 4)
+            }
 
             if let bio = store.profile?.bio, !bio.isEmpty {
                 LinkText(text: bio, tint: theme.accentColor)
@@ -586,6 +623,16 @@ struct ProfileView: View {
 }
 
 private struct AvatarTopKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct NameSlotKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct StackTopKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }

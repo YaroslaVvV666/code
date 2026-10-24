@@ -13,6 +13,10 @@ Orbita Server — бэкенд соцсети. Всё, что хранится �
 """
 import datetime
 import gzip
+import html as htmllib
+import ipaddress
+import socket
+import urllib.request
 import hashlib
 import hmac
 import json
@@ -29,6 +33,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import moderation
 import otp
 import push
 from orbita_crypto import (COL, HEADER, KeyRing, decrypt_range, encrypt_stream, field_aad, file_key,
@@ -75,10 +80,13 @@ OTP_PER_HOUR = 5
 OTP_IP_PER_HOUR = 20
 OTP_ATTEMPTS = 5
 OTP_DEV = os.environ.get("ORBITA_OTP_DEV", "0") == "1"      # без провайдера отдаёт код в ответе (только для разработки!)
+if not OTP_DEV and not otp.configured("sms"):
+    print("\n!!! SMS-провайдер не настроен и ORBITA_OTP_DEV не включён: войти по номеру нельзя.\n"
+          "!!! Для разработки запустите так:  ORBITA_OTP_DEV=1 python3 server.py\n")
 PRIVACY_KEYS = ("phone", "last_seen", "photos", "bio", "birthday", "music", "wall", "calls", "forwards", "invites",
-                "comments", "find")
-PRIVACY_DEFAULTS = {"last_seen": "all", "photos": "all", "bio": "all", "birthday": "nobody", "music": "all",
-                    "wall": "all", "calls": "all", "forwards": "all", "invites": "all", "find": "all"}
+                "comments", "find", "followers", "orbit")
+PRIVACY_DEFAULTS = {"followers": "all", "last_seen": "all", "photos": "all", "bio": "all", "birthday": "nobody", "music": "all",
+                    "wall": "all", "calls": "all", "forwards": "all", "invites": "all", "find": "all", "orbit": "nobody"}
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
 KR = KeyRing.load(STATE_DIR)
@@ -110,6 +118,11 @@ CREATE TABLE IF NOT EXISTS users(
 CREATE TABLE IF NOT EXISTS media(
   id TEXT PRIMARY KEY, owner TEXT NOT NULL, kind TEXT NOT NULL, mime TEXT NOT NULL,
   width INTEGER, height INTEGER, duration REAL, thumb TEXT, size INTEGER NOT NULL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS media_blocked(
+  hash TEXT PRIMARY KEY, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS media_review(
+  media_id TEXT PRIMARY KEY, owner TEXT NOT NULL, verdict TEXT NOT NULL, detail TEXT, created_at REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open');
 CREATE TABLE IF NOT EXISTS posts(
   id TEXT PRIMARY KEY, author TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   text_enc BLOB NOT NULL, entities_enc BLOB NOT NULL,
@@ -225,11 +238,19 @@ CREATE TABLE IF NOT EXISTS friends(
   b TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at REAL NOT NULL, PRIMARY KEY(a, b));
 CREATE INDEX IF NOT EXISTS friends_b ON friends(b);
+CREATE TABLE IF NOT EXISTS follows(
+  follower TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  followee TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at REAL NOT NULL, PRIMARY KEY(follower, followee));
+CREATE INDEX IF NOT EXISTS follows_followee ON follows(followee);
 CREATE TABLE IF NOT EXISTS group_mentions(
   message_id TEXT NOT NULL, group_id TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at REAL NOT NULL, PRIMARY KEY(message_id, user_id));
 CREATE INDEX IF NOT EXISTS group_mentions_user ON group_mentions(user_id, group_id, created_at);
+CREATE TABLE IF NOT EXISTS dm_mentions(
+  message_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS dm_mentions_rcpt ON dm_mentions(recipient, sender);
 CREATE TABLE IF NOT EXISTS scheduled(
   id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, peer TEXT NOT NULL,
   payload_enc BLOB NOT NULL, send_at REAL NOT NULL, created_at REAL NOT NULL);
@@ -259,6 +280,7 @@ def ensure_column(table, column, ddl):
 
 
 ensure_column("group_messages", "kind", "kind TEXT")
+ensure_column("tracks", "cover", "cover TEXT")                                       # обложка трека (картинка из тегов файла)
 ensure_column("stories", "permanent", "permanent INTEGER NOT NULL DEFAULT 0")
 ensure_column("messages", "kind", "kind TEXT")
 ensure_column("messages", "fwd_enc", "fwd_enc BLOB")
@@ -283,10 +305,35 @@ ensure_column("posts", "music_enc", "music_enc BLOB")
 ensure_column("posts", "repost_of", "repost_of TEXT")
 ensure_column("posts", "music_media", "music_media TEXT")
 ensure_column("posts", "music_key", "music_key TEXT")
+DB.execute("CREATE TABLE IF NOT EXISTS reel_queries(q TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_reel_queries ON reel_queries(created_at, q)")
+DB.execute("CREATE TABLE IF NOT EXISTS post_stats(post_id TEXT PRIMARY KEY, views INTEGER NOT NULL DEFAULT 0, watch_ms INTEGER NOT NULL DEFAULT 0, "
+           "ratio_sum REAL NOT NULL DEFAULT 0, completes INTEGER NOT NULL DEFAULT 0, skips INTEGER NOT NULL DEFAULT 0, "
+           "shares INTEGER NOT NULL DEFAULT 0, since REAL NOT NULL DEFAULT 0)")
+DB.execute("CREATE TABLE IF NOT EXISTS follow_source(follower TEXT NOT NULL, followee TEXT NOT NULL, post_id TEXT NOT NULL, "
+           "created_at REAL NOT NULL, PRIMARY KEY(follower, followee))")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_follow_source_post ON follow_source(post_id)")
+DB.execute("CREATE TABLE IF NOT EXISTS post_viewers(post_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(post_id, user_id))")
+DB.execute("CREATE TABLE IF NOT EXISTS post_views_day(post_id TEXT NOT NULL, day INTEGER NOT NULL, views INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(post_id, day))")
+ensure_column("likes", "created_at", "created_at REAL NOT NULL DEFAULT 0")            # для колокольчика уведомлений
+ensure_column("comment_likes", "created_at", "created_at REAL NOT NULL DEFAULT 0")
+DB.execute("CREATE TABLE IF NOT EXISTS notif_state(user_id TEXT PRIMARY KEY, seen_at REAL NOT NULL)")
+# записи гостей на стене: текст, фото или рисунок от руки
+DB.execute("CREATE TABLE IF NOT EXISTS wall_entries(id TEXT PRIMARY KEY, owner TEXT NOT NULL, author TEXT NOT NULL, kind TEXT NOT NULL, "
+           "text_enc BLOB, media_id TEXT, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_wall_owner ON wall_entries(owner, created_at)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_wall_author ON wall_entries(author, created_at)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author, created_at)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
+ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
+ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of, author)")
 DB.execute("CREATE TABLE IF NOT EXISTS post_saves(post_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(post_id, user_id))")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_saves_user ON post_saves(user_id)")
+# жалобы на публикации: одна от человека на публикацию (повторная обновляет причину)
+DB.execute("CREATE TABLE IF NOT EXISTS post_reports(post_id TEXT NOT NULL, reporter TEXT NOT NULL, reason TEXT NOT NULL, "
+           "created_at REAL NOT NULL, PRIMARY KEY(post_id, reporter))")
 # индексы под самые частые выборки (лента «для вас», непрочитанные, скрытые сообщения групп)
 DB.execute("CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_reel ON posts(reel, created_at DESC)")
@@ -328,18 +375,39 @@ def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# Кэш в пределах одного запроса (на поток): одни и те же блокировки, приватность и имена в контактах
+# в списках читались десятки раз. Любая запись через run() сбрасывает его, так что устаревших данных нет.
+_RC = threading.local()
+
+
+def rcache():
+    d = getattr(_RC, "d", None)
+    if d is None:
+        d = _RC.d = {}
+    return d
+
+
+def rcache_clear():
+    _RC.d = {}
+
+
 def q(sql, args=()):
     with LOCK:
+        if sql[:6] not in ("SELECT", "select"):
+            _RC.d = {}
         return DB.execute(sql, args).fetchall()
 
 
 def q1(sql, args=()):
     with LOCK:
+        if sql[:6] not in ("SELECT", "select"):
+            _RC.d = {}
         return DB.execute(sql, args).fetchone()
 
 
 def run(sql, args=()):
     with LOCK:
+        _RC.d = {}
         return DB.execute(sql, args)
 
 
@@ -408,7 +476,14 @@ def sync_avatar(uid):
 
 def is_blocked(by, target):
     """by заблокировал target"""
-    return bool(by and target) and q1("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (by, target)) is not None
+    if not (by and target):
+        return False
+    c = rcache()
+    k = ("blk", by, target)
+    v = c.get(k)
+    if v is None:
+        v = c[k] = q1("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (by, target)) is not None
+    return v
 
 
 def either_blocked(a, b):
@@ -416,6 +491,15 @@ def either_blocked(a, b):
 
 
 def privacy_of(r):
+    c = rcache()
+    k = ("prv", r["id"])
+    v = c.get(k)
+    if v is None:
+        v = c[k] = _privacy_of(r)
+    return v
+
+
+def _privacy_of(r):
     """Настройки видимости владельца r: телефон и комментарии лежат в своих колонках, остальное — JSON"""
     stored = {}
     if r["privacy_enc"]:
@@ -443,7 +527,12 @@ def policy_allows(owner, viewer, value):
     if value == "all":
         return True
     if value == "contacts" and viewer:
-        return q1("SELECT 1 FROM contacts WHERE user_id = ? AND contact_id = ?", (owner["id"], viewer)) is not None
+        c = rcache()
+        k = ("ctc", owner["id"], viewer)
+        v = c.get(k)
+        if v is None:
+            v = c[k] = q1("SELECT 1 FROM contacts WHERE user_id = ? AND contact_id = ?", (owner["id"], viewer)) is not None
+        return v
     return False
 
 
@@ -451,12 +540,25 @@ def contact_name(viewer, uid):
     """Имя, под которым viewer сохранил человека в контактах (или None)"""
     if not viewer or viewer == uid:
         return None
+    cc = rcache()
+    k = ("cn", viewer, uid)
+    if k in cc:
+        return cc[k]
     c = q1("SELECT name_enc FROM contacts WHERE user_id = ? AND contact_id = ?", (viewer, uid))
-    return dec(viewer, "contacts", COL["contact_name"], viewer + ":" + uid, c["name_enc"]) if c else None
+    v = cc[k] = dec(viewer, "contacts", COL["contact_name"], viewer + ":" + uid, c["name_enc"]) if c else None
+    return v
 
 
 def user_brief(uid, viewer=None, row=None):
-    r = row or q1("SELECT * FROM users WHERE id = ?", (uid,))
+    if row is None:
+        c = rcache()
+        r = c.get(("usr", uid))
+        if r is None:
+            r = q1("SELECT * FROM users WHERE id = ?", (uid,))
+            if r:
+                c[("usr", uid)] = r
+    else:
+        r = row
     if not r:
         return {"id": uid, "name": "—", "username": None, "avatar": None}
     shown = viewer is None or can_see(r, viewer, "photos")
@@ -468,7 +570,8 @@ def track_json(t):
     uid = t["user_id"]
     return {"id": t["id"], "media": t["media_id"], "duration": t["duration"] or 0,
             "title": dec(uid, "profile", COL["track_title"], t["id"], t["title_enc"]) or "",
-            "artist": dec(uid, "profile", COL["track_artist"], t["id"], t["artist_enc"]) or ""}
+            "artist": dec(uid, "profile", COL["track_artist"], t["id"], t["artist_enc"]) or "",
+            "cover": (t["cover"] if "cover" in t.keys() else None) or None}
 
 
 def tracks_of(uid):
@@ -496,6 +599,46 @@ def friend_state(me_id, uid):
     return "none"
 
 
+def is_following(me_id, uid):
+    return bool(me_id) and bool(q1("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (me_id, uid))
+                                or q1("SELECT 1 FROM friends WHERE a = ? AND b = ?", (me_id, uid)))
+
+
+def followers_count(uid):
+    return q1("SELECT COUNT(*) c FROM (SELECT follower f FROM follows WHERE followee = ? "
+              "UNION SELECT a f FROM friends WHERE b = ?)", (uid, uid))["c"]
+
+
+_orbit_cache = {}
+
+
+def orbit_of(r, viewer):
+    """Лучшие друзья: с кем человек переписывался больше всего за последние 90 дней (кружат вокруг аватарки).
+    Показываются, только если владелец включил «Отображение лучших друзей». Кэш на 5 минут"""
+    uid = r["id"]
+    hit = _orbit_cache.get(uid)
+    if not hit or time.time() - hit[0] > 300:
+        since = time.time() - 90 * 86400
+        rows = q("SELECT other, COUNT(*) c FROM ("
+                 "SELECT recipient other FROM messages WHERE sender = ? AND created_at > ? AND recipient <> sender "
+                 "UNION ALL SELECT sender other FROM messages WHERE recipient = ? AND created_at > ? AND recipient <> sender"
+                 ") GROUP BY other ORDER BY c DESC LIMIT 14", (uid, since, uid, since))
+        hit = (time.time(), [x["other"] for x in rows])
+        _orbit_cache[uid] = hit
+    out = []
+    for oid in hit[1]:
+        if viewer != oid and either_blocked(uid, oid) or (viewer and either_blocked(viewer, oid)):
+            continue
+        o = q1("SELECT * FROM users WHERE id = ?", (oid,))
+        if not o:
+            continue
+        out.append({"id": oid, "name": names(o)[2],
+                    "avatar": o["avatar"] if can_see(o, viewer, "photos") else None})
+        if len(out) >= 6:
+            break
+    return out
+
+
 def profile_json(r, me_id=None):
     uid = r["id"]
     own = me_id == uid
@@ -520,10 +663,12 @@ def profile_json(r, me_id=None):
         "wall_private": not wall_ok,
         "posts_count": q1("SELECT COUNT(*) c FROM posts WHERE author = ?", (uid,))["c"] if wall_ok else None,
         "track": track_json(track) if track else None,
+        "listening": (own or vis("music")) and is_listening(uid),
         "tracks_count": q1("SELECT COUNT(*) c FROM tracks WHERE user_id = ?", (uid,))["c"] if vis("music") else 0,
         "phone_visibility": pv["phone"] if own else None,
         "comments_policy": pv["comments"] if own else None,
         "privacy": pv if own else None,
+        "orbit": orbit_of(r, me_id) if pv.get("orbit") == "all" else [],
         "blocked_by_me": (not own) and is_blocked(me_id, uid),
         "blocked_me": (not own) and is_blocked(uid, me_id),
         "style": style_of(r),
@@ -532,6 +677,8 @@ def profile_json(r, me_id=None):
         "is_contact": bool(contact_name(me_id, uid)),
         "friend_state": friend_state(me_id, uid) if me_id and not own else "none",
         "friends_count": q1("SELECT COUNT(*) c FROM friends WHERE a = ?", (uid,))["c"],
+        "followers_count": followers_count(uid) if (own or vis("followers")) else None,
+        "following": (not own) and is_following(me_id, uid),
         "requests_count": q1("SELECT COUNT(*) c FROM friend_requests WHERE to_id = ?", (uid,))["c"] if own else None,
     }
     return out
@@ -567,6 +714,31 @@ _backfill_music_keys()
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_music ON posts(music_key, reel)")
 
 
+def origin_brief(p, me_id):
+    """У репост-копии — карточка автора оригинала (чтобы вести на профиль создателя), иначе None"""
+    if not p["repost_of"]:
+        return None
+    o = q1("SELECT author FROM posts WHERE id = ?", (p["repost_of"],))
+    return user_brief(o["author"], me_id) if o else None
+
+
+def friend_reposters(me_id, bases):
+    """Кто из друзей сделал репост этих публикаций: {оригинал: [краткие карточки друзей]}, до 8 на публикацию"""
+    bases = list(set(bases))
+    if not bases or not me_id:
+        return {}
+    marks = ",".join("?" * len(bases))
+    rows = q("SELECT r.repost_of AS base, r.author AS who FROM posts r "
+             "JOIN friends f ON f.a = ? AND f.b = r.author "
+             "WHERE r.repost_of IN (%s) AND r.author != ? ORDER BY r.created_at DESC" % marks, [me_id] + bases + [me_id])
+    out = {}
+    for r in rows:
+        lst = out.setdefault(r["base"], [])
+        if len(lst) < 8:
+            lst.append(user_brief(r["who"], me_id))
+    return out
+
+
 def post_json(p, me_id):
     pid, author = p["id"], p["author"]
     media = [media_json(m) for m in q("SELECT * FROM post_media WHERE post_id = ? ORDER BY position", (pid,))]
@@ -576,17 +748,21 @@ def post_json(p, me_id):
     saves = q1("SELECT COUNT(*) c FROM post_saves WHERE post_id = ?", (pid,))["c"]
     saved = q1("SELECT 1 FROM post_saves WHERE post_id = ? AND user_id = ?", (pid, me_id)) is not None
     owner = q1("SELECT * FROM users WHERE id = ?", (author,))
-    reposts = q1("SELECT COUNT(*) c FROM posts WHERE repost_of = ?", (pid,))["c"]
-    reposted = q1("SELECT 1 FROM posts WHERE repost_of = ? AND author = ?", (pid, me_id)) is not None
+    base = p["repost_of"] or pid                     # у копии-репоста счётчик и «я репостнул» считаются по оригиналу
+    reposts = q1("SELECT COUNT(*) c FROM posts WHERE repost_of = ?", (base,))["c"]
+    reposted = q1("SELECT 1 FROM posts WHERE repost_of = ? AND author = ?", (base, me_id)) is not None
     return {
-        "reposts": reposts, "reposted_by_me": reposted, "music": music_of(p),
+        "reposts": reposts, "reposted_by_me": reposted, "is_repost": bool(p["repost_of"]), "music": music_of(p),
+        "repost_friends": friend_reposters(me_id, [base]).get(base, []), "origin": origin_brief(p, me_id),
         "saves": saves, "saved_by_me": saved, "reel": bool(p["reel"]),
         "id": pid, "author": user_brief(author, me_id),
         "text": dec(author, "posts", COL["post_text"], pid, p["text_enc"]) or "",
         "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
         "media": media, "created_at": p["created_at"], "likes": likes, "liked_by_me": liked,
+        "views": (q1("SELECT views FROM post_stats WHERE post_id = ?", (pid,)) or {"views": 0})["views"],
         "comments": comments, "mine": author == me_id, "edited_at": p["edited_at"],
-        "comments_enabled": (author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True,
+        "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
+        "allow_repost": not p["no_repost"],
     }
 
 
@@ -603,8 +779,10 @@ def posts_json(rows, me_id):
     authors = list({p["author"] for p in rows})
     marks = _in(ids)
     media, likes, liked, comments, saves, saved = {}, {}, set(), {}, {}, set()
-    reposts, reposted = {}, set()
+    reposts, reposted, views = {}, set(), {}
     with LOCK:
+        for r in DB.execute("SELECT post_id, views FROM post_stats WHERE post_id IN (%s)" % marks, ids):
+            views[r["post_id"]] = r["views"]
         for m in DB.execute("SELECT * FROM post_media WHERE post_id IN (%s) ORDER BY position" % marks, ids):
             media.setdefault(m["post_id"], []).append(media_json(m))
         for r in DB.execute("SELECT post_id, COUNT(*) c FROM likes WHERE post_id IN (%s) GROUP BY post_id" % marks, ids):
@@ -617,26 +795,31 @@ def posts_json(rows, me_id):
             saves[r["post_id"]] = r["c"]
         for r in DB.execute("SELECT post_id FROM post_saves WHERE user_id = ? AND post_id IN (%s)" % marks, [me_id] + ids):
             saved.add(r["post_id"])
-        for r in DB.execute("SELECT repost_of, COUNT(*) c FROM posts WHERE repost_of IN (%s) GROUP BY repost_of" % marks, ids):
+        bases = list({p["repost_of"] or p["id"] for p in rows})
+        bmarks = _in(bases)
+        for r in DB.execute("SELECT repost_of, COUNT(*) c FROM posts WHERE repost_of IN (%s) GROUP BY repost_of" % bmarks, bases):
             reposts[r["repost_of"]] = r["c"]
-        for r in DB.execute("SELECT repost_of FROM posts WHERE author = ? AND repost_of IN (%s)" % marks, [me_id] + ids):
+        for r in DB.execute("SELECT repost_of FROM posts WHERE author = ? AND repost_of IN (%s)" % bmarks, [me_id] + bases):
             reposted.add(r["repost_of"])
         owners = {u["id"]: u for u in DB.execute("SELECT * FROM users WHERE id IN (%s)" % _in(authors), authors)}
     briefs = {a: user_brief(a, me_id, owners.get(a)) for a in authors}
+    rfriends = friend_reposters(me_id, [p["repost_of"] or p["id"] for p in rows])
     out = []
     for p in rows:
         pid, author = p["id"], p["author"]
         owner = owners.get(author)
         out.append({
-            "reposts": reposts.get(pid, 0), "reposted_by_me": pid in reposted, "music": music_of(p),
+            "repost_friends": rfriends.get(p["repost_of"] or pid, []), "origin": origin_brief(p, me_id),
+            "reposts": reposts.get(p["repost_of"] or pid, 0), "reposted_by_me": (p["repost_of"] or pid) in reposted, "is_repost": bool(p["repost_of"]), "music": music_of(p),
             "saves": saves.get(pid, 0), "saved_by_me": pid in saved, "reel": bool(p["reel"]),
             "id": pid, "author": briefs[author],
             "text": dec(author, "posts", COL["post_text"], pid, p["text_enc"]) or "",
             "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
             "media": media.get(pid, []), "created_at": p["created_at"],
-            "likes": p["likes_seed"] + likes.get(pid, 0), "liked_by_me": pid in liked,
+            "likes": p["likes_seed"] + likes.get(pid, 0), "liked_by_me": pid in liked, "views": views.get(pid, 0),
             "comments": comments.get(pid, 0), "mine": author == me_id, "edited_at": p["edited_at"],
-            "comments_enabled": (author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True,
+            "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
+            "allow_repost": not p["no_repost"],
         })
     return out
 
@@ -844,6 +1027,7 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self, method):
         path = urlparse(self.path).path
         self._cache_key = None
+        rcache_clear()
         self._body_cache = None          # тело запроса кэшируется только в пределах одного запроса, а не всего соединения
         try:
             if path != "/v1/ping" and not data_intact():
@@ -1060,6 +1244,17 @@ def lookup(req, me):
     req.send_json(200, profile_json(r, me["id"]))
 
 
+@route("GET", r"/v1/lookup_phone")
+def lookup_phone(req, me):
+    """Профиль по номеру из текста сообщения. Находится только тот, у кого включено «Найти меня по номеру»"""
+    ph = norm_phone(req.query().get("p", ""))
+    r = q1("SELECT * FROM users WHERE phone_idx = ? AND id <> ? ORDER BY created_at LIMIT 1",
+           (KR.blind_index(ph, "phone"), me["id"])) if ph else None
+    if not r or not findable(r) or either_blocked(me["id"], r["id"]):
+        raise ApiError(404, "not_found")
+    req.send_json(200, profile_json(r, me["id"]))
+
+
 def friend_brief(uid, me_id):
     b = user_brief(uid, me_id)
     b["friend_state"] = friend_state(me_id, uid) if uid != me_id else "none"
@@ -1104,6 +1299,36 @@ def friend_add(req, me, uid):
         run("INSERT OR IGNORE INTO friends(a, b, created_at) VALUES (?,?,?)", (uid, mid, now))
         st = "friends"
     req.send_json(200, {"state": st})
+
+
+@route("POST", r"/v1/follow/([A-Za-z0-9_\-]+)")
+def follow_add(req, me, uid):
+    mid = me["id"]
+    if uid == mid or not q1("SELECT 1 FROM users WHERE id = ?", (uid,)):
+        raise ApiError(404, "not_found")
+    if either_blocked(mid, uid):
+        raise ApiError(403, "blocked")
+    fresh = q1("SELECT 1 FROM follows WHERE follower = ? AND followee = ?", (mid, uid)) is None
+    run("INSERT OR IGNORE INTO follows(follower, followee, created_at) VALUES (?,?,?)", (mid, uid, time.time()))
+    if fresh:
+        # подписка сделана со страницы шортса — запоминаем, с какого именно видео (для статистики автора)
+        src = str(req.body_json().get("post", "") or "")[:40]
+        sp = q1("SELECT author FROM posts WHERE id = ?", (src,)) if src else None
+        if sp and sp["author"] == uid:
+            run("INSERT OR IGNORE INTO follow_source(follower, followee, post_id, created_at) VALUES (?,?,?,?)",
+                (mid, uid, src, time.time()))
+    req.send_json(200, {"following": True, "followers": followers_count(uid)})
+
+
+@route("DELETE", r"/v1/follow/([A-Za-z0-9_\-]+)")
+def follow_remove(req, me, uid):
+    mid = me["id"]
+    run("DELETE FROM follows WHERE follower = ? AND followee = ?", (mid, uid))
+    # подписка через дружбу тоже снимается: убираем дружбу
+    run("DELETE FROM friends WHERE a = ? AND b = ?", (mid, uid))
+    run("DELETE FROM friends WHERE a = ? AND b = ?", (uid, mid))
+    run("DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)", (mid, uid, uid, mid))
+    req.send_json(200, {"following": False, "followers": followers_count(uid)})
 
 
 @route("DELETE", r"/v1/friends/([A-Za-z0-9_\-]+)")
@@ -1183,6 +1408,7 @@ def order_avatars(req, me):
         raise ApiError(400, "bad_value")
     with LOCK:
         for pos, aid in enumerate(ids):
+            _RC.d = {}
             DB.execute("UPDATE avatars SET position = ? WHERE id = ? AND user_id = ?", (pos, str(aid), uid))
     sync_avatar(uid)
     req.send_json(200, me_json(uid))
@@ -1509,13 +1735,50 @@ def upload_media(req, me):
     mid = uuid.uuid4().hex
     os.makedirs(MEDIA_DIR, exist_ok=True)
     path = os.path.join(MEDIA_DIR, mid)
+    # проверка нейросетью: пока файл шифруется, копия открытых байт кладётся во временный файл
+    scan = moderation.enabled() and kind in ("image", "video")
+    scan_path, scan_file, digest = path + ".scan", None, hashlib.sha256()
+    read = req.rfile.read
+    if scan:
+        scan_file = open(scan_path, "wb")
+
+        def read(n, _r=req.rfile.read):
+            b = _r(n)
+            scan_file.write(b)
+            digest.update(b)
+            return b
     try:
-        with open(path, "wb") as f:
-            encrypt_stream(media_key(me["id"], mid), mid, req.rfile.read, length, f.write)
-    except EOFError:
-        os.remove(path)
-        req.close_connection = True
-        raise ApiError(400, "incomplete")
+        try:
+            with open(path, "wb") as f:
+                encrypt_stream(media_key(me["id"], mid), mid, read, length, f.write)
+        except EOFError:
+            os.remove(path)
+            req.close_connection = True
+            raise ApiError(400, "incomplete")
+        verdict, detail = "ok", {}
+        if scan:
+            scan_file.close()
+            h = digest.hexdigest()
+            if q1("SELECT 1 FROM media_blocked WHERE hash = ?", (h,)):
+                verdict = "block"                          # этот файл уже отклоняли — модели не нужны
+            else:
+                try:
+                    dur = float(params.get("dur", 0) or 0)
+                except ValueError:
+                    dur = 0.0
+                verdict, detail = moderation.check(scan_path, kind, dur)
+                if verdict == "block":
+                    run("INSERT OR IGNORE INTO media_blocked(hash, created_at) VALUES (?,?)", (h, time.time()))
+            if verdict in ("block", "error"):
+                os.remove(path)
+                if verdict == "block":
+                    raise ApiError(422, "content_blocked")
+                raise ApiError(503, "moderation_unavailable")
+    finally:
+        if scan_file:
+            scan_file.close()
+        if scan and os.path.exists(scan_path):
+            os.remove(scan_path)
 
     def to_int(v):
         try:
@@ -1530,6 +1793,9 @@ def upload_media(req, me):
         duration = 0.0
     run("INSERT INTO media(id, owner, kind, mime, width, height, duration, thumb, size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (mid, me["id"], kind, mime, width, height, duration, thumb, length, time.time()))
+    if verdict == "review":                                # спорное — публикуется, но попадает в очередь на проверку человеком
+        run("INSERT OR REPLACE INTO media_review(media_id, owner, verdict, detail, created_at) VALUES (?,?,?,?,?)",
+            (mid, me["id"], verdict, json.dumps(detail, ensure_ascii=False)[:2000], time.time()))
     req.send_json(201, {"id": mid, "kind": kind, "width": width, "height": height,
                         "duration": duration, "thumb": thumb})
 
@@ -1645,6 +1911,110 @@ def id3_cover(data):
 
 
 _COVER_CACHE = {}
+
+
+# ---------- Предпросмотр ссылок (картинка, заголовок, описание) ----------
+
+_LINK_CACHE = {}
+_LINK_TTL = 6 * 3600
+
+
+def _public_host(host):
+    """Только публичные адреса: никаких localhost и локальной сети (защита от SSRF)"""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False
+    return bool(infos)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def parse_og(page, base):
+    """Достаёт og:/twitter: теги и <title> из начала страницы"""
+    meta = {}
+    for m in re.finditer(r"<meta\s+([^>]+?)/?>", page, re.I | re.S):
+        attrs = dict((k.lower(), v) for k, _, v in re.findall(r"([\w:-]+)\s*=\s*([\"'])(.*?)\2", m.group(1), re.S))
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key and "content" in attrs and key not in meta:
+            meta[key] = htmllib.unescape(attrs["content"]).strip()
+    title = meta.get("og:title") or meta.get("twitter:title")
+    if not title:
+        t = re.search(r"<title[^>]*>(.*?)</title>", page, re.I | re.S)
+        title = htmllib.unescape(t.group(1)).strip() if t else ""
+    image = meta.get("og:image") or meta.get("twitter:image") or ""
+    if image:
+        from urllib.parse import urljoin
+        image = urljoin(base, image)
+        if not image.startswith(("http://", "https://")):
+            image = ""
+    return {"title": title[:160], "description": (meta.get("og:description") or meta.get("description") or "")[:240],
+            "site": (meta.get("og:site_name") or "")[:60], "image": image}
+
+
+def fetch_link_preview(url):
+    from urllib.parse import urlparse as _up, urljoin
+    opener = urllib.request.build_opener(_NoRedirect)
+    cur = url
+    for _ in range(4):
+        u = _up(cur)
+        if u.scheme not in ("http", "https") or not u.hostname or not _public_host(u.hostname):
+            return None
+        req = urllib.request.Request(cur, headers={"User-Agent": "Mozilla/5.0 (compatible; OrbitaBot/1.0)",
+                                                   "Accept": "text/html,application/xhtml+xml"})
+        try:
+            resp = opener.open(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+                cur = urljoin(cur, e.headers["Location"])
+                continue
+            return None
+        except Exception:
+            return None
+        ctype = resp.headers.get("Content-Type", "")
+        if "html" not in ctype.lower():
+            return None
+        raw = resp.read(300_000)
+        charset = "utf-8"
+        m = re.search(r"charset=([\w-]+)", ctype, re.I)
+        if m:
+            charset = m.group(1)
+        try:
+            page = raw.decode(charset, "replace")
+        except LookupError:
+            page = raw.decode("utf-8", "replace")
+        info = parse_og(page, cur)
+        if not info["title"] and not info["description"]:
+            return None
+        info["url"] = cur
+        return info
+    return None
+
+
+@route("GET", r"/v1/link_preview")
+def link_preview(req, me):
+    url = req.query().get("url", "").strip()
+    if not url.startswith(("http://", "https://")) or len(url) > 1000:
+        raise ApiError(400, "bad_url")
+    now = time.time()
+    hit = _LINK_CACHE.get(url)
+    if hit and now - hit[0] < _LINK_TTL:
+        info = hit[1]
+    else:
+        info = fetch_link_preview(url)
+        if len(_LINK_CACHE) > 500:
+            _LINK_CACHE.clear()
+        _LINK_CACHE[url] = (now, info)
+    if not info:
+        raise ApiError(404, "no_preview")
+    req.send_json(200, info)
 
 
 @route("GET", r"/media/([A-Za-z0-9]+)/cover", auth=False)
@@ -1965,6 +2335,8 @@ def post_events(req, me):
                 ratio = None
         if p and not either_blocked(me["id"], p["author"]):
             taste_event(me["id"], p, e["type"], ms, ratio)
+            if e["type"] == "view" and ratio is not None and p["reel"] and p["author"] != me["id"]:
+                reel_stat_view(p["id"], me["id"], ms, ratio)
             done += 1
     req.send_json(200, {"ok": True, "count": done})
 
@@ -2085,6 +2457,135 @@ def ranked_feed(me, rows, limit):
 MAX_REEL_SECONDS = 180
 
 
+# ---- Поиск по шортсам: по подписи, хэштегам, автору и названию музыки. Популярные запросы — из тех, что давали результат.
+DEFAULT_REEL_QUERIES = ["юмор", "музыка", "путешествия", "кот", "еда", "спорт", "танцы", "авто", "игры", "природа"]
+_REEL_TEXT_CACHE = {}
+
+
+def reel_haystack(p):
+    key = (p["id"], bytes(p["text_enc"]))
+    h = _REEL_TEXT_CACHE.get(key)
+    if h is None:
+        text = dec(p["author"], "posts", COL["post_text"], p["id"], p["text_enc"]) or ""
+        ub = user_brief(p["author"])
+        music = music_of(p) or {}
+        h = " ".join([text, ub.get("name") or "", ub.get("username") or "", music.get("title", ""), music.get("artist", "")]).lower().replace("ё", "е")
+        if len(_REEL_TEXT_CACHE) > 4000:
+            _REEL_TEXT_CACHE.clear()
+        _REEL_TEXT_CACHE[key] = h
+    return h
+
+
+def reel_tokens(query):
+    out = []
+    for w in re.findall(r"[\w#@]+", query.lower().replace("ё", "е")):
+        w = w.lstrip("#@")
+        if not w:
+            continue
+        out.append(w[:-2] if len(w) >= 6 else (w[:-1] if len(w) == 5 else w))     # «собаки» найдёт «собака»
+    return out[:6]
+
+
+# ---- Статистика шортса для автора: просмотры, удержание, среднее время, подписчики… (считается с момента появления этой функции)
+def reel_stat_view(pid, viewer, ms, ratio):
+    now = time.time()
+    run("INSERT OR IGNORE INTO post_stats(post_id, since) VALUES (?, ?)", (pid, now))
+    run("UPDATE post_stats SET views = views + 1, watch_ms = watch_ms + ?, ratio_sum = ratio_sum + ?, "
+        "completes = completes + ?, skips = skips + ? WHERE post_id = ?",
+        (ms, min(ratio, 1.0), 1 if ratio >= 0.9 else 0, 1 if ms < 2000 else 0, pid))
+    run("INSERT OR IGNORE INTO post_viewers(post_id, user_id) VALUES (?, ?)", (pid, viewer))
+    day = int(now // 86400)
+    run("INSERT OR IGNORE INTO post_views_day(post_id, day, views) VALUES (?, ?, 0)", (pid, day))
+    run("UPDATE post_views_day SET views = views + 1 WHERE post_id = ? AND day = ?", (pid, day))
+
+
+@route("GET", r"/v1/posts/([a-f0-9]+)/stats")
+def post_stats(req, me, pid):
+    p = q1("SELECT * FROM posts WHERE id = ? AND author = ?", (pid, me["id"]))
+    if not p:
+        raise ApiError(404, "not_found")
+    st = q1("SELECT * FROM post_stats WHERE post_id = ?", (pid,))
+    views = st["views"] if st else 0
+    uniq = q1("SELECT COUNT(*) c FROM post_viewers WHERE post_id = ?", (pid,))["c"]
+    now = time.time()
+    today = int(now // 86400)
+    days = {r["day"]: r["views"] for r in q("SELECT day, views FROM post_views_day WHERE post_id = ? AND day > ?", (pid, today - 7))}
+    base = p["repost_of"] or pid
+    likes = q1("SELECT COUNT(*) c FROM likes WHERE post_id = ?", (pid,))["c"] + (p["likes_seed"] or 0)
+    comments = q1("SELECT COUNT(*) c FROM comments WHERE post_id = ?", (pid,))["c"]
+    saves = q1("SELECT COUNT(*) c FROM post_saves WHERE post_id = ?", (pid,))["c"]
+    reposts = q1("SELECT COUNT(*) c FROM posts WHERE repost_of = ?", (pid,))["c"]
+    follow_new = q1("SELECT COUNT(*) c FROM follows WHERE followee = ? AND created_at > ?", (me["id"], now - 7 * 86400))["c"]
+    friends_new = q1("SELECT COUNT(*) c FROM friends WHERE a = ? AND created_at > ?", (me["id"], now - 7 * 86400))["c"]
+    eng = (likes + comments + saves + reposts + (st["shares"] if st else 0))
+    req.send_json(200, {
+        "views": views, "unique": uniq,
+        "avg_watch": round(st["watch_ms"] / views / 1000.0, 1) if st and views else 0,
+        "retention": round(st["ratio_sum"] / views, 3) if st and views else 0,
+        "completion": round(st["completes"] / views, 3) if st and views else 0,
+        "skip": round(st["skips"] / views, 3) if st and views else 0,
+        "duration": (q1("SELECT duration FROM post_media WHERE post_id = ? AND position = 0", (pid,)) or {"duration": 0})["duration"] or 0,
+        "likes": likes, "comments": comments, "saves": saves, "reposts": reposts, "shares": st["shares"] if st else 0,
+        "engagement": round(eng / views, 3) if views else 0,
+        "followers": followers_count(me["id"]), "followers_week": follow_new + friends_new,
+        "followers_from_video": q1("SELECT COUNT(*) c FROM follow_source fs JOIN follows f ON f.follower = fs.follower AND f.followee = fs.followee "
+                                   "WHERE fs.post_id = ?", (pid,))["c"],
+        "daily": [days.get(today - i, 0) for i in range(6, -1, -1)],
+        "since": st["since"] if st else 0,
+    })
+
+
+@route("GET", r"/v1/reels/search/popular")
+def reel_popular(req, me):
+    rows = q("SELECT q, COUNT(DISTINCT user_id) n FROM reel_queries WHERE created_at > ? GROUP BY q ORDER BY n DESC, MAX(created_at) DESC LIMIT 12",
+             (time.time() - 14 * 86400,))
+    items = [r["q"] for r in rows]
+    for d in DEFAULT_REEL_QUERIES:
+        if len(items) >= 10:
+            break
+        if d not in items:
+            items.append(d)
+    req.send_json(200, {"queries": items[:10]})
+
+
+@route("GET", r"/v1/reels/search")
+def reel_search(req, me):
+    params = req.query()
+    query = re.sub(r"\s+", " ", params.get("q", "")).strip()[:80]
+    if len(query) < 2:
+        raise ApiError(400, "bad_value")
+    if moderation.query_blocked(query):
+        raise ApiError(422, "query_blocked")
+    try:
+        offset = max(0, int(params.get("offset", 0)))
+        limit = max(1, min(int(params.get("limit", 20)), 30))
+    except ValueError:
+        raise ApiError(400, "bad_value")
+    uid = me["id"]
+    tokens = reel_tokens(query)
+    phrase = query.lower().replace("ё", "е").lstrip("#@")
+    rows = q("SELECT p.* FROM posts p JOIN post_media m ON m.post_id = p.id AND m.position = 0 "
+             "WHERE p.reel = 1 AND p.repost_of IS NULL AND m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?) "
+             "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
+             "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
+             "AND p.id NOT IN (SELECT post_id FROM post_reports WHERE reporter = ?) "
+             "ORDER BY p.created_at DESC LIMIT 600", (MAX_REEL_SECONDS, uid, uid, uid))
+    hits = []
+    for p in rows:
+        h = reel_haystack(p)
+        if all(t in h for t in tokens):
+            hits.append((0 if phrase in h else 1, p))
+    hits.sort(key=lambda x: x[0])            # точное совпадение фразы — выше, внутри — свежие сверху (порядок сохраняется)
+    page = [p for _, p in hits[offset:offset + limit]]
+    if offset == 0 and hits:
+        run("INSERT INTO reel_queries(q, user_id, created_at) VALUES (?,?,?)", (phrase[:60], uid, time.time()))
+    out = []
+    for p, j in zip(page, posts_json(page, uid)):
+        j["author_state"] = "me" if p["author"] == uid else ("following" if is_following(uid, p["author"]) else "none")
+        out.append(j)
+    req.send_json(200, {"reels": out, "total": len(hits), "more": offset + limit < len(hits)})
+
+
 @route("GET", r"/v1/reels")
 def list_reels(req, me):
     """Короткие видео (шортс): публикации, у которых первое медиа — видео не длиннее 3 минут.
@@ -2112,7 +2613,7 @@ def list_reels(req, me):
         rows = ranked_feed(me, rows, limit)
     out = []
     for p, j in zip(rows, posts_json(rows, uid)):
-        j["author_state"] = "me" if p["author"] == uid else friend_state(uid, p["author"])
+        j["author_state"] = "me" if p["author"] == uid else ("following" if is_following(uid, p["author"]) else "none")
         out.append(j)
     req.send_json(200, {"reels": out})
 
@@ -2205,11 +2706,11 @@ def create_post(req, me):
     with LOCK:
         run("BEGIN")
         try:
-            run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, music_media, music_key) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+            run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, music_media, music_key, "
+                "comments_off, no_repost) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (pid, uid, enc(uid, "posts", COL["post_text"], pid, text),
                  enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
-                 music_enc, music_media, mkey))
+                 music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0))
             write_post_media(pid, items)
             run("COMMIT")
         except Exception:
@@ -2265,7 +2766,7 @@ def like(req, me, pid):
     if not q1("SELECT 1 FROM posts WHERE id = ?", (pid,)):
         raise ApiError(404, "not_found")
     fresh = q1("SELECT 1 FROM likes WHERE post_id = ? AND user_id = ?", (pid, me["id"])) is None
-    run("INSERT OR IGNORE INTO likes(post_id, user_id) VALUES (?, ?)", (pid, me["id"]))
+    run("INSERT OR IGNORE INTO likes(post_id, user_id, created_at) VALUES (?, ?, ?)", (pid, me["id"], time.time()))
     if fresh:
         taste_event(me["id"], q1("SELECT * FROM posts WHERE id = ?", (pid,)), "like")
     req.send_json(200, {"ok": True})
@@ -2281,6 +2782,24 @@ def save_post(req, me, pid):
     if fresh:
         taste_event(me["id"], p, "save")
     req.send_json(200, {"ok": True, "saves": q1("SELECT COUNT(*) c FROM post_saves WHERE post_id = ?", (pid,))["c"]})
+
+
+REPORT_REASONS = {"spam", "violence", "adult", "illegal", "copyright", "other"}
+
+
+@route("POST", r"/v1/posts/([a-f0-9]+)/report")
+def report_post(req, me, pid):
+    """Пожаловаться на публикацию или шортс: сохраняем жалобу для модерации"""
+    p = q1("SELECT id, author FROM posts WHERE id = ?", (pid,))
+    if not p:
+        raise ApiError(404, "not_found")
+    reason = str(req.body_json().get("reason", "other"))
+    if reason not in REPORT_REASONS:
+        reason = "other"
+    run("INSERT OR REPLACE INTO post_reports(post_id, reporter, reason, created_at) VALUES (?,?,?,?)",
+        (pid, me["id"], reason, time.time()))
+    taste_event(me["id"], q1("SELECT * FROM posts WHERE id = ?", (pid,)), "dislike")      # такое больше не показываем
+    req.send_json(200, {"ok": True})
 
 
 @route("DELETE", r"/v1/posts/([a-f0-9]+)/save")
@@ -2303,10 +2822,10 @@ def repost_post(req, me, pid):
     if p["repost_of"]:
         p = q1("SELECT * FROM posts WHERE id = ?", (orig,)) or p
     uid = me["id"]
-    if p["author"] == uid:
-        raise ApiError(400, "own_post")
-    if either_blocked(uid, p["author"]):
+    if p["author"] != uid and either_blocked(uid, p["author"]):
         raise ApiError(403, "blocked")
+    if p["no_repost"] and p["author"] != uid:
+        raise ApiError(403, "repost_disabled")
     if q1("SELECT 1 FROM posts WHERE repost_of = ? AND author = ?", (orig, uid)):
         return req.send_json(200, {"ok": True, "reposts": repost_state(orig), "reposted_by_me": True})
     new = uuid.uuid4().hex
@@ -2415,6 +2934,8 @@ def add_comment(req, me, pid):
         raise ApiError(403, "blocked")
     if owner and p["author"] != me["id"] and not policy_allows(owner, me["id"], owner["comments_policy"]):
         raise ApiError(403, "comments_disabled")
+    if p["comments_off"]:
+        raise ApiError(403, "comments_disabled")
     data = req.body_json()
     text = str(data.get("text", "")).strip()
     if not 1 <= len(text) <= 1000:
@@ -2440,7 +2961,7 @@ def add_comment(req, me, pid):
 def like_comment(req, me, cid):
     if not q1("SELECT 1 FROM comments WHERE id = ?", (cid,)):
         raise ApiError(404, "not_found")
-    run("INSERT OR IGNORE INTO comment_likes(comment_id, user_id) VALUES (?, ?)", (cid, me["id"]))
+    run("INSERT OR IGNORE INTO comment_likes(comment_id, user_id, created_at) VALUES (?, ?, ?)", (cid, me["id"], time.time()))
     req.send_json(200, {"ok": True})
 
 
@@ -2499,6 +3020,91 @@ def user_wall(req, me, uid):
     rows = q("SELECT * FROM posts WHERE author = ? AND reel = 0 AND created_at < ? ORDER BY created_at DESC LIMIT ?",
              (uid, before, limit))
     req.send_json(200, {"posts": posts_json(rows, me["id"]), "private": False})
+
+
+# ---------- записи гостей на стене ----------
+
+def wall_entry_json(e, viewer):
+    text = dec(e["author"], "comments", COL["comment_text"], e["id"], e["text_enc"]) if e["text_enc"] else ""
+    return {"id": e["id"], "owner": e["owner"], "author": user_brief(e["author"], viewer), "kind": e["kind"],
+            "text": text or "", "media": e["media_id"], "width": e["width"], "height": e["height"],
+            "created_at": e["created_at"], "can_delete": viewer in (e["author"], e["owner"])}
+
+
+def wall_can_write(owner, viewer):
+    """Писать на стену могут все, кого владелец не заблокировал и кому разрешил комментировать (общая настройка)"""
+    if viewer == owner["id"]:
+        return True
+    if either_blocked(owner["id"], viewer):
+        return False
+    return policy_allows(owner, viewer, owner["comments_policy"])
+
+
+@route("GET", r"/v1/users/([A-Za-z0-9_\-]+)/wall")
+def wall_entries_list(req, me, uid):
+    owner = q1("SELECT * FROM users WHERE id = ?", (uid,))
+    if not owner:
+        raise ApiError(404, "not_found")
+    if owner["id"] != me["id"] and either_blocked(owner["id"], me["id"]):
+        req.send_json(200, {"entries": [], "can_write": False})
+        return
+    if not can_see(owner, me["id"], "wall"):
+        req.send_json(200, {"entries": [], "private": True, "can_write": False})
+        return
+    params = req.query()
+    try:
+        before = float(params.get("before", time.time() + 1))
+        limit = max(1, min(int(params.get("limit", 40)), 100))
+    except ValueError:
+        raise ApiError(400, "bad_value")
+    rows = q("SELECT * FROM wall_entries WHERE owner = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?",
+             (owner["id"], before, limit))
+    out = [wall_entry_json(e, me["id"]) for e in rows if not is_blocked(me["id"], e["author"])]
+    req.send_json(200, {"entries": out, "can_write": wall_can_write(owner, me["id"])})
+
+
+@route("POST", r"/v1/users/([A-Za-z0-9_\-]+)/wall")
+def wall_entry_add(req, me, uid):
+    owner = q1("SELECT * FROM users WHERE id = ?", (uid,))
+    if not owner:
+        req.drain()
+        raise ApiError(404, "not_found")
+    if not wall_can_write(owner, me["id"]):
+        req.drain()
+        raise ApiError(403, "wall_closed")
+    data = req.body_json()
+    kind = data.get("kind")
+    text = str(data.get("text") or "").strip()
+    if kind not in ("text", "photo", "drawing") or len(text) > 500:
+        raise ApiError(400, "bad_entry")
+    media_id, width, height = None, 0, 0
+    if kind == "text":
+        if not text:
+            raise ApiError(400, "bad_text")
+    else:
+        # фото и рисунок уже прошли проверку нейросетью при загрузке (/v1/media) — здесь только убеждаемся, что файл свой и это картинка
+        m = q1("SELECT * FROM media WHERE id = ? AND owner = ?", (str(data.get("media") or ""), me["id"]))
+        if not m or m["kind"] != "image":
+            raise ApiError(400, "media_not_found")
+        media_id, width, height = m["id"], m["width"] or 0, m["height"] or 0
+    if q1("SELECT COUNT(*) c FROM wall_entries WHERE author = ? AND created_at > ?", (me["id"], time.time() - 3600))["c"] >= 20:
+        raise ApiError(429, "too_many")
+    eid = uuid.uuid4().hex
+    run("INSERT INTO wall_entries(id, owner, author, kind, text_enc, media_id, width, height, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (eid, owner["id"], me["id"], kind, enc(me["id"], "comments", COL["comment_text"], eid, text) if text else None,
+         media_id, width, height, time.time()))
+    req.send_json(201, wall_entry_json(q1("SELECT * FROM wall_entries WHERE id = ?", (eid,)), me["id"]))
+
+
+@route("DELETE", r"/v1/wall/([a-f0-9]+)")
+def wall_entry_delete(req, me, eid):
+    e = q1("SELECT * FROM wall_entries WHERE id = ?", (eid,))
+    if not e:
+        raise ApiError(404, "not_found")
+    if me["id"] not in (e["author"], e["owner"]):
+        raise ApiError(403, "forbidden")
+    run("DELETE FROM wall_entries WHERE id = ?", (eid,))
+    req.send_json(200, {"ok": True})
 
 
 @route("GET", r"/v1/music/([A-Za-z0-9_\-]+)/reels")
@@ -2718,6 +3324,25 @@ def summary_of(m, limit=120):
     return text[:limit]
 
 
+def last_thumb(m):
+    """Миниатюра вложения для списка чатов: фото — само фото, видео и кружок — их обложка (если есть)"""
+    try:
+        atts = attachments_of(m)
+        if not atts:
+            return None
+        a = atts[0]
+        t = a.get("type")
+        if t == "photo":
+            mid = a.get("thumb") or a.get("media_id")
+        elif t in ("video", "circle"):
+            mid = a.get("thumb")
+        else:
+            return None
+        return {"type": t, "media": mid} if mid else None
+    except Exception:
+        return None
+
+
 def drop_message_media(m):
     for att in attachments_of(m):
         mid = att.get("media_id")
@@ -2859,8 +3484,8 @@ def forward_messages(req, me, peer):
     ids = [str(i) for i in (d.get("ids") or []) if isinstance(i, str)][:50]
     if not ids:
         raise ApiError(400, "bad_value")
-    hide_sender = bool(d.get("hide_sender"))
     hide_caption = bool(d.get("hide_caption"))
+    hide_sender = bool(d.get("hide_sender")) or hide_caption      # «без подписей»: ни текста, ни пометки «Переслано от»
     group = fwd_target(uid, peer)
     items = []
     for mid in ids:
@@ -2937,9 +3562,15 @@ def share_post(req, me, peer):
         text, entities = "", []
     if not (text or atts):
         raise ApiError(400, "bad_value")
-    fwd = {"id": p["author"], "name": user_brief(p["author"], uid)["name"], "post": pid}
-    insert_fwd(uid, peer, group, text, entities, atts, None if d.get("hide_sender") else fwd, time.time())
+    if d.get("hide_sender") or d.get("hide_caption"):
+        fwd = {"id": None, "name": "", "post": pid}              # пометку не показываем, но ссылка на пост остаётся
+    else:
+        fwd = {"id": p["author"], "name": user_brief(p["author"], uid)["name"], "post": pid}
+    insert_fwd(uid, peer, group, text, entities, atts, fwd, time.time())
     taste_event(uid, p, "share")
+    if p["author"] != uid:
+        run("INSERT OR IGNORE INTO post_stats(post_id, since) VALUES (?, ?)", (pid, time.time()))
+        run("UPDATE post_stats SET shares = shares + 1 WHERE post_id = ?", (pid,))
     notify_fwd(uid, peer, group)
     req.send_json(200, {"ok": True})
 
@@ -3151,6 +3782,9 @@ def list_chats(req, me):
     unread_by = {r["sender"]: r["c"] for r in q(
         "SELECT sender, COUNT(*) c FROM messages WHERE recipient = ? AND read_at IS NULL AND del_recipient = 0 "
         "GROUP BY sender", (uid,))}
+    tags_by = {r["sender"]: r["c"] for r in q(
+        "SELECT d.sender, COUNT(*) c FROM dm_mentions d JOIN messages m ON m.id = d.message_id "
+        "WHERE d.recipient = ? AND m.read_at IS NULL AND m.del_recipient = 0 GROUP BY d.sender", (uid,))}
     peers = [r["peer"] for r in last_rows]
     users = {}
     if peers:
@@ -3162,11 +3796,61 @@ def list_chats(req, me):
         total += unread
         chats.append({"peer": user_brief(peer, uid, users.get(peer)), "unread": unread, "updated_at": last["created_at"],
                       "last": {"text": preview_of(last, uid), "mine": last["sender"] == uid,
-                               "read": last["read_at"] is not None, "created_at": last["created_at"]},
-                      "typing": typing_action(peer, uid)})
+                               "read": last["read_at"] is not None, "created_at": last["created_at"],
+                               "thumb": last_thumb(last)},
+                      "typing": typing_action(peer, uid), "mentions": tags_by.get(peer, 0) if peer != uid else 0})
     chats.extend(group_rows)
     chats.sort(key=lambda c: c["updated_at"], reverse=True)
     req.send_json(200, {"chats": chats, "unread": total + group_total})
+
+
+@route("GET", r"/v1/search/messages")
+def search_messages(req, me):
+    """Поиск слова по тексту всех переписок (личные и группы/каналы)"""
+    uid = me["id"]
+    needle = (req.query().get("q") or "").strip().lower()
+    if len(needle) < 2:
+        return req.send_json(200, {"hits": []})
+    hits = []
+    rows = q("SELECT * FROM messages WHERE ((sender = ?1 AND del_sender = 0) OR (recipient = ?1 AND del_recipient = 0)) "
+             "ORDER BY created_at DESC LIMIT 4000", (uid,))
+    users = {}
+    for m in rows:
+        if len(hits) >= 40:
+            break
+        try:
+            text = summary_of(m, 400)
+        except Exception:
+            continue
+        if needle not in text.lower():
+            continue
+        peer = m["recipient"] if m["sender"] == uid else m["sender"]
+        if peer not in users:
+            users[peer] = user_brief(peer, uid)
+        hits.append({"peer": users[peer], "id": m["id"], "text": text, "mine": m["sender"] == uid,
+                     "created_at": m["created_at"]})
+    for mem in q("SELECT * FROM group_members WHERE user_id = ?", (uid,)):
+        g = group_row(mem["group_id"])
+        if not g:
+            continue
+        since = history_since(g, mem)
+        grows = q("SELECT * FROM group_messages WHERE group_id = ? AND created_at >= ? AND id NOT IN "
+                  "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT 1500",
+                  (g["id"], since, uid))
+        found = 0
+        for m in grows:
+            if found >= 10:
+                break
+            try:
+                text = summary_of(m, 400)
+            except Exception:
+                continue
+            if needle in text.lower():
+                found += 1
+                hits.append({"peer": group_peer(g), "id": m["id"], "text": text, "mine": m["sender"] == uid,
+                             "created_at": m["created_at"]})
+    hits.sort(key=lambda h: h["created_at"], reverse=True)
+    req.send_json(200, {"hits": hits[:60]})
 
 
 @route("GET", r"/v1/chats/([A-Za-z0-9_\-]+)/messages")
@@ -3199,6 +3883,18 @@ def chat_messages(req, me, peer):
                         "can_write": not either_blocked(uid, peer)})
 
 
+def record_dm_mention(peer, sender, mid, text, now):
+    """В личной переписке «тегом» считается @username собеседника в тексте"""
+    names = {n.lower() for n in MENTION_RE.findall(text or "")}
+    if not names:
+        return
+    r = q1("SELECT username_enc FROM users WHERE id = ?", (peer,))
+    uname = (dec_profile(q1("SELECT * FROM users WHERE id = ?", (peer,)), "username_enc", COL["username"]) or "").lower() if r else ""
+    if uname and uname in names:
+        run("INSERT OR IGNORE INTO dm_mentions(message_id, sender, recipient, created_at) VALUES (?,?,?,?)",
+            (mid, sender, peer, now))
+
+
 def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, story=None, silent=False):
     """Кладёт личное сообщение в базу. peer == uid — «Избранное» (сообщение сразу прочитано)."""
     mid = uuid.uuid4().hex
@@ -3218,6 +3914,8 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     TYPING.pop((uid, peer), None)
     UVER[peer] = UVER.get(peer, 0) + 1                 # у получателя список чатов обновится сразу
     row = q1("SELECT * FROM messages WHERE id = ?", (mid,))
+    if peer != uid:
+        record_dm_mention(peer, uid, mid, text, now)
     if peer != uid and not silent:
         notify_message(uid, peer, summary_of(row, 150))
     return row
@@ -3344,6 +4042,7 @@ def drop_story(st):
 
 def story_json(st, me_id):
     return {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"],
+            "thumb": (q1("SELECT thumb FROM media WHERE id = ?", (st["media_id"],)) or {"thumb": None})["thumb"] if st["kind"] == "video" else None,
             "caption": dec(st["author"], "posts", COL["post_text"], st["id"], st["caption_enc"]) or "",
             "created_at": st["created_at"], "expires_at": st["expires_at"], "permanent": bool(st["permanent"]),
             "viewed": st["author"] == me_id or bool(q1("SELECT 1 FROM story_views WHERE story_id = ? AND viewer = ?",
@@ -3482,7 +4181,7 @@ def user_permanent_stories(req, me, uid):
     if uid != me["id"] and (either_blocked(me["id"], uid) or uid not in story_audience(me["id"])):
         req.send_json(200, {"stories": [], "count": 0})
         return
-    rows = q("SELECT * FROM stories WHERE author = ? AND permanent = 1 ORDER BY created_at", (uid,))
+    rows = q("SELECT * FROM stories WHERE author = ? AND (permanent = 1 OR expires_at > ?) ORDER BY created_at", (uid, time.time()))
     req.send_json(200, {"stories": [story_json(r, me["id"]) for r in rows], "count": len(rows)})
 
 
@@ -3504,6 +4203,88 @@ def story_viewers(req, me, sid):
     viewers = [{**user_brief(r["viewer"], me["id"]), "at": r["viewed_at"], "liked": r["viewer"] in liked} for r in rows]
     viewers.sort(key=lambda v: (not v["liked"]))        # поставившие сердечко — наверху (стабильная сортировка)
     req.send_json(200, {"viewers": viewers, "likes": len(liked)})
+
+
+# ---- Колокольчик: лента активности (лайки, комментарии, подписки…). Ничего не хранится отдельно — читаем из тех же таблиц,
+# поэтому тысяча событий в час не стоит записей. Непрочитанное = всё, что новее notif_seen.
+ACT_SOURCES = [
+    ("like", "SELECT l.user_id AS who, l.post_id AS ref, '' AS ref2, l.created_at AS at FROM likes l "
+             "JOIN posts p ON p.id = l.post_id WHERE p.author = :me AND l.user_id <> :me AND l.created_at > 0"),
+    ("comment", "SELECT c.author AS who, c.post_id AS ref, c.id AS ref2, c.created_at AS at FROM comments c "
+                "JOIN posts p ON p.id = c.post_id WHERE p.author = :me AND c.author <> :me AND c.reply_to_id IS NULL"),
+    ("reply", "SELECT c.author AS who, c.post_id AS ref, c.id AS ref2, c.created_at AS at FROM comments c "
+              "WHERE c.author <> :me AND (c.reply_to_id IN (SELECT id FROM comments WHERE author = :me) "
+              "OR c.parent_id IN (SELECT id FROM comments WHERE author = :me))"),
+    ("comment_like", "SELECT cl.user_id AS who, cm.post_id AS ref, cl.comment_id AS ref2, cl.created_at AS at FROM comment_likes cl "
+                     "JOIN comments cm ON cm.id = cl.comment_id WHERE cm.author = :me AND cl.user_id <> :me AND cl.created_at > 0"),
+    ("follow", "SELECT follower AS who, '' AS ref, '' AS ref2, created_at AS at FROM follows WHERE followee = :me"),
+    ("friend_request", "SELECT from_id AS who, '' AS ref, '' AS ref2, created_at AS at FROM friend_requests WHERE to_id = :me"),
+    ("story_like", "SELECT sl.user_id AS who, sl.story_id AS ref, '' AS ref2, sl.created_at AS at FROM story_likes sl "
+                   "JOIN stories st ON st.id = sl.story_id WHERE st.author = :me AND sl.user_id <> :me"),
+    ("repost", "SELECT r.author AS who, r.repost_of AS ref, r.id AS ref2, r.created_at AS at FROM posts r "
+               "JOIN posts o ON o.id = r.repost_of WHERE o.author = :me AND r.author <> :me"),
+]
+
+
+def notif_seen(uid):
+    r = q1("SELECT seen_at FROM notif_state WHERE user_id = ?", (uid,))
+    return r["seen_at"] if r else 0.0
+
+
+@route("GET", r"/v1/me/activity/count")
+def activity_count(req, me):
+    seen, total = notif_seen(me["id"]), 0
+    for kind, sql in ACT_SOURCES:
+        r = q1("SELECT COUNT(*) c FROM (SELECT 1 FROM (%s) WHERE at > :seen LIMIT 1000)" % sql, {"me": me["id"], "seen": seen})
+        total += r["c"] if r else 0
+        if total >= 1000:
+            break
+    req.send_json(200, {"unread": min(total, 999), "more": total >= 1000})
+
+
+@route("GET", r"/v1/me/activity")
+def activity_list(req, me):
+    qs = req.query()
+    try:
+        before = float(qs.get("before") or 0) or time.time() + 10
+        limit = max(1, min(60, int(qs.get("limit") or 40)))
+    except ValueError:
+        raise ApiError(400, "bad_request")
+    seen = notif_seen(me["id"])
+    rows = []
+    for kind, sql in ACT_SOURCES:
+        for r in q("SELECT * FROM (%s) WHERE at < :before ORDER BY at DESC LIMIT :n" % sql,
+                   {"me": me["id"], "before": before, "n": limit}):
+            rows.append((kind, r))
+    rows.sort(key=lambda kr: -kr[1]["at"])
+    items, cache = [], {}
+    for kind, r in rows:
+        if len(items) >= limit:
+            break
+        who = r["who"]
+        if who not in cache:
+            cache[who] = None if either_blocked(me["id"], who) else user_brief(who, me["id"])
+        if cache[who] is None:
+            continue
+        text = ""
+        if kind in ("comment", "reply", "comment_like") and r["ref2"]:
+            c = q1("SELECT * FROM comments WHERE id = ?", (r["ref2"],))
+            if c:
+                text = (dec(c["author"], "comments", COL["comment_text"], c["id"], c["text_enc"]) or "")[:90]
+        elif kind in ("like", "repost") and r["ref"]:
+            pp = q1("SELECT * FROM posts WHERE id = ?", (r["ref"],))
+            if pp:
+                text = (dec(pp["author"], "posts", COL["post_text"], pp["id"], pp["text_enc"]) or "")[:70]
+        items.append({"id": "%s:%s:%s:%s" % (kind, who, r["ref"], r["ref2"]), "kind": kind, "at": r["at"],
+                      "unread": r["at"] > seen, "user": cache[who], "post_id": r["ref"] if kind != "story_like" else "",
+                      "story_id": r["ref"] if kind == "story_like" else "", "text": text})
+    req.send_json(200, {"items": items})
+
+
+@route("POST", r"/v1/me/activity/seen")
+def activity_seen(req, me):
+    run("INSERT OR REPLACE INTO notif_state(user_id, seen_at) VALUES (?, ?)", (me["id"], time.time()))
+    req.send_json(200, {"ok": True})
 
 
 @route("DELETE", r"/v1/stories/([a-f0-9]+)")
@@ -4071,7 +4852,7 @@ def group_chat_rows(uid):
             item = {"text": who + summary_of(last), "mine": last["sender"] == uid,
                     "read": q1("SELECT 1 FROM group_members WHERE group_id = ? AND user_id != ? AND last_read >= ?",
                                (g["id"], uid, last["created_at"])) is not None,
-                    "created_at": last["created_at"]}
+                    "created_at": last["created_at"], "thumb": last_thumb(last)}
             updated = last["created_at"]
         else:
             item = {"text": "Канал создан" if channel else "Группа создана", "mine": False, "read": True,
@@ -4773,6 +5554,35 @@ def add_track_from_chat(req, me):
     req.send_json(201, track_json(q1("SELECT * FROM tracks WHERE id = ?", (tid,))))
 
 
+@route("POST", r"/v1/me/playlist/from-sound")
+def add_track_from_sound(req, me):
+    """Звук из шортса — в свой плейлист (как любая песня). Берём только то, что реально звучит в чьём-то шортсе"""
+    uid = me["id"]
+    d = req.body_json()
+    media_id = str(d.get("media_id", ""))
+    if not q1("SELECT 1 FROM posts WHERE music_media = ? LIMIT 1", (media_id,)) \
+            and not q1("SELECT 1 FROM tracks WHERE media_id = ? LIMIT 1", (media_id,)):
+        raise ApiError(404, "not_found")
+    src = q1("SELECT * FROM media WHERE id = ?", (media_id,))
+    if not src or not os.path.isfile(os.path.join(MEDIA_DIR, src["id"])):
+        raise ApiError(404, "not_found")
+    mime = src["mime"] if src["mime"] in ALLOWED_MIME and src["mime"].startswith("audio/") else None
+    if not mime:
+        raise ApiError(415, "unsupported_media")
+    if q1("SELECT COUNT(*) c FROM tracks WHERE user_id = ?", (uid,))["c"] >= MAX_TRACKS:
+        raise ApiError(400, "too_many_tracks")
+    nid = copy_media(src, uid, "audio", mime)
+    title = clean_line(d.get("title"), 120) or "Без названия"
+    artist = clean_line(d.get("artist"), 120)
+    tid = uuid.uuid4().hex
+    pos = (q1("SELECT COALESCE(MAX(position), -1) p FROM tracks WHERE user_id = ?", (uid,))["p"]) + 1
+    run("INSERT INTO tracks(id, user_id, media_id, position, title_enc, artist_enc, duration, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (tid, uid, nid, pos, enc(uid, "profile", COL["track_title"], tid, title),
+         enc(uid, "profile", COL["track_artist"], tid, artist) if artist else None,
+         float(src["duration"] or 0), time.time()))
+    req.send_json(201, track_json(q1("SELECT * FROM tracks WHERE id = ?", (tid,))))
+
+
 # ---------- плейлист ----------
 
 def clean_line(v, limit):
@@ -4785,6 +5595,29 @@ def user_playlist(req, me, uid):
     if not r:
         raise ApiError(404, "not_found")
     req.send_json(200, {"tracks": tracks_of(uid) if can_see(r, me["id"], "music") else []})
+
+
+# кто сейчас слушает музыку: uid -> когда запись протухнет (приложение шлёт «я слушаю» каждые ~20 с)
+LISTENING = {}
+LISTENING_TTL = 45
+
+
+def is_listening(uid):
+    until = LISTENING.get(uid)
+    if until and until > time.time():
+        return True
+    LISTENING.pop(uid, None)
+    return False
+
+
+@route("POST", r"/v1/me/listening")
+def set_listening(req, me):
+    d = req.body_json()
+    if d.get("on"):
+        LISTENING[me["id"]] = time.time() + LISTENING_TTL
+    else:
+        LISTENING.pop(me["id"], None)
+    req.send_json(200, {"ok": True})
 
 
 @route("POST", r"/v1/me/playlist")
@@ -4809,6 +5642,9 @@ def add_track(req, me):
     run("INSERT INTO tracks(id, user_id, media_id, position, title_enc, artist_enc, duration, created_at) VALUES (?,?,?,?,?,?,?,?)",
         (tid, uid, m["id"], pos, enc(uid, "profile", COL["track_title"], tid, title),
          enc(uid, "profile", COL["track_artist"], tid, artist) if artist else None, duration, time.time()))
+    cover = str(d.get("cover") or "")
+    if cover and q1("SELECT 1 FROM media WHERE id = ? AND owner = ? AND kind = 'image'", (cover, uid)):
+        run("UPDATE tracks SET cover = ? WHERE id = ?", (cover, tid))
     req.send_json(201, track_json(q1("SELECT * FROM tracks WHERE id = ?", (tid,))))
 
 

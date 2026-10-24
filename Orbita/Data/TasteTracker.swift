@@ -106,7 +106,7 @@ extension ExtrasAPI {
 
 struct Reel: Identifiable, Equatable {
     var post: Post
-    var state: String           // me | none | friends | outgoing | incoming
+    var state: String           // me | none | following
     var id: String { post.id }
 }
 
@@ -137,9 +137,17 @@ extension ExtrasAPI {
         _ = try? await api.request(saved ? "PUT" : "DELETE", "/v1/posts/\(id)/save")
     }
 
+    /// Пожаловаться на публикацию (spam | violence | adult | illegal | copyright | other)
+    func reportPost(id: String, reason: String) async throws {
+        _ = try await api.request("POST", "/v1/posts/\(id)/report", body: ServerAPI.json(["reason": reason]))
+    }
+
     /// Репост шортса к себе на страницу / отмена репоста
-    func setReposted(id: String, on: Bool) async throws {
-        _ = try await api.request(on ? "PUT" : "DELETE", "/v1/posts/\(id)/repost")
+    @discardableResult
+    func setReposted(id: String, on: Bool) async throws -> (count: Int, mine: Bool)? {
+        let data = try await api.request(on ? "PUT" : "DELETE", "/v1/posts/\(id)/repost")
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let n = j["reposts"] as? Int else { return nil }
+        return (n, j["reposted_by_me"] as? Bool ?? on)
     }
 
     /// Закладки раньше жили только на устройстве — один раз отправляем их серверу
@@ -149,13 +157,24 @@ extension ExtrasAPI {
     }
 
     /// Новый шортс: одно вертикальное видео до 3 минут (публикуется отдельно от постов)
-    func createReel(text: String, media: MediaItem, musicTrack: String? = nil) async throws -> Post {
+    func createReel(text: String, media: MediaItem, musicTrack: String? = nil, options: PostOptions = PostOptions()) async throws -> Post {
         var body: [String: Any] = ["text": text, "entities": [[String: Any]](),
                                    "media": [["id": media.id, "width": media.width, "height": media.height]],
                                    "reel": true]
         if let musicTrack { body["music_track"] = musicTrack }
+        if options.commentsOff { body["comments_off"] = true }
+        if options.noRepost { body["no_repost"] = true }
         let data = try await api.request("POST", "/v1/posts", body: ServerAPI.json(body))
         return try decodeAPI(PostDTO.self, from: data).model
+    }
+
+    /// Подписаться / отписаться. Возвращает (подписан ли, число подписчиков)
+    /// source — шортс, с которого подписались (идёт в статистику видео автора)
+    func setFollow(id: String, on: Bool, source: String? = nil) async -> (Bool, Int)? {
+        let body: Data? = (on && source != nil) ? ServerAPI.json(["post": source!]) : nil
+        guard let data = try? await api.request(on ? "POST" : "DELETE", "/v1/follow/\(id)", body: body),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return ((obj["following"] as? Bool) ?? on, (obj["followers"] as? Int) ?? 0)
     }
 
     func addFriend(id: String) async -> String? {

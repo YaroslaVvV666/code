@@ -334,6 +334,8 @@ struct LinkSheet: View {
             PostLinkSheet(postID: id)
         case .group(let code):
             GroupLinkSheet(code: code)
+        case .phone(let number):
+            PhoneLookupSheet(phone: number)
         }
     }
 }
@@ -668,10 +670,16 @@ struct QRSheet: View {
 struct PublicProfileSheet: View {
     enum Source { case username(String), id(String) }
     let source: Source
+    /// Если задано — профиль лежит не в окне, а внутри другого экрана (шторка из шортсов), и закрывается этим действием
+    var onClose: (() -> Void)? = nil
+    /// Кнопка «назад» слева сверху вместо крестика справа (профиль друга из пузыря)
+    var backButton = true            // везде стрелка «назад» слева сверху и выход свайпом, без крестика
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
+
+    private func close() { if let onClose { onClose() } else { dismiss() } }
 
     var body: some View {
         let page: UserPageModel.Source = {
@@ -680,8 +688,8 @@ struct PublicProfileSheet: View {
             case .id(let id):         return id.lowercased() == session.serverID ? .me : .id(id)
             }
         }()
-        ZStack(alignment: .topTrailing) {
-            ScrollView {
+        ZStack(alignment: backButton ? .topLeading : .topTrailing) {
+            ScrollView(showsIndicators: false) {
                 UserPageView(source: page, session: session)
                     .padding(.top, TopInset.value)
             }
@@ -690,19 +698,20 @@ struct PublicProfileSheet: View {
             .ignoresSafeArea(edges: .top)              // цвет профиля доходит до самого верха, без тёмной полосы
             .environment(\.pageTopInset, TopInset.value)
 
-            Button { dismiss() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .bold))
+            Button { close() } label: {
+                Image(systemName: backButton ? "chevron.left" : "xmark")
+                    .font(.system(size: backButton ? 16 : 13, weight: .bold))
                     .foregroundStyle(theme.text)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 38, height: 38)
                     .glassCircle()
-                    .frame(width: 48, height: 48).contentShape(Rectangle())
+                    .frame(width: 52, height: 52).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(6)
+            .padding(backButton ? 8 : 6)
+            .padding(.top, backButton ? 22 : 0)          // кнопка «назад» ниже, подальше от статус-бара
             .zIndex(10)
         }
-        .edgeSwipeBack { dismiss() }
+        .edgeSwipeBack(enabled: onClose == nil) { dismiss() }
     }
 }
 
@@ -726,6 +735,11 @@ struct PostLinkSheet: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
+            if let post, post.media.first?.kind == .video {
+                // видео-пост открывается в шортсах: лента начинается с этого ролика (как в TikTok)
+                ReelsView(onOpenAuthor: { openedAuthor = AuthorRoute(id: $0.id) }, suspended: openedAuthor != nil, pinned: post)
+                    .ignoresSafeArea()
+            } else {
             ScrollView {
                 if let post {
                     PostCard(post: post, autoplay: false,
@@ -747,6 +761,7 @@ struct PostLinkSheet: View {
                 } else {
                     ProgressView().padding(.top, 120).frame(maxWidth: .infinity)
                 }
+            }
             }
 
             Button { dismiss() } label: {

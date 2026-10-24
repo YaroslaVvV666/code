@@ -164,3 +164,48 @@ struct MusicShortsCover: View {
             .profileSheet(id: $authorID)
     }
 }
+
+
+/// Звук из шортса открывается как обычная песня: обложка, перемотка, «Добавить в профиль».
+/// Кнопка справа сверху ведёт на страницу со всеми видео под этот звук
+struct SoundSheet: View {
+    let music: PostMusic
+
+    @EnvironmentObject private var session: AppSession
+    @EnvironmentObject private var flow: AuthFlow
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var showVideos = false
+
+    private var track: Track {
+        Track(id: music.mediaID, mediaID: music.mediaID, title: music.title, artist: music.artist, duration: 0)
+    }
+
+    private var item: ChatMusicItem {
+        ChatMusicItem(messageID: "", attachment: ChatAttachment(kind: .audio, mediaID: music.mediaID, title: music.title, artist: music.artist),
+                      track: track, mine: false)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            FullPlayerSheet(items: [item], addToProfile: { _ in
+                (try? await session.socialRepo.addSoundToProfile(mediaID: music.mediaID, title: music.title, artist: music.artist)) != nil
+            })
+            .environmentObject(session.player)
+            Button { showVideos = true } label: {
+                Image(systemName: "play.rectangle.on.rectangle")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 40, height: 40).background(.white.opacity(0.16), in: Circle())
+                    .frame(width: 52, height: 52).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8).padding(.trailing, 10)
+        }
+        .onAppear { if session.player.current?.id != track.id { session.player.start(track, queue: [track]) } }
+        .fullScreenCover(isPresented: $showVideos) {
+            ReelMusicPage(music: music)
+                .environmentObject(session).environmentObject(flow)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+    }
+}

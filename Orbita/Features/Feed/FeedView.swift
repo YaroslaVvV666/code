@@ -26,6 +26,9 @@ struct FeedView: View {
     @State private var editingPost: Post?
     @FocusState private var searchFocused: Bool
     @StateObject private var stories = StoryStore()
+    @StateObject private var activity = ActivityStore()
+    @State private var showActivity = false
+    @State private var pendingAuthor: Author?
     @Environment(\.scenePhase) private var scenePhase
     @State private var pull: CGFloat = 0
     @State private var pullArmed = false
@@ -82,6 +85,13 @@ struct FeedView: View {
             .coordinateSpace(name: "feedScroll")
             .onPreferenceChange(FeedPullKey.self) { handlePull($0) }
             .scrollDismissesKeyboard(.interactively)
+            .refreshable {
+                // потянули вниз — лента и истории обновляются
+                async let feed: Void = vm.load()
+                async let tray: Void = stories.reload(session.extras)
+                _ = await (feed, tray)
+                Haptics.impact(.light)
+            }
         }
         .task { await vm.load() }
         .task {
@@ -92,6 +102,19 @@ struct FeedView: View {
             }
         }
         .modifier(StoryPresenters(store: stories))
+        .task {
+            // счётчик на колокольчике: раз в минуту, тихо, без баннеров
+            while !Task.isCancelled {
+                await activity.refresh(session.extras)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+        .sheet(isPresented: $showActivity, onDismiss: {
+            if let a = pendingAuthor { pendingAuthor = nil; onOpenAuthor?(a) }
+        }) {
+            ActivityView(store: activity) { pendingAuthor = $0 }
+                .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { session.taste.endAll() }
         }
@@ -147,7 +170,6 @@ struct FeedView: View {
             pullArmed = false
             let opened = stories.openFirstUnseen()
             if opened { Haptics.impact(.light) }
-            Task { await vm.load() }
         }
     }
 
@@ -257,6 +279,8 @@ struct FeedView: View {
                     }
                 }
 
+                BellButton(store: activity) { showActivity = true }
+
                 Button { showBookmarks = true } label: {
                     Image(systemName: "bookmark")
                         .font(.system(size: 19, weight: .medium))
@@ -354,6 +378,8 @@ struct PostCard: View {
     @State private var confirmDelete = false
     @State private var sendSheet = false
     @State private var showLikers = false
+    @State private var hiddenNote: String?
+    @State private var reportAsk = false
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @EnvironmentObject private var session: AppSession
     @EnvironmentObject private var flow: AuthFlow
@@ -401,6 +427,30 @@ struct PostCard: View {
     }
 
     var body: some View {
+        if let note = hiddenNote {
+            HStack(spacing: 10) {
+                Image(systemName: "eye.slash").foregroundStyle(theme.textSecondary)
+                Text(note).font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+                Spacer()
+                Button(s.t("Вернуть", "Undo")) {
+                    withAnimation { hiddenNote = nil }
+                }
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
+            }
+            .padding(16)
+            .transition(.opacity)
+        } else {
+            cardBody
+        }
+    }
+
+    private var reportReasons: [(String, String)] {
+        [("spam", s.t("Спам", "Spam")), ("violence", s.t("Насилие", "Violence")),
+         ("adult", s.t("Контент для взрослых", "Adult content")), ("illegal", s.t("Незаконный контент", "Illegal content")),
+         ("copyright", s.t("Нарушение авторских прав", "Copyright")), ("other", s.t("Другое", "Other"))]
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Button { onOpenAuthor?(post.author) } label: {
@@ -438,6 +488,15 @@ struct PostCard: View {
                         }
                         Button(role: .destructive) { confirmDelete = true } label: {
                             Label(s.deletePost, systemImage: "trash")
+                        }
+                    } else {
+                        Button {
+                            Haptics.impact(.medium)
+                            session.taste.notInterested(post.id)
+                            withAnimation { hiddenNote = s.t("Скрыто. Похожее будем показывать реже", "Hidden. We'll show less like this") }
+                        } label: { Label(s.t("Не интересует", "Not interested"), systemImage: "hand.thumbsdown") }
+                        Button(role: .destructive) { reportAsk = true } label: {
+                            Label(s.t("Пожаловаться", "Report"), systemImage: "exclamationmark.bubble")
                         }
                     }
                 } label: {
@@ -504,6 +563,17 @@ struct PostCard: View {
                 .presentationBackground(theme.sheet)
         }
         .padding(16)
+        .confirmationDialog(s.t("На что жалуетесь?", "What's wrong?"), isPresented: $reportAsk, titleVisibility: .visible) {
+            ForEach(reportReasons, id: \.0) { item in
+                Button(item.1) {
+                    let id = post.id
+                    Task { try? await session.extras.reportPost(id: id, reason: item.0) }
+                    Haptics.notify(.success)
+                    withAnimation { hiddenNote = s.t("Жалоба отправлена. Спасибо!", "Report sent. Thank you!") }
+                }
+            }
+            Button(s.cancel, role: .cancel) {}
+        }
         .confirmationDialog(s.deletePostQuestion, isPresented: $confirmDelete, titleVisibility: .visible) {
             Button(s.delete, role: .destructive, action: onDelete)
             Button(s.cancel, role: .cancel) {}

@@ -25,6 +25,7 @@ struct StoryItem: Identifiable, Decodable, Equatable {
     let createdAt: Double
     let expiresAt: Double
     var permanent: Bool? = nil
+    var thumb: String? = nil            // обложка видео-истории (для сетки в профиле)
     var viewed: Bool
     let views: Int
     var likes: Int? = nil
@@ -74,6 +75,13 @@ struct ExtrasAPI {
 
     func cancelScheduled(id: String) async {
         _ = try? await api.request("DELETE", "/v1/scheduled/\(id)")
+    }
+
+    // Предпросмотр ссылки
+    func linkPreview(url: String) async -> LinkPreviewData? {
+        let query = url.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        guard let data = try? await api.request("GET", "/v1/link_preview?url=\(query)") else { return nil }
+        return try? decodeAPI(LinkPreviewData.self, from: data)
     }
 
     // Истории
@@ -174,3 +182,12 @@ struct ExtrasAPI {
 }
 
 private struct ProfileStoryList: Decodable { let stories: [StoryItem] }
+
+
+struct LinkPreviewData: Decodable, Equatable {
+    let title: String
+    let description: String
+    let site: String
+    let image: String
+    let url: String
+}

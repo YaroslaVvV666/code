@@ -25,7 +25,8 @@ enum OTPClient {
         case 429:
             throw AuthError.tooManyRequests(retryAfter: object["retry_after"] as? Int ?? 60)
         case 503 where code == "otp_not_configured":
-            return .unavailable
+            // сервер жив, но кодов выдать не может: локальная имитация создала бы дубль аккаунта с тем же номером
+            throw AuthError.otpNotConfigured
         case 502:
             throw AuthError.deliveryFailed
         case 400 where code == "bad_target":

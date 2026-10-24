@@ -49,7 +49,7 @@ struct ProfileSubScreen: View {
     /// а стрелка «назад» просто лежит поверх — без отдельной тёмной плашки
     private var wallBody: some View {
         ZStack(alignment: .topLeading) {
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content.padding(.top, TopInset.value).padding(.bottom, 24)
             }
             .coordinateSpace(name: "pageScroll")
@@ -104,7 +104,7 @@ struct ProfileSubScreen: View {
             .padding(.horizontal, 16)
             .frame(height: 54)
 
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content
                     .padding(.top, 8)
                     .padding(.bottom, 24)

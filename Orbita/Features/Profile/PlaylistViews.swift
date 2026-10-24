@@ -64,6 +64,7 @@ final class AudioPlayer: ObservableObject {
     @Published private(set) var elapsed: Double = 0
     @Published private(set) var queue: [Track] = []
     @Published var repeatAll = false
+    @Published var shuffle = false
 
     private var player: AVPlayer?
     private var endObserver: NSObjectProtocol?
@@ -74,6 +75,14 @@ final class AudioPlayer: ObservableObject {
     var progress: Double { min(1, elapsed / total) }
 
     func isCurrent(_ track: Track) -> Bool { current?.id == track.id }
+
+    /// Играет ли что-то из плейлиста, к которому относятся эти треки: сама песня в списке или та же очередь (ставили из плейлиста)
+    func playing(from tracks: [Track], anchor: Track?) -> Track? {
+        guard let current else { return nil }
+        if tracks.contains(where: { $0.id == current.id }) { return current }
+        if let anchor, queue.contains(where: { $0.id == anchor.id }), queue.contains(where: { $0.id == current.id }) { return current }
+        return nil
+    }
 
     /// Нажатие на трек: тот же — пауза/продолжить, другой — играть с него
     func toggle(_ track: Track, queue: [Track]) {
@@ -86,6 +95,7 @@ final class AudioPlayer: ObservableObject {
 
     func start(_ track: Track, queue: [Track]) {
         VoicePlayer.shared.stop()
+        CircleFocus.shared.stop()
         guard let url = ServerConfig.mediaURL(track.mediaID) else { return }
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         AudioSessionGate.willActivate()
@@ -112,6 +122,30 @@ final class AudioPlayer: ObservableObject {
         isPlaying = true
         setupRemote()
         updateNowPlaying()
+        // громкость по моментам песни — для анимации аватарки
+        levels = nil
+        let id = track.mediaID
+        Task { [weak self] in
+            let map = await LoudnessMap.load(mediaID: id)
+            await MainActor.run { if self?.current?.mediaID == id { self?.levels = map } }
+        }
+    }
+
+    /// Огибающая громкости текущей песни (по 0,05 с), если уже посчитана
+    private(set) var levels: [Float]?
+
+    /// Сила «толчка» 0…1 в текущий момент песни: громко — резко и сильно, тихо — еле заметно
+    func energy() -> Double {
+        guard let levels, let player else { return Beat.calm(Date().timeIntervalSinceReferenceDate) }
+        let sec = player.currentTime().seconds
+        guard sec.isFinite, sec >= 0 else { return 0 }
+        let i = Int(sec / 0.05)
+        var e = 0.0
+        for k in 0..<8 {                                     // быстрое нарастание и мягкое затухание
+            let j = i - k
+            if levels.indices.contains(j) { e = max(e, Double(levels[j]) * exp(-Double(k) * 0.30)) }
+        }
+        return pow(min(1, e), 1.5)
     }
 
     /// В переписку пришла новая музыка — очередь обновляется, не сбивая текущий трек
@@ -152,7 +186,9 @@ final class AudioPlayer: ObservableObject {
 
     private func playNext(auto: Bool) {
         guard let current, let i = queue.firstIndex(where: { $0.id == current.id }) else { return }
-        if i + 1 < queue.count {
+        if shuffle, queue.count > 1, let other = queue.filter({ $0.id != current.id }).randomElement() {
+            start(other, queue: queue)
+        } else if i + 1 < queue.count {
             start(queue[i + 1], queue: queue)
         } else if (repeatAll || !auto), queue.count > 1, let first = queue.first {
             start(first, queue: queue)          // вперёд с последнего трека — по кругу, а не тупик
@@ -202,6 +238,66 @@ final class AudioPlayer: ObservableObject {
     }
 }
 
+// MARK: - Громкость песни по времени
+
+/// Скачивает песню и считает громкость кусочками по 0,05 с (чтобы аватарка отзывалась на настоящий звук)
+enum LoudnessMap {
+    private static var cache: [String: [Float]] = [:]
+
+    @MainActor
+    static func load(mediaID: String) async -> [Float]? {
+        if let hit = cache[mediaID] { return hit }
+        guard let url = ServerConfig.mediaURL(mediaID) else { return nil }
+        let map = await Task.detached(priority: .utility) { () -> [Float]? in
+            guard let (tmp, _) = try? await URLSession.shared.download(from: url) else { return nil }
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("loud-\(UUID().uuidString).mp3")
+            try? FileManager.default.removeItem(at: file)
+            guard (try? FileManager.default.moveItem(at: tmp, to: file)) != nil else { return nil }
+            defer { try? FileManager.default.removeItem(at: file) }
+            return await analyze(file)
+        }.value
+        if let map { cache[mediaID] = map }
+        return map
+    }
+
+    private static func analyze(_ file: URL) async -> [Float]? {
+        let asset = AVURLAsset(url: file)
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else { return nil }
+        let rate = 8000.0
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false,
+            AVNumberOfChannelsKey: 1, AVSampleRateKey: rate
+        ]
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        guard reader.canAdd(output) else { return nil }
+        reader.add(output)
+        guard reader.startReading() else { return nil }
+        let bucket = Int(rate * 0.05)
+        var levels: [Float] = []
+        var acc = 0.0
+        var n = 0
+        while let buffer = output.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
+            let length = CMBlockBufferGetDataLength(block)
+            var samples = [Int16](repeating: 0, count: length / 2)
+            guard CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: &samples) == kCMBlockBufferNoErr else { continue }
+            for v in samples {
+                let f = Double(v) / 32768
+                acc += f * f
+                n += 1
+                if n == bucket { levels.append(Float((acc / Double(n)).squareRoot())); acc = 0; n = 0 }
+            }
+        }
+        guard levels.count > 20 else { return nil }
+        // нормируем: «громко» — это верхние 5% песни, всё остальное относительно них
+        let sorted = levels.sorted()
+        let top = max(0.02, sorted[Int(Double(sorted.count - 1) * 0.95)])
+        return levels.map { min(1, $0 / top) }
+    }
+}
+
 // MARK: - Строка «сейчас в профиле» под ником
 
 /// Название первого трека плейлиста бегущей строкой. У владельца без треков — «Добавить музыку».
@@ -216,9 +312,11 @@ struct MusicStrip: View {
     @Environment(\.lang) private var lang
 
     var body: some View {
-        if let track {
+        // если из этого плейлиста уже что-то играет — показываем именно эту песню и ничего не перезапускаем
+        let playing = player.playing(from: queue, anchor: track)
+        if let track = playing ?? track {
             Button {
-                if !player.isCurrent(track) { player.start(track, queue: queue) }
+                if playing == nil { player.start(track, queue: queue) }
                 onAdd()
             } label: {
                 HStack(spacing: 8) {
@@ -231,7 +329,9 @@ struct MusicStrip: View {
                 }
                 .padding(.horizontal, 14)
                 .frame(height: 34)
+                .contentShape(Capsule())                 // нажимается вся капсула, а не только текст и значок
                 .glassCapsule(interactive: true)
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         } else if canAdd {
@@ -247,6 +347,37 @@ struct MusicStrip: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+/// Как в Telegram: когда фото раскрыто, песня превращается в плоскую полосу у нижнего края фото
+struct MusicBar: View {
+    let track: Track
+    let queue: [Track]
+    @ObservedObject var player: AudioPlayer
+    let onOpen: () -> Void
+
+    var body: some View {
+        let playing = player.playing(from: queue, anchor: track)
+        let track = playing ?? track
+        Button {
+            if playing == nil { player.start(track, queue: queue) }
+            onOpen()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: player.isCurrent(track) && player.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(.white).frame(width: 18)
+                MarqueeText(text: track.display, size: 14, color: .white)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background(Color.black.opacity(0.4))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -304,30 +435,45 @@ struct PlaylistSheet: View {
     @Environment(\.lang) private var lang
 
     @State private var importing = false
-    @State private var editMode: EditMode = .inactive
     @State private var renaming: Track?
+    @State private var deleting: Track?
+    @State private var reordering = false
     @State private var titleDraft = ""
     @State private var artistDraft = ""
+    @State private var scrubbing = false
+    @State private var scrub: Double = 0
 
     private var s: Strings { Strings(lang: lang) }
+    private var hasPlayer: Bool { player.current != nil && model.tracks.contains(where: { player.isCurrent($0) }) }
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            if player.current != nil, model.tracks.contains(where: { player.isCurrent($0) }) {
-                nowPlaying.padding(.horizontal, 14).padding(.bottom, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
             list
+            if hasPlayer { playerPanel.transition(.move(edge: .bottom).combined(with: .opacity)) }
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: player.current?.id)
-        .presentationDetents([.medium, .large])
+        .background(theme.sheet.ignoresSafeArea())
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: hasPlayer)
+        .onAppear { player.syncQueue(model.tracks) }
+        .onChange(of: model.tracks) { _, tracks in player.syncQueue(tracks) }
+        .presentationDetents([.large])                 // на всю высоту, до самого низа — ничего не просвечивает
         .presentationDragIndicator(.visible)
-        .presentationBackground(.ultraThinMaterial)
+        .presentationBackground(theme.sheet)
         .tint(theme.accentColor)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.mp3, .mpeg4Audio, .audio],
                       allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { Task { await model.addTracks(urls) } }
+        }
+        .confirmationDialog(s.t("Удалить песню из плейлиста?", "Remove this song from the playlist?"),
+                            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                            titleVisibility: .visible) {
+            Button(s.t("Удалить", "Remove"), role: .destructive) {
+                if let track = deleting { Task { await model.deleteTrack(track) } }
+                deleting = nil
+            }
+            Button(s.cancel, role: .cancel) { deleting = nil }
+        } message: {
+            if let track = deleting { Text(track.display) }
         }
         .alert(s.renameTrack, isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(s.trackTitleField, text: $titleDraft)
@@ -340,95 +486,75 @@ struct PlaylistSheet: View {
         }
     }
 
+    // MARK: Верх
+
     private var topBar: some View {
         HStack(spacing: 10) {
-            glassButton("xmark") { dismiss() }
+            HStack(spacing: 10) {
+                glassButton("xmark") { dismiss() }
+                if isMine { Color.clear.frame(width: 48, height: 48) }      // чтобы заголовок оставался по центру
+            }
             Spacer()
             VStack(spacing: 1) {
-                Text(s.playlistTitle).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.text)
+                Text(isMine ? s.t("Ваш плейлист", "Your playlist") : s.playlistTitle)
+                    .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
+                    .lineLimit(1).minimumScaleFactor(0.6).fixedSize(horizontal: false, vertical: true)
                 Text("\(model.tracks.count) " + s.t("песен", "songs"))
                     .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
             }
             Spacer()
             if isMine {
+                HStack(spacing: 10) {
                 if model.uploadingTracks {
-                    ProgressView().frame(width: 44, height: 44)
+                    ProgressView().frame(width: 48, height: 48)
                 } else {
                     glassButton("plus") { importing = true }
                 }
-                Button {
-                    withAnimation { editMode = editMode.isEditing ? .inactive : .active }
-                } label: {
-                    Image(systemName: editMode.isEditing ? "checkmark" : "arrow.up.arrow.down")
-                        .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
-                        .frame(width: 44, height: 44).glassCircle()
+                glassButton(reordering ? "checkmark" : "arrow.up.arrow.down") {
+                    withAnimation { reordering.toggle() }
                 }
-                .buttonStyle(.plain)
                 .disabled(model.tracks.count < 2)
                 .opacity(model.tracks.count < 2 ? 0.4 : 1)
+                }
             } else {
-                Color.clear.frame(width: 44, height: 44)
+                Color.clear.frame(width: 48, height: 48)
             }
         }
-        .padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 10)
+        .padding(.horizontal, 16).padding(.top, 22).padding(.bottom, 12)
     }
 
     private func glassButton(_ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
-                .frame(width: 44, height: 44).glassCircle()
+            Image(systemName: icon).font(.system(size: 18, weight: .semibold)).foregroundStyle(theme.text)
+                .frame(width: 48, height: 48).glassCircle()
         }
         .buttonStyle(.plain)
     }
 
-    // Карточка «сейчас играет»
-    private var nowPlaying: some View {
-        let track = player.current
-        return VStack(spacing: 4) {
-            HStack(spacing: 12) {
-                cover(track?.cover, size: 54)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(track?.title ?? "").font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(theme.text).lineLimit(1)
-                    Text(track?.artist.isEmpty == false ? track!.artist : s.t("Неизвестный исполнитель", "Unknown artist"))
-                        .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
-                }
-                Spacer()
-                Button { player.previous() } label: {
-                    Image(systemName: "backward.fill").font(.system(size: 18)).foregroundStyle(theme.text)
-                }
-                Button { player.isPlaying ? player.pause() : player.resume() } label: {
-                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 22)).foregroundStyle(theme.text).frame(width: 32)
-                }
-                Button { player.next() } label: {
-                    Image(systemName: "forward.fill").font(.system(size: 18)).foregroundStyle(theme.text)
-                }
-            }
-            .buttonStyle(.plain)
-            FlowingProgress(progress: player.progress, tint: theme.accentColor, track: theme.stroke) { player.seek(toFraction: $0) }
-            HStack {
-                Text(mmss(Int(player.elapsed)))
-                Spacer()
-                Text(mmss(Int(player.total)))
-            }
-            .font(.system(size: 11).monospacedDigit()).foregroundStyle(theme.textTertiary)
+    /// Обложка трека: загруженная вместе с ним, иначе — картинка, вшитая в mp3 (её отдаёт сервер); нет ничего — градиент с нотой
+    private func cover(_ track: Track?, size: CGFloat, round: Bool = false) -> some View {
+        let placeholder = ZStack {
+            LinearGradient(colors: [theme.accentColor.opacity(0.85), theme.accentColor.opacity(0.35)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            Image(systemName: "music.note").font(.system(size: size * 0.4, weight: .medium)).foregroundStyle(.white.opacity(0.9))
         }
-        .padding(14)
-        .glass(RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-
-    private func cover(_ id: String?, size: CGFloat) -> some View {
-        ZStack {
-            if let id { RemoteImage(id: id) } else {
-                LinearGradient(colors: [theme.accentColor.opacity(0.85), theme.accentColor.opacity(0.35)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                Image(systemName: "music.note").font(.system(size: size * 0.4, weight: .medium)).foregroundStyle(.white.opacity(0.9))
+        return ZStack {
+            placeholder
+            if let track {
+                if let id = track.cover {
+                    RemoteImage(id: id)
+                } else {
+                    CachedImage(url: ServerConfig.mediaURL(track.mediaID + "/cover"), maxPixel: 300) { image, _ in
+                        if let image { Image(uiImage: image).resizable().scaledToFill().transition(.opacity) }
+                    }
+                }
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: round ? size / 2 : size * 0.22, style: .continuous))
     }
+
+    // MARK: Список — одна скруглённая карточка
 
     private var list: some View {
         List {
@@ -439,15 +565,15 @@ struct PlaylistSheet: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
             ForEach(Array(model.tracks.enumerated()), id: \.element.id) { index, track in
-                row(track, index: index)
+                row(track)
                     .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 14))
-                    .swipeActions(edge: .trailing) {
+                    .listRowSeparatorTint(theme.stroke)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 10))
+                    .alignmentGuide(.listRowSeparatorLeading) { _ in 72 }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         if isMine {
-                            Button(role: .destructive) { Task { await model.deleteTrack(track) } } label: {
-                                Label(s.removeTrack, systemImage: "trash")
-                            }
+                            Button { deleting = track } label: { Label(s.removeTrack, systemImage: "trash") }
+                                .tint(.red)
                         }
                     }
                     .contextMenu {
@@ -455,23 +581,21 @@ struct PlaylistSheet: View {
                             Button {
                                 titleDraft = track.title; artistDraft = track.artist; renaming = track
                             } label: { Label(s.renameTrack, systemImage: "pencil") }
-                            Button(role: .destructive) { Task { await model.deleteTrack(track) } } label: {
+                            Button(role: .destructive) { deleting = track } label: {
                                 Label(s.removeTrack, systemImage: "trash")
                             }
                         }
                     }
             }
             .onMove(perform: isMine ? { from, to in Task { await model.moveTrack(from: from, to: to) } } : nil)
-
-            if isMine && !model.tracks.isEmpty {
-                Text(s.playlistHintMine)
-                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
-                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
-            }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .environment(\.editMode, $editMode)
+        // «ручки» перетаскивания появляются в режиме сортировки (в нём свайп-удаление не работает — так устроен iOS)
+        .environment(\.editMode, .constant(isMine && reordering ? .active : .inactive))
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .padding(.horizontal, 14)
         .overlay(alignment: .bottom) {
             if let error = model.error {
                 ToastView(text: s.api(error)).padding(.bottom, 20)
@@ -483,34 +607,113 @@ struct PlaylistSheet: View {
         }
     }
 
-    private func row(_ track: Track, index: Int) -> some View {
+    private func row(_ track: Track) -> some View {
         let isCurrent = player.isCurrent(track)
         let playing = isCurrent && player.isPlaying
+        let artist = track.artist.isEmpty ? s.t("Неизвестный исполнитель", "Unknown artist") : track.artist
         return Button { player.toggle(track, queue: model.tracks) } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 ZStack {
-                    cover(track.cover, size: 48)
-                    if isCurrent {
-                        Color.black.opacity(0.35).clipShape(RoundedRectangle(cornerRadius: 11.5, style: .continuous))
-                        Image(systemName: playing ? "pause.fill" : "play.fill")
-                            .font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                    }
+                    cover(track, size: 50, round: true)
+                    Circle().fill(Color.black.opacity(isCurrent ? 0.45 : 0.28)).frame(width: 50, height: 50)
+                    Image(systemName: playing ? "pause.fill" : "play.fill")
+                        .font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(track.title).font(.system(size: 16, weight: .medium))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.title).font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(isCurrent ? theme.accentColor : theme.text).lineLimit(1)
-                    Text(track.artist.isEmpty ? s.t("Неизвестный исполнитель", "Unknown artist") : track.artist)
-                        .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                    Text((track.duration > 0 ? mmss(Int(safe: track.duration)) + " • " : "") + artist)
+                        .font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Нижний плеер
+
+    private var playerPanel: some View {
+        let track = player.current
+        let progress = scrubbing ? scrub : player.progress
+        return VStack(spacing: 14) {
+            HStack(spacing: 14) {
+                cover(track, size: 56)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track?.title ?? "").font(.system(size: 19, weight: .bold)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(track?.artist.isEmpty == false ? track!.artist : s.t("Неизвестный исполнитель", "Unknown artist"))
+                        .font(.system(size: 15)).foregroundStyle(theme.textSecondary).lineLimit(1)
                 }
                 Spacer()
-                if track.duration > 0 {
-                    Text(mmss(Int(track.duration)))
-                        .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textTertiary)
+                if let track, let url = ServerConfig.mediaURL(track.mediaID) {
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up").font(.system(size: 22, weight: .regular)).foregroundStyle(theme.text)
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
                 }
             }
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous), tint: isCurrent ? theme.accentColor.opacity(0.14) : nil)
-            .contentShape(Rectangle())
+
+            VStack(spacing: 6) {
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(theme.textTertiary.opacity(0.35))
+                        Capsule().fill(theme.text).frame(width: max(8, g.size.width * progress))
+                    }
+                    .frame(height: 6)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { v in scrubbing = true; scrub = max(0, min(1, v.location.x / max(1, g.size.width))) }
+                        .onEnded { v in
+                            player.seek(toFraction: max(0, min(1, v.location.x / max(1, g.size.width))))
+                            scrubbing = false
+                        })
+                }
+                .frame(height: 24)
+                HStack {
+                    Text(mmss(Int(safe: (scrubbing ? scrub : player.progress) * player.total)))
+                    Spacer()
+                    Text("-" + mmss(max(0, Int(safe: player.total - (scrubbing ? scrub : player.progress) * player.total))))
+                }
+                .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textSecondary)
+            }
+
+            HStack {
+                modeButton("shuffle", on: player.shuffle) { player.shuffle.toggle() }
+                Spacer()
+                Button { player.previous() } label: { Image(systemName: "backward.fill").font(.system(size: 30)) }
+                Spacer()
+                Button { player.isPlaying ? player.pause() : player.resume() } label: {
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").font(.system(size: 44)).frame(width: 60)
+                }
+                Spacer()
+                Button { player.next() } label: { Image(systemName: "forward.fill").font(.system(size: 30)) }
+                Spacer()
+                modeButton("repeat", on: player.repeatAll) { player.repeatAll.toggle() }
+            }
+            .foregroundStyle(theme.text)
+            .buttonStyle(.plain)
+
+            if isMine, let track {
+                Button { deleting = track } label: {
+                    Text(s.t("Удалить из профиля", "Remove from profile"))
+                        .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 58)
+                        .background(theme.textTertiary.opacity(0.28), in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+        }
+        .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 12)
+    }
+
+    private func modeButton(_ icon: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            Image(systemName: icon).font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(on ? theme.accentColor : theme.textSecondary)
+                .frame(width: 44, height: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

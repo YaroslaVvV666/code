@@ -9,7 +9,10 @@ struct MessageActionOverlay: View {
     var onClose: () -> Void
     var onReply: () -> Void
     var onEdit: () -> Void
-    var onDelete: () -> Void
+    var onDelete: () -> Void = {}
+    /// Подтверждённое удаление: true — у всех. Меню превращается в кнопку подтверждения, как в Telegram
+    var onConfirmDelete: (Bool) -> Void = { _ in }
+    var isSaved = false
     var onForward: () -> Void = {}
     var onSelect: () -> Void = {}
     var onInfo: () -> Void = {}
@@ -17,9 +20,12 @@ struct MessageActionOverlay: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var appear = false
+    @State private var confirming = false
+    @State private var settled = false          // анимация эмодзи стартует после появления меню, а не вместе с ним
 
     private var s: Strings { Strings(lang: lang) }
-    static let emojis = ["\u{2764}\u{FE0F}", "\u{1F44D}", "\u{1F44E}", "\u{1F525}", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F389}"]
+    /// В реакциях — только эмодзи с анимацией
+    static let emojis = AnimatedEmoji.all
     private var current: String? { model.messages.first { $0.id == message.id }?.reactions.first(where: \.mine)?.emoji }
     private var canEdit: Bool {
         message.mine && (!message.text.isEmpty || !message.attachments.isEmpty)
@@ -28,13 +34,17 @@ struct MessageActionOverlay: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(.ultraThinMaterial).opacity(appear ? 1 : 0)
+            // размытие ставится сразу и без анимации прозрачности (анимированный blur пересчитывается каждый кадр и тормозит);
+            // плавно проявляется только затемнение
+            Rectangle().fill(.ultraThinMaterial)
                 .overlay(Color.black.opacity(appear ? (theme.dark ? 0.35 : 0.12) : 0))
                 .ignoresSafeArea()
                 .onTapGesture(perform: onClose)
 
             VStack(alignment: message.mine ? .trailing : .leading, spacing: 10) {
                 reactionBar
+                    .opacity(confirming ? 0 : 1).scaleEffect(confirming ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
+                    .allowsHitTesting(!confirming)
                 ScrollView {
                     MessageRow(message: message, isFirst: true, isLast: true,
                                onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
@@ -44,30 +54,43 @@ struct MessageActionOverlay: View {
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(maxHeight: 300)
                 .fixedSize(horizontal: false, vertical: true)
-                actionList
+                if confirming {
+                    confirmList
+                        .transition(.scale(scale: 0.6, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                } else {
+                    actionList
+                        .transition(.scale(scale: 0.85, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                }
             }
             .padding(.horizontal, 12)
-            .scaleEffect(appear ? 1 : 0.92)
+            .scaleEffect(appear ? 1 : 0.9, anchor: message.mine ? .bottomTrailing : .bottomLeading)
             .opacity(appear ? 1 : 0)
         }
-        .onAppear { withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { appear = true } }
+        .onAppear {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { appear = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { settled = true }
+        }
     }
 
     private var reactionBar: some View {
-        HStack(spacing: 2) {
-            ForEach(Self.emojis, id: \.self) { e in
-                Button {
-                    model.react(message, emoji: e)
-                    onClose()
-                } label: {
-                    LottieEmojiView(emoji: e, size: 34, loop: true)
-                        .frame(width: 38, height: 40)
-                        .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+        // эмодзи больше, чем влезает в ширину экрана, — полоска листается вбок
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 2) {
+                ForEach(Self.emojis, id: \.self) { e in
+                    Button {
+                        model.react(message, emoji: e)
+                        onClose()
+                    } label: {
+                        LottieEmojiView(emoji: e, size: 34, playing: settled).id(settled)      // один круг при появлении и стоп
+                            .frame(width: 38, height: 40)
+                            .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(.horizontal, 8).padding(.vertical, 6)
         }
-        .padding(.horizontal, 8).padding(.vertical, 6)
+        .frame(width: min(CGFloat(Self.emojis.count) * 40 + 16, UIScreen.main.bounds.width - 32), height: 52)
         .glass(Capsule())
     }
 
@@ -102,11 +125,40 @@ struct MessageActionOverlay: View {
             divider
             row("checkmark.circle", s.t("Выбрать", "Select")) { onClose(); onSelect() }
             divider
-            row("trash", s.delete, danger: true) { onClose(); onDelete() }
+            row("trash", s.delete, danger: true) {
+                Haptics.impact(.light)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { confirming = true }
+            }
         }
         .frame(width: 250)
         .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+    }
+
+    /// Вместо списка действий — только кнопка(и) удаления
+    private var confirmList: some View {
+        let everyone = message.mine || model.group?.isAdmin == true
+        return VStack(spacing: 0) {
+            if isSaved {
+                confirmRow(s.t("Удалить из Избранного", "Delete from Saved"), forAll: false)
+            } else {
+                confirmRow(s.deleteForMe, forAll: false)
+                if everyone { divider; confirmRow(s.deleteForAll, forAll: true) }
+            }
+        }
+        .frame(minWidth: 250)
+        .fixedSize()
+        .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+    }
+
+    private func confirmRow(_ title: String, forAll: Bool) -> some View {
+        Button { onConfirmDelete(forAll) } label: {
+            Text(title).font(.system(size: 17)).foregroundStyle(theme.danger)
+                .frame(maxWidth: .infinity).padding(.horizontal, 20).frame(height: 48)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var divider: some View { Rectangle().fill(theme.stroke).frame(height: 0.5) }

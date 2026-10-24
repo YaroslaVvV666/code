@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import CryptoKit
 
 enum APIError: Error, Equatable {
     case notConfigured
@@ -106,8 +108,26 @@ actor ServerAPI {
     static func tokenAccount(for userID: String) -> String { "orbita.token.\(userID)@\(ServerConfig.urlString)" }
     private var tokenAccount: String { Self.tokenAccount(for: userID) }
 
+    /// GET с запасом на диске: пока сети нет, отдаём последний удачный ответ — чаты и переписки видны до момента пропадания связи.
+    /// slot — отдельная ячейка для разных видов одного запроса (быстрый просмотр и полная загрузка), fallback — откуда брать, если своя пуста
+    func requestCached(_ path: String, query: [String: String] = [:], slot: String = "", fallback: [String] = []) async throws -> Data {
+        do {
+            let data = try await request("GET", path, query: query)
+            OfflineStore.save(data, user: userID, path: path, slot: slot)
+            await NetworkState.shared.set(offline: false)
+            return data
+        } catch let error as APIError where error == .offline {
+            await NetworkState.shared.set(offline: true)
+            for s in [slot] + fallback {
+                if let cached = OfflineStore.load(user: userID, path: path, slot: s) { return cached }
+            }
+            throw error
+        }
+    }
+
     /// Выход: завершаем свой сеанс на сервере и забываем токен
     func signOut() async {
+        OfflineStore.wipe(user: userID)
         if let data = try? await request("GET", "/v1/sessions"),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = object["sessions"] as? [[String: Any]],
@@ -178,7 +198,11 @@ actor ServerAPI {
             case 401:       throw APIError.unauthorized
             default:
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                throw APIError.server(status: http.statusCode, code: (object?["error"] as? String) ?? "error")
+                let code = (object?["error"] as? String) ?? "error"
+                if code == "content_blocked" {                 // нейросеть отклонила файл — крупная плашка «Я понял»
+                    await MainActor.run { ContentNotice.show() }
+                }
+                throw APIError.server(status: http.statusCode, code: code)
             }
         } catch let error as APIError {
             throw error
@@ -186,4 +210,64 @@ actor ServerAPI {
             throw APIError.offline
         }
     }
+}
+
+
+/// Копия последних ответов сервера для работы без сети. Лежит в Application Support (не в iCloud-копии), под защитой данных iOS
+enum OfflineStore {
+    private static let dir: URL = {
+        var base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("offline", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? base.setResourceValues(values)
+        return base
+    }()
+
+    private static func hash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func file(user: String, path: String, slot: String) -> URL {
+        dir.appendingPathComponent(hash(user) + "_" + hash(path + "#" + slot) + ".json")
+    }
+
+    static func save(_ data: Data, user: String, path: String, slot: String) {
+        try? data.write(to: file(user: user, path: path, slot: slot), options: [.atomic, .completeFileProtection])
+    }
+
+    static func load(user: String, path: String, slot: String) -> Data? {
+        guard let data = try? Data(contentsOf: file(user: user, path: path, slot: slot)) else { return nil }
+        return scrubTyping(data)
+    }
+
+    /// Выход из аккаунта: чужие переписки на диске не остаются
+    static func wipe(user: String) {
+        let prefix = hash(user) + "_"
+        for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        where url.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// «Печатает…» из старого ответа без сети показывалось бы вечно — убираем
+    private static func scrubTyping(_ data: Data) -> Data {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }
+        if object["typing"] != nil { object["typing"] = NSNull() }
+        if var chats = object["chats"] as? [[String: Any]] {
+            for i in chats.indices where chats[i]["typing"] != nil { chats[i]["typing"] = NSNull() }
+            object["chats"] = chats
+        }
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? data
+    }
+}
+
+
+/// Есть ли связь с сервером: по результату опросов списка чатов и переписок. От него зависят «Соединение…» и повторная отправка
+@MainActor
+final class NetworkState: ObservableObject {
+    static let shared = NetworkState()
+    @Published private(set) var offline = false
+    func set(offline value: Bool) { if offline != value { offline = value } }
 }

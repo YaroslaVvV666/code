@@ -185,7 +185,8 @@ enum ReelRender {
     static let canvas = CGSize(width: 720, height: 1280)
 
     /// Композиция: вписать/заполнить кадр 9:16, фильтр, наложение
-    static func composition(for asset: AVAsset, filter: ReelFilter, overlay: CIImage?, fill: Bool) -> AVMutableVideoComposition {
+    static func composition(for asset: AVAsset, filter: ReelFilter, overlay: CIImage?, fill: Bool,
+                            zoom: Double = 1, dx: Double = 0, dy: Double = 0) -> AVMutableVideoComposition {
         let rect = CGRect(origin: .zero, size: canvas)
         let comp = AVMutableVideoComposition(asset: asset, applyingCIFiltersWithHandler: { request in
             let src = request.sourceImage
@@ -198,6 +199,14 @@ enum ReelRender {
             img = img.transformed(by: CGAffineTransform(translationX: (rect.width - e.width * k) / 2,
                                                         y: (rect.height - e.height * k) / 2))
             img = filter.apply(img)
+            if abs(zoom - 1) > 0.001 || abs(dx) > 0.0005 || abs(dy) > 0.0005 {
+                // пользователь сдвинул или масштабировал видео: масштаб вокруг центра кадра, сдвиг в долях кадра (ось Y у CI вверх)
+                let cx = rect.width / 2, cy = rect.height / 2
+                img = img
+                    .transformed(by: CGAffineTransform(translationX: -cx, y: -cy))
+                    .transformed(by: CGAffineTransform(scaleX: zoom, y: zoom))
+                    .transformed(by: CGAffineTransform(translationX: cx + dx * rect.width, y: cy - dy * rect.height))
+            }
             var out = img.composited(over: CIImage(color: .black).cropped(to: rect)).cropped(to: rect)
             if let overlay { out = overlay.composited(over: out) }
             request.finish(with: out, context: nil)
@@ -310,6 +319,9 @@ enum ReelRender {
     struct Job {
         var baseURL: URL
         var fill: Bool
+        var zoom: Double = 1
+        var dx: Double = 0
+        var dy: Double = 0
         var trimStart: Double
         var trimEnd: Double
         var filter: ReelFilter
@@ -368,7 +380,8 @@ enum ReelRender {
             }
         }
 
-        let videoComposition = composition(for: comp, filter: job.filter, overlay: job.overlay, fill: job.fill)
+        let videoComposition = composition(for: comp, filter: job.filter, overlay: job.overlay, fill: job.fill,
+                                         zoom: job.zoom, dx: job.dx, dy: job.dy)
         let mix = AVMutableAudioMix()
         mix.inputParameters = params
 

@@ -12,12 +12,21 @@ enum ProfileRoute: Hashable {
 @MainActor
 final class AppSession: ObservableObject {
     @Published var profileRoute: ProfileRoute?
+    /// Нижняя панель вкладок прячется, пока в «Шортсах» открыты комментарии
+    @Published var tabBarHidden = false
+    /// Шортс, присланный в чат: нажатие переносит во вкладку «Шортс», где этот ролик идёт первым
+    @Published var reelRequest: Post?
+    /// Кто сейчас держит звук выключенным (экраны съёмки и публикации). Пока множество не пустое — шортсы и плееры молчат
+    @Published var mediaHolds: Set<UUID> = []
+    var mediaHeld: Bool { !mediaHolds.isEmpty }
     /// Просьба из любого экрана переключить вкладку (MainTabView её исполняет)
     @Published var tabRequest: MainTab?
     /// Двухфакторный экран открыт из «Конфиденциальности» — «назад» вернёт туда
     var privacyOrigin = false
 
     let feed: FeedViewModel
+    /// Лента вкладки «Шортс» живёт дольше самого экрана: ушёл в другую вкладку и вернулся — тот же ролик
+    let mainReels = ReelsModel()
     let taste: TasteTracker
     let profile: ProfileStore
     let devices: DevicesStore
@@ -33,6 +42,8 @@ final class AppSession: ObservableObject {
     /// Идентификатор в формате сервера (нижний регистр): им сравниваются «я» и чужие id
     let serverID: String
     private let api: ServerAPI
+    private var listenBag: AnyCancellable?
+    private var listenTask: Task<Void, Never>?
 
     init(userID: String, userName: String) {
         let api = ServerAPI(userID: userID, displayName: userName)
@@ -52,6 +63,26 @@ final class AppSession: ObservableObject {
         devices = DevicesStore(repo: profileRepo)
         let ex = extras
         BookmarkStore.onChange = { id, saved in Task { await ex.setSaved(id: id, saved: saved) } }
+        reportListening()
+    }
+
+    /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает
+    private func reportListening() {
+        listenBag = player.$isPlaying.removeDuplicates().sink { [weak self] on in
+            guard let self else { return }
+            self.listenTask?.cancel()
+            let repo = self.socialRepo
+            self.listenTask = Task {
+                if on {
+                    while !Task.isCancelled {
+                        await repo.setListening(true)
+                        try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    }
+                } else {
+                    await repo.setListening(false)
+                }
+            }
+        }
     }
 
     /// Разовая выгрузка локальных закладок на сервер (идемпотентно)
@@ -97,4 +128,20 @@ final class AppSession: ObservableObject {
     func deleteRemoteAccount() async {
         try? await profileRepo.deleteAccount()
     }
+}
+
+
+/// Экран съёмки или публикации: шортс под ним ставится на паузу и не играет, пока экран открыт
+private struct HoldsMedia: ViewModifier {
+    @EnvironmentObject private var session: AppSession
+    @State private var token = UUID()
+    func body(content: Content) -> some View {
+        content
+            .onAppear { session.mediaHolds.insert(token); session.player.stop() }
+            .onDisappear { session.mediaHolds.remove(token) }
+    }
+}
+
+extension View {
+    func holdsMedia() -> some View { modifier(HoldsMedia()) }
 }

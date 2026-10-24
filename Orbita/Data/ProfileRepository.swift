@@ -51,6 +51,7 @@ protocol ProfileRepository: Sendable {
     func reorderAvatars(_ ids: [String]) async throws -> UserProfile
     func profile(id: String) async throws -> UserProfile
     func lookup(username: String) async throws -> UserProfile
+    func lookup(phone: String) async throws -> UserProfile
     func searchUsers(prefix: String) async throws -> [UserProfile]
     func friends(userID: String) async throws -> [FriendUser]
     func friendRequests() async throws -> (incoming: [FriendUser], outgoing: [FriendUser])
@@ -62,6 +63,12 @@ protocol ProfileRepository: Sendable {
     func approveLogin(qrID: String, phone: String) async throws
     func usernameStatus(_ username: String) async throws -> UsernameStatus
     func deleteAccount() async throws
+}
+
+private struct OrbitDTO: Decodable {
+    let id: String
+    let name: String
+    let avatar: String?
 }
 
 private struct AvatarDTO: Decodable {
@@ -103,7 +110,11 @@ private struct ProfileDTO: Decodable {
     let statusEmoji: String?
     let friendState: String?
     let friendsCount: Int?
+    let followersCount: Int?
+    let following: Bool?
     let requestsCount: Int?
+    let listening: Bool?
+    let orbit: [OrbitDTO]?
 
     var model: UserProfile {
         UserProfile(id: id, name: name, username: username, bio: bio, avatarID: avatar, phone: phone,
@@ -116,8 +127,9 @@ private struct ProfileDTO: Decodable {
                     blockedByMe: blockedByMe ?? false, blockedMe: blockedMe ?? false,
                     contactName: contactName, isContact: isContact ?? false,
                     styleColor: style?.color, styleEmoji: style?.emoji,
-                    friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, requestsCount: requestsCount,
-                    statusEmoji: statusEmoji)
+                    friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, followersCount: followersCount, following: following ?? false,
+                    requestsCount: requestsCount, statusEmoji: statusEmoji, listening: listening ?? false,
+                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar) })
     }
 }
 
@@ -217,6 +229,10 @@ struct RemoteProfileRepository: ProfileRepository {
         try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/lookup", query: ["u": username])).model
     }
 
+    func lookup(phone: String) async throws -> UserProfile {
+        try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/lookup_phone", query: ["p": phone])).model
+    }
+
     func searchUsers(prefix: String) async throws -> [UserProfile] {
         try decodeAPI(UserListDTO.self, from: try await api.request("GET", "/v1/search/users", query: ["q": prefix])).users.map(\.model)
     }
@@ -262,7 +278,8 @@ struct TrackDTO: Decodable {
     let title: String
     let artist: String
     let duration: Double
-    var model: Track { Track(id: id, mediaID: media, title: title, artist: artist, duration: duration) }
+    let cover: String?
+    var model: Track { Track(id: id, mediaID: media, title: title, artist: artist, duration: duration, cover: cover) }
 }
 
 extension PrivacySettings {
@@ -275,7 +292,7 @@ extension PrivacySettings {
     }
 
     var serverDict: [String: String] {
-        ["phone", "last_seen", "photos", "bio", "birthday", "music", "wall", "calls", "forwards", "invites", "comments", "find"]
+        ["phone", "last_seen", "photos", "bio", "birthday", "music", "wall", "calls", "forwards", "invites", "comments", "find", "followers", "orbit"]
             .reduce(into: [:]) { $0[$1] = self[$1] }
     }
 }

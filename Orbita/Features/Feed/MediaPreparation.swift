@@ -62,15 +62,17 @@ enum MediaPreparer {
     static let maxVideoSeconds: Double = 300
     static let maxVideoBytes = 75 * 1024 * 1024
 
-    static func prepare(_ item: PhotosPickerItem) async throws -> PreparedMedia {
+    /// compress: false — видео берётся как есть (без долгого пересжатия): для историй, где дальше открывается редактор,
+    /// а сжатие делает экспорт редактора или публикация
+    static func prepare(_ item: PhotosPickerItem, compress: Bool = true) async throws -> PreparedMedia {
         if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
-            return try await prepareVideo(item)
+            return try await prepareVideo(item, compress: compress)
         }
         guard let data = try await item.loadTransferable(type: Data.self) else { throw MediaError.unsupported }
         return try prepareImage(data)
     }
 
-    private static func prepareImage(_ data: Data) throws -> PreparedMedia {
+    static func prepareImage(_ data: Data) throws -> PreparedMedia {
         guard let jpeg = ImageProcessing.prepare(data, maxSide: 1920),
               let image = UIImage(data: jpeg),
               let thumb = ImageProcessing.prepare(jpeg, maxSide: 500) else { throw MediaError.unsupported }
@@ -78,18 +80,30 @@ enum MediaPreparer {
                              duration: nil, thumbnail: thumb)
     }
 
-    private static func prepareVideo(_ item: PhotosPickerItem) async throws -> PreparedMedia {
+    private static func prepareVideo(_ item: PhotosPickerItem, compress: Bool) async throws -> PreparedMedia {
         guard let movie = try await item.loadTransferable(type: MovieFile.self) else { throw MediaError.unsupported }
         defer { try? FileManager.default.removeItem(at: movie.url) }
+        return try await prepare(videoFile: movie.url, compress: compress)
+    }
 
-        let source = AVURLAsset(url: movie.url)
+    /// Готовит уже снятый или готовый видеофайл: проверяет длину, сжимает, делает обложку. Исходный файл не удаляет.
+    static func prepare(videoFile url: URL, compress shouldCompress: Bool = true) async throws -> PreparedMedia {
+        let source = AVURLAsset(url: url)
         let seconds = try await source.load(.duration).seconds
         if seconds > maxVideoSeconds { throw MediaError.tooLong }
 
-        // сжимаем до 720p mp4
-        let output = try await compress(source)
+        // сжимаем до 720p mp4 (или просто копируем: копия на том же томе делается мгновенно, исходник потом удаляется вызывающим)
+        let output: URL
+        if shouldCompress {
+            output = try await compress(source)
+        } else {
+            let copy = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).\(url.pathExtension.isEmpty ? "mov" : url.pathExtension)")
+            do { try FileManager.default.copyItem(at: url, to: copy) } catch { throw MediaError.failed }
+            output = copy
+        }
         let size = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int) ?? 0
-        if size > maxVideoBytes {
+        if shouldCompress && size > maxVideoBytes {
             try? FileManager.default.removeItem(at: output)
             throw MediaError.tooLarge
         }

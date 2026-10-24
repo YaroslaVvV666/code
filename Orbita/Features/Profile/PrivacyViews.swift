@@ -74,6 +74,34 @@ struct PrivacyScreen: View {
                     .padding(.horizontal, 30)
             }
 
+            // Лучшие друзья вокруг аватарки
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "circle.hexagongrid.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Отображение лучших друзей", "Show best friends")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { privacy.orbit == "all" },
+                            set: { apply("orbit", $0 ? "all" : "nobody") }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Вокруг вашей аватарки будут медленно кружиться аватарки тех, с кем вы общаетесь больше всего. Это видят все, кто открывает ваш профиль.",
+                         "The avatars of people you chat with the most will slowly orbit your profile picture. Everyone who opens your profile sees it."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+            }
+
             // Кто видит
             VStack(alignment: .leading, spacing: 8) {
                 Text(s.whoCanSeeSection.uppercased())
@@ -84,6 +112,8 @@ struct PrivacyScreen: View {
                     row("phone", icon: "phone.fill", tint: .green)
                     SettingsDivider()
                     row("find", icon: "magnifyingglass", tint: .teal)
+                    SettingsDivider()
+                    row("followers", icon: "person.2.fill", tint: .mint)
                     SettingsDivider()
                     row("last_seen", icon: "clock.fill", tint: .orange)
                     SettingsDivider()
@@ -138,7 +168,7 @@ struct VisibilityScreen: View {
     private var isStub: Bool { ["calls", "forwards", "invites"].contains(key) }
     /// «Только контактам» — везде, кроме поиска по номеру
     private var choices: [(String, String)] {
-        key == "find" ? [("all", s.visibleAll), ("nobody", s.visibleNone)]
+        (key == "find" || key == "followers") ? [("all", s.visibleAll), ("nobody", s.visibleNone)]
                       : [("all", s.visibleAll), ("contacts", s.visibleContacts), ("nobody", s.visibleNone)]
     }
 

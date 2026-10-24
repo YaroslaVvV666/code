@@ -39,6 +39,7 @@ struct MainTabView: View {
     @State private var openedAuthor: AuthorRoute?
     @State private var barHeight: CGFloat = 70
     @State private var newLogin: DeviceSession?
+    @State private var chatsMounted = false
 
     init(userID: String, userName: String) {
         _session = StateObject(wrappedValue: AppSession(userID: userID, userName: userName))
@@ -66,29 +67,39 @@ struct MainTabView: View {
 
     var body: some View {
         ZStack {
-            switch tab {
-            case .home:
-                FeedView(vm: session.feed,
-                         onCompose: { showComposer = true },
-                         onServerSettings: {
-                             session.profileRoute = .server
-                             tab = .profile
-                         },
-                         onOpenAuthor: { openedAuthor = AuthorRoute(id: $0.id) })
-            case .reels:
-                ReelsView(onOpenAuthor: { openedAuthor = AuthorRoute(id: $0.id) }, suspended: openedAuthor != nil)
-            case .chats:
+            ZStack {
+                switch tab {
+                case .home:
+                    FeedView(vm: session.feed,
+                             onCompose: { showComposer = true },
+                             onServerSettings: {
+                                 session.profileRoute = .server
+                                 tab = .profile
+                             },
+                             onOpenAuthor: { openedAuthor = AuthorRoute(id: $0.id) })
+                case .reels:
+                    ReelsView(onOpenAuthor: { openedAuthor = AuthorRoute(id: $0.id) }, suspended: openedAuthor != nil, shared: session.mainReels)
+                case .chats:
+                    Color.clear                      // сам список чатов живёт ниже и не пересоздаётся при каждом заходе
+                case .communities:
+                    CommunitiesView(session: session, chats: session.chats)
+                case .profile:
+                    ProfileView(store: session.profile, route: $session.profileRoute)
+                }
+            }
+            .id(tab)
+            .transition(.opacity.combined(with: .scale(scale: 0.985)))
+            // «Чаты» один раз построены и остаются в памяти: заход во вкладку — это просто показ, без пересборки списка, скелетона и состояния
+            if chatsMounted || tab == .chats {
                 ChatsListView(model: session.chats, session: session)
-            case .communities:
-                CommunitiesView(session: session, chats: session.chats)
-            case .profile:
-                ProfileView(store: session.profile, route: $session.profileRoute)
+                    .opacity(tab == .chats ? 1 : 0)
+                    .allowsHitTesting(tab == .chats)
+                    .accessibilityHidden(tab != .chats)
+                    .animation(.easeOut(duration: 0.18), value: tab)
             }
         }
-        .id(tab)
-        .transition(.opacity)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeInOut(duration: 0.16), value: tab)
+        .animation(.spring(response: 0.34, dampingFraction: 0.92), value: tab)
         .environmentObject(session)
         // Панель всегда лежит поверх; обычным экранам оставляем под неё место, а «Шортс» идёт на весь экран под панелью
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -101,8 +112,15 @@ struct MainTabView: View {
                 .background(GeometryReader { g in
                     Color.clear.preference(key: TabBarHeightKey.self, value: g.size.height)
                 })
+                .offset(y: session.tabBarHidden ? barHeight + 40 : 0)
+                .opacity(session.tabBarHidden ? 0 : 1)
+                .allowsHitTesting(!session.tabBarHidden)
+                .animation(.easeOut(duration: 0.22), value: session.tabBarHidden)
         }
         .onPreferenceChange(TabBarHeightKey.self) { barHeight = $0 }
+        .onChange(of: session.reelRequest?.id) { _, id in
+            if id != nil, tab != .reels { tab = .reels }
+        }
         .sheet(isPresented: $showComposer) {
             ComposerView(vm: session.feed)
                 .environmentObject(session)
@@ -188,7 +206,11 @@ struct MainTabView: View {
             session.tabRequest = nil
             tab = target
         }
+        .overlay { ChatsBackgroundMedia(chats: session.chats, tab: tab, barHeight: barHeight) }
         .onChange(of: tab) { _, new in
+            if new == .chats { chatsMounted = true }
+            // голосовые и кружки играют в фоне только на вкладке «Чаты»
+            if new != .chats { VoicePlayer.shared.stop(); CircleFocus.shared.stop() }
             if new != .profile { session.profileRoute = nil }
         }
     }
@@ -204,6 +226,7 @@ struct TabBarHost: View {
 
     var body: some View {
         // Внутри переписки панель прячется — как в Telegram
+        Group {
         if !chats.chatOpen {
             OrbitaTabBar(selection: $selection, chatsBadge: chats.unread, onCompose: onCompose)
                 // вся полоса под панелью «съедает» касания: посты и фото позади не нажимаются
@@ -211,6 +234,8 @@ struct TabBarHost: View {
                 .contentShape(Rectangle())
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: chats.chatOpen)
     }
 }
 

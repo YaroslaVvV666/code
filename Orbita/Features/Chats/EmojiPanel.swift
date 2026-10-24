@@ -120,35 +120,23 @@ struct EmojiStickerPanel: View {
     // MARK: Эмодзи
 
     private var emojiTab: some View {
-        VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    if !recent.isEmpty { chip(id: "recent", icon: "clock") }
-                    ForEach(EmojiData.categories) { chip(id: $0.id, icon: $0.icon) }
-                }
-                .padding(.horizontal, 10)
-            }
-            .frame(height: 40)
-
-            ScrollView {
-                let items = category == "recent" ? recent : (EmojiData.categories.first { $0.id == category }?.items ?? [])
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {
-                    ForEach(items, id: \.self) { emoji in
-                        Button {
-                            Haptics.impact(.light)
-                            EmojiData.remember(emoji)
-                            onEmoji(emoji)
-                        } label: {
-                            // наши анимированные эмодзи (Lottie); где своей анимации пока нет — обычный символ
-                            LottieEmojiView(emoji: emoji, size: 36, loop: true)
-                                .frame(maxWidth: .infinity, minHeight: 40)
-                        }
-                        .buttonStyle(.plain)
+        // для отправки доступны только эмодзи с анимацией
+        ScrollView {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {      // плотная сетка в 8 колонок, как в системной клавиатуре эмодзи
+                ForEach(AnimatedEmoji.all, id: \.self) { emoji in
+                    Button {
+                        Haptics.impact(.light)
+                        EmojiData.remember(emoji)
+                        onEmoji(emoji)
+                    } label: {
+                        LottieEmojiView(emoji: emoji, size: 34)         // один круг при открытии панели
+                            .frame(maxWidth: .infinity, minHeight: 44)
                     }
+                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
             }
+            .padding(.horizontal, 8).padding(.top, 12)
+            .padding(.bottom, 8)
         }
     }
 

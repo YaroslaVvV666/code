@@ -54,6 +54,7 @@ struct ChatsListView: View {
     @State private var query = ""
     @State private var folder: ChatFolder = .all
     @ObservedObject private var prefs = ChatListPrefs.shared
+    @ObservedObject private var net = NetworkState.shared
     @State private var openChat: ChatRoute?
     @ObservedObject private var push = PushManager.shared
     @State private var showNew = false
@@ -63,9 +64,12 @@ struct ChatsListView: View {
     @State private var swipedOpen: String?
     @State private var userHits: [ChatPeer] = []
     @State private var groupHits: [GroupPreview] = []
+    @State private var messageHits: [MessageHit] = []
     @AppStorage("contacts.prompted") private var promptedImport = false
 
     private var s: Strings { Strings(lang: lang) }
+
+    private var searchingNow: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     private var filtered: [ChatSummary] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -89,6 +93,11 @@ struct ChatsListView: View {
                         .environmentObject(session)
                         .environmentObject(flow)
                 }
+        }
+        // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
+        // посреди открытия, список пересчитывался и на пару кадров пустел
+        .onChange(of: openChat?.peer.id) { _, id in
+            if let id { session.chats.chatOpen = true; session.chats.openPeerID = id }
         }
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
         .onAppear { takePushRoute() }
@@ -164,9 +173,20 @@ struct ChatsListView: View {
     private var listContent: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(s.chatsTitle)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(theme.text)
+                if net.offline {
+                    // нет связи: как в Telegram — «Соединение…» и крутится значок
+                    HStack(spacing: 10) {
+                        ProgressView().tint(theme.text)
+                        Text(s.t("Соединение…", "Connecting…"))
+                            .font(.system(size: 26, weight: .bold)).foregroundStyle(theme.text)
+                    }
+                    .transition(.opacity)
+                } else {
+                    Text(s.chatsTitle)
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(theme.text)
+                        .transition(.opacity)
+                }
                 Spacer()
                 Button { showNew = true } label: {
                     Image(systemName: "square.and.pencil")
@@ -196,6 +216,8 @@ struct ChatsListView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
 
+            ChatsTopIsland(session: session)
+
             FolderBar(folder: $folder)
 
             cards
@@ -214,15 +236,19 @@ struct ChatsListView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !model.loaded {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                ChatListSkeleton()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         if folder == .all && query.trimmingCharacters(in: .whitespaces).isEmpty { savedRow }
+                        if searchingNow && !filtered.filter({ $0.id != session.serverID }).isEmpty {
+                            sectionTitle(s.t("ЧАТЫ И КОНТАКТЫ", "CHATS AND CONTACTS"))
+                        }
                         ForEach(filtered.filter { $0.id != session.serverID }) { chat in
                             row(chat)
                         }
                         globalResults
+                        messageResults
                     }
                     .padding(.bottom, 90)
                 }
@@ -259,12 +285,31 @@ struct ChatsListView: View {
         }
     }
 
+    // MARK: Поиск слов по всем перепискам
+
+    @ViewBuilder
+    private var messageResults: some View {
+        if !messageHits.isEmpty {
+            sectionTitle(s.t("СООБЩЕНИЯ", "MESSAGES"))
+            ForEach(messageHits) { hit in
+                MessageHitRow(hit: hit, query: query) { openChat = ChatRoute(peer: hit.peer) }
+            }
+        }
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 4)
+    }
+
     // MARK: Поиск по Orbita (юзернейм, каналы)
 
     @ViewBuilder
     private var globalResults: some View {
         if !userHits.isEmpty || !groupHits.isEmpty {
-            Text(s.t("НАЙДЕНО В ORBITA", "FOUND IN ORBITA"))
+            Text(s.t("АККАУНТЫ И КАНАЛЫ", "ACCOUNTS AND CHANNELS"))
                 .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 4)
@@ -307,6 +352,16 @@ struct ChatsListView: View {
 
     private func globalSearch() async {
         let raw = query.trimmingCharacters(in: .whitespaces)
+        // текст сообщений во всех переписках
+        if raw.count >= 2, !raw.hasPrefix("@") {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            let hits = (try? await session.messengerRepo.searchMessages(query: raw)) ?? []
+            if Task.isCancelled { return }
+            messageHits = hits
+        } else {
+            messageHits = []
+        }
         let name = raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
         guard name.count >= (raw.hasPrefix("@") ? 2 : 3) else { userHits = []; groupHits = []; return }
         try? await Task.sleep(nanoseconds: 350_000_000)
@@ -358,6 +413,33 @@ struct ChatsListView: View {
             .init(icon: isMuted(chat) ? "bell.fill" : "bell.slash.fill", tint: .indigo) { toggleMute(chat) },
             .init(icon: "trash.fill", tint: .red) { deleting = chat },
         ]) { rowBody(chat) }
+        .onAppear { ThreadPrefetcher.shared.visible(chat, repo: session.messengerRepo) }
+    }
+
+    /// Последнее сообщение в списке: миниатюра фото/видео и анимированный эмодзи вместо голого текста
+    @ViewBuilder
+    private func lastLine(_ chat: ChatSummary, _ s: Strings) -> some View {
+        let color = chat.lastMine ? theme.textSecondary : (chat.unread > 0 ? theme.text : theme.textSecondary)
+        let bare = chat.lastText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let animated = AnimatedEmoji.all.first { $0 == bare || LottieEmojiStore.code($0, keepVariation: false) == LottieEmojiStore.code(bare, keepVariation: false) }
+        HStack(alignment: .center, spacing: 5) {
+            if let thumb = chat.lastThumb {
+                RemoteImage(id: thumb.mediaID, maxPixel: 120)
+                    .frame(width: 22, height: 22)
+                    .clipShape(thumb.kind == "circle" ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 5, style: .continuous)))
+                    .overlay {
+                        if thumb.kind != "photo" {
+                            Image(systemName: "play.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+                                .shadow(color: .black.opacity(0.5), radius: 2)
+                        }
+                    }
+            }
+            if let animated {
+                LottieEmojiView(emoji: animated, size: 24, playing: false)      // в списке чатов не играет, стоит на последнем кадре
+            } else {
+                Text(chat.lastText).foregroundStyle(color)
+            }
+        }
     }
 
     private func rowBody(_ chat: ChatSummary) -> some View {
@@ -392,10 +474,8 @@ struct ChatsListView: View {
                                 ActionLabel(action: action)
                             } else if let draft = ChatDraftStore.text(chat: chat.peer.id) {
                                 Text(s.t("Черновик: ", "Draft: ")).foregroundStyle(theme.danger) + Text(draft).foregroundStyle(theme.textSecondary)
-                            } else if chat.lastMine {
-                                Text(s.youPrefix).foregroundStyle(theme.textTertiary) + Text(chat.lastText).foregroundStyle(theme.textSecondary)
                             } else {
-                                Text(chat.lastText).foregroundStyle(chat.unread > 0 ? theme.text : theme.textSecondary)
+                                lastLine(chat, s)
                             }
                         }
                         .font(.system(size: 15))
@@ -403,13 +483,20 @@ struct ChatsListView: View {
                         .multilineTextAlignment(.leading)
                         Spacer(minLength: 6)
                         if chat.mentions > 0 {
-                            // вас «тегнули» — вместо числа значок @ (даже если чат отключён)
-                            Image(systemName: "at")
-                                .font(.system(size: 12, weight: .heavy))
-                                .foregroundStyle(.white)
-                                .frame(width: 22, height: 22)
-                                .background(theme.accent, in: Circle())
-                                .shadow(color: theme.accentColor.opacity(0.35), radius: 5, y: 2)
+                            // вас «тегнули»: красная «собака» всегда, рядом число — красное, если чат не отключён
+                            HStack(spacing: 6) {
+                                Image(systemName: "at")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundStyle(Color(red: 0.90, green: 0.28, blue: 0.17))
+                                if chat.unread > 0 {
+                                    Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 7)
+                                        .frame(minWidth: 22, minHeight: 22)
+                                        .background(chat.muted ? AnyShapeStyle(theme.textTertiary) : AnyShapeStyle(Color(red: 0.90, green: 0.28, blue: 0.17)), in: Capsule())
+                                }
+                            }
                         } else if chat.unread == 0 && prefs.isMarked(chat.id) {
                             Circle().fill(theme.accent).frame(width: 14, height: 14)
                         } else if chat.unread > 0 {
@@ -513,7 +600,7 @@ struct ChatStoryRoute: Identifiable {
 
 private struct ViewerItem: Identifiable {
     let id = UUID()
-    let media: [MediaItem]
+    var media: [MediaItem]
     let start: Int
     var meta: [MediaMeta] = []
     var hero: HeroSource.Snapshot?
@@ -545,11 +632,21 @@ struct ChatScreen: View {
     @State private var deleting: ChatMessage?
     @State private var viewer: ViewerItem?
     @State private var previewFile: PreviewFile?
+    @State private var topVisible = false
+    @State private var topKey: String?              // с какого сообщения построен список: при входе фиксируется и дальше не растёт сам
+    @State private var userDragged = false          // пока не листали сами — длинная история не должна уводить экран от низа
     @State private var atBottom = true
+    @State private var peekSearch = false
+    @State private var lastBottomY: CGFloat = 0
     @State private var unreadIDs: Set<String> = []      // входящие, которые ещё не показывались на экране
     @State private var viewH: CGFloat = 800
     @State private var downloading = false
-    @State private var actionTarget: ChatMessage?
+    /// Зажатое сообщение хранится в отдельном объекте: его смена перерисовывает только меню, а не весь экран чата со списком
+    @State private var actionState = ActionTargetState()
+    private var actionTarget: ChatMessage? {
+        get { actionState.target }
+        nonmutating set { actionState.target = newValue }
+    }
     @State private var messageFrames = MessageFrameStore()
     @State private var showRequests = false
     @State private var scrollTarget: String?
@@ -566,6 +663,7 @@ struct ChatScreen: View {
     @State private var commentsRoute: CommentsRoute?
     @State private var storyNotice: String?
     @ObservedObject private var voicePlayer = VoicePlayer.shared
+    @ObservedObject private var circleFocus = CircleFocus.shared
 
     init(route: ChatRoute, session: AppSession, standalone: Bool = false) {
         self.route = route
@@ -587,6 +685,7 @@ struct ChatScreen: View {
                         requestsBar
                         scheduledBar
                         pinnedBar
+                        PeekSearchRow(visible: peekSearch && !searching) { startSearch() }
                         NowPlayingBar { showPlayer = true }
                         VoiceNowBar()
                     }
@@ -620,20 +719,24 @@ struct ChatScreen: View {
                     }
                     .zIndex(10)
                 }
-            if let target = actionTarget {
+            ActionTargetHost(state: actionState) { target in
                 MessageActionOverlay(
                     message: target, model: model, noForward: model.peer.noForward || model.group?.noForward == true,
                     showSender: model.peer.isGroup && !model.peer.isChannel,
-                    onClose: { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { actionTarget = nil } },
+                    onClose: { actionTarget = nil },
                     onReply: { model.editing = nil; model.replyTo = target },
                     onEdit: { model.replyTo = nil; model.editing = target },
-                    onDelete: { deleting = target },
+                    onConfirmDelete: { everyone in
+                        // меню закрывается, сообщение рассыпается пылью, список сдвигается
+                        actionTarget = nil
+                        Task { try? await Task.sleep(nanoseconds: 120_000_000); await model.delete(target, forEveryone: everyone) }
+                    },
+                    isSaved: isSaved,
                     onForward: { forwardIDs = ForwardRoute(ids: [target.id]) },
                     onSelect: { selecting = true; selected = [target.id] },
                     onInfo: { infoMessage = target })
-                .transition(.opacity)
-                .zIndex(20)
             }
+            .zIndex(20)
         }
         .overlay {
             if let fx = model.reactionFX {
@@ -644,20 +747,20 @@ struct ChatScreen: View {
             }
         }
         .onPreferenceChange(MessageFrameKey.self) { messageFrames.frames = $0 }
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: actionTarget?.id)
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .preferredColorScheme(theme.dark ? .dark : .light)
         .environmentObject(session.player)
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: session.player.current?.id)
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: voicePlayer.currentID)
+        .animation(.spring(response: 0.34, dampingFraction: 0.85), value: circleFocus.current != nil)
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: model.pinned.count)
         .onChange(of: model.messages.count) { _, _ in session.player.syncQueue(model.musicItems.map(\.track)) }
         .onAppear {
             session.chats.chatOpen = true; session.chats.openPeerID = route.peer.id
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
         }
-        .onDisappear { session.chats.chatOpen = false; session.chats.openPeerID = nil; VoicePlayer.shared.stop() }
+        .onDisappear { session.chats.chatOpen = false; session.chats.openPeerID = nil }
         .task(id: scenePhase) {
             // опрос только пока приложение на экране; в фоне — ни запросов, ни батареи
             guard scenePhase == .active else { return }
@@ -675,8 +778,8 @@ struct ChatScreen: View {
                     }
             }
         }
-        .swipeBackEnabled()
-        .edgeSwipeBack { dismiss() }
+        .swipeBackEnabled(fullScreen: false)
+        .edgeSwipeBack(enabled: true, fullWidth: true, skipEdge: !standalone) { dismiss() }
         .fullScreenCover(isPresented: $showInfo) {
             ChatInfoView(model: model, onPlayMusic: { track, queue in
                 session.player.start(track, queue: queue)
@@ -705,6 +808,7 @@ struct ChatScreen: View {
                 HeroViewerHost(media: item.media, start: item.start, meta: item.meta, hero: item.hero) { viewer = nil }
                     .id(item.id)
                     .ignoresSafeArea()
+                    .ignoresSafeArea(.keyboard)
                     .zIndex(10)
             }
         }
@@ -765,7 +869,7 @@ struct ChatScreen: View {
             if let storyNotice { ToastView(text: storyNotice).padding(.top, 60).transition(.opacity) }
         }
         .animation(.easeOut(duration: 0.2), value: storyNotice)
-        .sheet(item: Binding(get: { postLinkID.map { AuthorRoute(id: $0) } }, set: { postLinkID = $0?.id })) { route in
+        .fullScreenCover(item: Binding(get: { postLinkID.map { AuthorRoute(id: $0) } }, set: { postLinkID = $0?.id })) { route in
             PostLinkSheet(postID: route.id)
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
@@ -938,6 +1042,9 @@ struct ChatScreen: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
                         .frame(width: 44, height: 44).glassCircle()
+                        .padding(.horizontal, 4).padding(.vertical, 12)      // зона нажатия шире кнопки (≈52×68)
+                        .contentShape(Rectangle())
+                        .padding(.horizontal, -4).padding(.vertical, -12)
                 }
                 .buttonStyle(.plain)
 
@@ -1060,12 +1167,75 @@ struct ChatScreen: View {
         }
     }
 
+    /// Непрочитанные входящие, где тегнули меня (@мой_ник). Удалённые сюда не попадают — их уже нет в items
+    private var tagItems: [ChatMessage] {
+        guard !unreadIDs.isEmpty, let me = session.profile.profile?.username?.lowercased(), !me.isEmpty else { return [] }
+        let needle = "@" + me
+        return model.items.filter { m in
+            guard !m.mine, m.system == nil, unreadIDs.contains(m.id) else { return false }
+            let t = m.text.lowercased()
+            var from = t.startIndex
+            while let r = t.range(of: needle, range: from..<t.endIndex) {
+                let before = r.lowerBound == t.startIndex ? nil : t[t.index(before: r.lowerBound)]
+                let after = r.upperBound == t.endIndex ? nil : t[r.upperBound]
+                let okBefore = before.map { !($0.isLetter || $0.isNumber || $0 == "_" || $0 == "@") } ?? true
+                let okAfter = after.map { !($0.isLetter || $0.isNumber || $0 == "_") } ?? true
+                if okBefore && okAfter { return true }
+                from = r.upperBound
+            }
+            return false
+        }
+    }
+
+    private func tagButton(_ tags: [ChatMessage]) -> some View {
+        Button {
+            Haptics.impact(.light)
+            if let first = tags.first { scrollTarget = first.id }
+        } label: {
+            Image(systemName: "at")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color(red: 0.17, green: 0.55, blue: 0.95))
+                .frame(width: 40, height: 40)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
+                .overlay(alignment: .top) {
+                    Text(tags.count > 99 ? "99+" : "\(tags.count)")
+                        .font(.system(size: 12, weight: .bold)).monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6).frame(minWidth: 20, minHeight: 20)
+                        .background(Color(red: 0.17, green: 0.55, blue: 0.95), in: Capsule())
+                        .offset(y: -12)
+                }
+        }
+        .buttonStyle(PressStyle())
+        .transition(.scale.combined(with: .opacity))
+    }
+
     private var messagesList: some View {
-        let list = entries(model.items)
+        let all = entries(model.items)
+        // Строим только хвост переписки: тысяча сообщений разом (с картинками и эмодзи) и давала лаг при входе в чат;
+        // ранние подгружаются, когда долистал до верха
+        let startIdx: Int = {
+            if let k = topKey, let i = all.firstIndex(where: { $0.id == k }) { return i }
+            return max(0, all.count - 40)
+        }()
+        let list = startIdx > 0 ? Array(all[startIdx...]) : all
         return ScrollViewReader { proxy in
             ScrollView {
                 // Не Lazy: сотня сообщений — это дёшево, зато нет скачков и пустых экранов при отправке
                 VStack(spacing: 0) {
+                    if startIdx > 0, let firstKey = list.first?.id {
+                        // Ранние сообщения добавляются сами, когда долистал до верха; при входе список не растёт —
+                        // иначе большой чат строил десятки строк разом, пустел и перескакивал
+                        Color.clear.frame(height: 1)
+                            .onAppear { topVisible = true }
+                            .onDisappear { topVisible = false }
+                            .onChange(of: topVisible && userDragged) { _, go in
+                                guard go else { return }
+                                topKey = all[max(0, startIdx - 40)].id
+                                DispatchQueue.main.async { proxy.scrollTo(firstKey, anchor: .top) }
+                            }
+                    }
                     if list.isEmpty && model.loaded {
                         Text(s.chatStart)
                             .font(.system(size: 15)).foregroundStyle(theme.textTertiary)
@@ -1124,11 +1294,37 @@ struct ChatScreen: View {
             .onPreferenceChange(BottomKey.self) { y in
                 let near = y < viewH + 140
                 if near != atBottom { atBottom = near }
+                // листаем вверх (низ контента уезжает вниз) — показываем строку поиска, вниз — прячем
+                let dy = y - lastBottomY
+                if abs(dy) > 14 {
+                    let up = dy > 0 && !near
+                    if up != peekSearch { withAnimation(.easeOut(duration: 0.2)) { peekSearch = up } }
+                    lastBottomY = y
+                }
             }
             .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in userDragged = true })
             .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { if $0.translation.height > 50 { hideKeyboard() } })
             .defaultScrollAnchor(.bottom)
-            .onAppear { if model.loaded { seedUnread() } }
+            .onAppear {
+                if model.loaded {
+                    if topKey == nil, let first = list.first { topKey = first.id }       // предзагруженные сообщения: список на этом и стоит
+                    seedUnread()
+                    // чат открылся с предзагруженными сообщениями — к плашке «Новые сообщения», как и при обычной загрузке
+                    if model.firstUnreadID != nil {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("unreadStrip", anchor: .top) }
+                    }
+                }
+            }
+            .onChange(of: model.items.count) { old, new in
+                // пришла более длинная история (предзагруженные 10 → 100): остаёмся внизу, а не у начала переписки
+                if new > old, !userDragged {
+                    let id = model.firstUnreadID != nil && unreadIDs.isEmpty == false ? "unreadStrip" : "bottom"
+                    let anchor: UnitPoint = id == "bottom" ? .bottom : .top
+                    DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { if !userDragged { proxy.scrollTo(id, anchor: anchor) } }
+                }
+            }
             .onChange(of: model.items.last?.key) { _, _ in
                 if let last = model.items.last, !last.mine, last.system == nil, !last.isPending { unreadIDs.insert(last.id) }
                 if atBottom || model.items.last?.mine == true {
@@ -1137,6 +1333,10 @@ struct ChatScreen: View {
             }
             .onChange(of: model.loaded) { _, ok in
                 // как в Telegram: открываем чат на первом непрочитанном, а не в самом низу
+                if topKey == nil, !all.isEmpty { topKey = all[max(0, all.count - 40)].id }
+                if let uid = model.firstUnreadID, let i = all.firstIndex(where: { $0.message.id == uid }), i < startIdx {
+                    topKey = all[max(0, i - 5)].id          // первое непрочитанное должно быть в построенной части
+                }
                 seedUnread()
                 guard ok, model.firstUnreadID != nil else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -1148,7 +1348,10 @@ struct ChatScreen: View {
             }
             .onChange(of: scrollTarget) { _, id in
                 guard let id else { return }
-                if let key = list.first(where: { $0.message.id == id })?.id {
+                if let i = all.firstIndex(where: { $0.message.id == id }), i < startIdx {
+                    topKey = all[max(0, i - 5)].id          // найденное сообщение лежит выше построенной части
+                }
+                if let key = all.first(where: { $0.message.id == id })?.id {
                     withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(key, anchor: .center) }
                     // сообщение на секунду подсвечивается
                     withAnimation(.easeInOut(duration: 0.25)) { highlightID = id }
@@ -1160,6 +1363,11 @@ struct ChatScreen: View {
                 scrollTarget = nil
             }
             .overlay(alignment: .bottomTrailing) {
+                let tags = tagItems
+                VStack(spacing: 0) {
+                if !tags.isEmpty {
+                    tagButton(tags).padding(.horizontal, 12).padding(.top, 18).padding(.bottom, atBottom ? 12 : 4)
+                }
                 if !atBottom {
                     Button {
                         withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1185,6 +1393,7 @@ struct ChatScreen: View {
                     .buttonStyle(PressStyle())
                     .padding(12)
                     .transition(.scale.combined(with: .opacity))
+                }
                 }
             }
             .animation(.easeOut(duration: 0.2), value: atBottom)
@@ -1249,13 +1458,17 @@ struct ChatScreen: View {
                 onPlayAudio: playAudio,
                 showSender: groupChat,
                 noForward: model.peer.noForward || model.group?.noForward == true,
+                onReactionInfo: { infoMessage = m },
+                onJumpToReply: { scrollTarget = $0 },
                 onReact: { model.react(m, emoji: $0) },
                 onLongPress: { if !selecting { actionTarget = m } },
                 onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } },
-                onOpenPost: { postLinkID = $0 },
+                onOpenPost: { openSharedPost($0) },
                 onOpenStory: openStory,
-                onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil)
-            .allowsHitTesting(!selecting)
+                onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil,
+                onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) })
+            .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
+            .dustDissolve(active: model.dissolving.contains(m.id), color: m.mine ? theme.accentColor : Color.white.opacity(0.85))
             .background(GeometryReader { g in
                 Color.clear.preference(key: MessageFrameKey.self, value: [m.id: g.frame(in: .global)])
             })
@@ -1306,7 +1519,10 @@ struct ChatScreen: View {
                 } else {
                     let list = model.items.filter { selected.contains($0.id) }
                     Task {
-                        for m in list { await model.delete(m, forEveryone: false) }
+                        model.dissolving.formUnion(list.map(\.id))           // все рассыпаются одновременно
+                        Haptics.impact(.soft)
+                        try? await Task.sleep(nanoseconds: 950_000_000)
+                        for m in list { await model.delete(m, forEveryone: false, animated: false) }
                         selecting = false; selected = []
                     }
                 }
@@ -1360,11 +1576,11 @@ struct ChatScreen: View {
         return day + s.t(" в ", " at ") + time
     }
 
-    /// Просмотр всех фото и видео переписки: листаем между сообщениями, сверху «3 из 12»
-    private func openGallery(tapped: [MediaItem], index: Int) {
+    /// Все фото и видео из списка сообщений — в порядке переписки, с подписями
+    private func gallery(from messages: [ChatMessage]) -> (media: [MediaItem], meta: [MediaMeta]) {
         var all: [MediaItem] = []
         var meta: [MediaMeta] = []
-        for m in model.messages where !m.isPending {
+        for m in messages where !m.isPending {
             let who = m.mine ? s.t("Вы", "You") : (m.sender?.name ?? model.peer.name)
             let text = m.text.hasPrefix("\u{200B}call:") ? "" : m.text.trimmingCharacters(in: .whitespacesAndNewlines)
             for item in m.attachments.compactMap(\.mediaItem) {
@@ -1372,15 +1588,45 @@ struct ChatScreen: View {
                 meta.append(MediaMeta(title: who, subtitle: viewerStamp(m.createdAt), text: text))
             }
         }
+        return (all, meta)
+    }
+
+    /// Просмотр всех фото и видео переписки: листаем между сообщениями. Сначала открывается то, что загружено,
+    /// а затем подтягивается вся история — и фото, и видео, в том числе старые
+    private func openGallery(tapped: [MediaItem], index: Int) {
+        let (all, meta) = gallery(from: model.messages)
         guard tapped.indices.contains(index), let at = all.firstIndex(where: { $0.id == tapped[index].id }) else {
             let owner = model.messages.first { msg in msg.attachments.contains { $0.mediaItem?.id == tapped[index].id } }
             let who = (owner?.mine ?? false) ? s.t("Вы", "You") : (owner?.sender?.name ?? model.peer.name)
             let cap = (owner?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let single = owner.map { [MediaMeta(title: who, subtitle: viewerStamp($0.createdAt), text: cap.hasPrefix("\u{200B}call:") ? "" : cap)] } ?? []
+            hideKeyboard()
             viewer = ViewerItem(media: [tapped[index]], start: 0, meta: single, hero: HeroSource.shared.take())
             return
         }
-        viewer = ViewerItem(media: all, start: at, meta: meta, hero: HeroSource.shared.take())
+        hideKeyboard()
+        let item = ViewerItem(media: all, start: at, meta: meta, hero: HeroSource.shared.take())
+        viewer = item
+        Task {
+            let history = await model.loadFullHistory()
+            let full = gallery(from: history)
+            guard full.media.count > all.count, viewer?.id == item.id else { return }
+            viewer?.media = full.media
+            viewer?.meta = full.meta
+        }
+    }
+
+    /// Присланный шортс открывается во вкладке «Шортс» (как в TikTok), остальные посты — карточкой
+    private func openSharedPost(_ id: String) {
+        Task {
+            guard let post = try? await session.feedRepo.post(id: id) else { postLinkID = id; return }
+            if post.media.first?.kind == .video {
+                session.reelRequest = post
+                if standalone { dismiss() }
+            } else {
+                postLinkID = id
+            }
+        }
     }
 
     private func openStory(_ id: String) {
@@ -1411,13 +1657,33 @@ struct ChatScreen: View {
 
 // MARK: - Отправить ссылку в чат (как «Переслать» в Telegram)
 
+private struct StatsID: Identifiable { let id: String }
+
 struct SendToChatSheet: View {
     enum Payload { case text(String), post(String), messages([String]) }
     let payload: Payload
 
     init(text: String) { payload = .text(text) }
-    init(postID: String) { payload = .post(postID) }
+    init(postID: String, onDownload: (() -> Void)? = nil, onNotInterested: (() -> Void)? = nil, onReport: ((String) -> Void)? = nil,
+         onDelete: (() -> Void)? = nil) {
+        payload = .post(postID)
+        self.onDelete = onDelete
+        self.onDownload = onDownload
+        self.onNotInterested = onNotInterested
+        self.onReport = onReport
+    }
     init(messageIDs: [String]) { payload = .messages(messageIDs) }
+
+    /// Только для шортсов: две отдельные кнопки над списком чатов
+    var onNotInterested: (() -> Void)? = nil
+    var onReport: ((String) -> Void)? = nil
+    /// Только для шортсов: скачать ролик с водяным знаком
+    var onDownload: (() -> Void)? = nil
+    /// Только у автора шортса: «Удалить» (с подтверждением)
+    var onDelete: (() -> Void)? = nil
+    @State private var deleteAsk = false
+    @State private var statsFor: String?
+    @State private var reportAsk = false
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.dismiss) private var dismiss
@@ -1469,6 +1735,35 @@ struct SendToChatSheet: View {
             }
             .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 10)
 
+            if onNotInterested != nil || onReport != nil || onDownload != nil || onDelete != nil {
+                VStack(spacing: 8) {
+                    if let onDownload {
+                        feedbackButton(s.t("Скачать", "Save"), icon: "arrow.down.to.line", danger: false) {
+                            Haptics.impact(.medium); dismiss(); onDownload()
+                        }
+                    }
+                    if onDelete != nil {
+                        HStack(spacing: 8) {
+                            if case .post(let pid) = payload {
+                                feedbackButton(s.t("Статистика", "Statistics"), icon: "chart.bar.fill", danger: false) { statsFor = pid }
+                            }
+                            feedbackButton(s.t("Удалить", "Delete"), icon: "trash", danger: true) { deleteAsk = true }
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        if let onNotInterested {
+                            feedbackButton(s.t("Не интересует", "Not interested"), icon: "hand.thumbsdown", danger: false) {
+                                Haptics.impact(.medium); dismiss(); onNotInterested()
+                            }
+                        }
+                        if onReport != nil {
+                            feedbackButton(s.t("Пожаловаться", "Report"), icon: "exclamationmark.bubble", danger: true) { reportAsk = true }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 10)
+            }
+
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
                 TextField(s.chatsSearch, text: $query).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -1494,6 +1789,39 @@ struct SendToChatSheet: View {
         }
         .overlay(alignment: .top) { if failed { ToastView(text: failText).padding(.top, 60) } }
         .task { await session.chats.refresh() }
+        .sheet(item: Binding(get: { statsFor.map { StatsID(id: $0) } }, set: { statsFor = $0?.id })) { item in
+            ReelStatsSheet(postID: item.id)
+                .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
+        .confirmationDialog(s.t("Удалить видео?", "Delete this video?"), isPresented: $deleteAsk, titleVisibility: .visible) {
+            Button(s.t("Удалить", "Delete"), role: .destructive) { dismiss(); onDelete?() }
+            Button(s.cancel, role: .cancel) {}
+        } message: {
+            Text(s.t("Оно пропадёт у всех, вернуть его будет нельзя.", "It will disappear for everyone and can't be restored."))
+        }
+        .confirmationDialog(s.t("На что жалуетесь?", "What's wrong?"), isPresented: $reportAsk, titleVisibility: .visible) {
+            ForEach([("spam", s.t("Спам", "Spam")), ("violence", s.t("Насилие", "Violence")),
+                     ("adult", s.t("Контент для взрослых", "Adult content")), ("illegal", s.t("Незаконный контент", "Illegal content")),
+                     ("copyright", s.t("Нарушение авторских прав", "Copyright")), ("other", s.t("Другое", "Other"))], id: \.0) { item in
+                Button(item.1) { dismiss(); onReport?(item.0) }
+            }
+            Button(s.cancel, role: .cancel) {}
+        }
+    }
+
+    private func feedbackButton(_ title: String, icon: String, danger: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                Text(title).font(.system(size: 15, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(danger ? theme.danger : theme.text)
+            .frame(maxWidth: .infinity).frame(height: 44)
+            .background((danger ? theme.danger : theme.textTertiary).opacity(0.14), in: Capsule())
+        }
+        .buttonStyle(PressStyle())
     }
 
     // Выбранные получатели — аватарки с крестиком, как в Telegram
@@ -1552,11 +1880,13 @@ struct SendToChatSheet: View {
                 if !isText {
                     HStack(spacing: 8) {
                         optionChip(s.t("Скрыть имя отправителя", "Hide sender name"), on: $hideSender, icon: "person.fill.questionmark")
-                        optionChip(s.t("Скрыть подписи", "Hide captions"), on: $hideCaption, icon: "text.badge.minus")
+                        optionChip(s.t("Без подписей", "No captions"), on: $hideCaption, icon: "text.badge.minus")
                     }
-                    Text(hideSender
-                         ? s.t("Сообщения придут как ваши собственные, без пометки «Переслано».",
-                               "Messages will arrive as your own, without the “Forwarded” label.")
+                    Text(hideSender || hideCaption
+                         ? (hideCaption ? s.t("Без текста под медиа и без пометки «Переслано от».",
+                                              "No text under the media and no “Forwarded from” label.")
+                                        : s.t("Сообщения придут как ваши собственные, без пометки «Переслано».",
+                                              "Messages will arrive as your own, without the “Forwarded” label."))
                          : s.t("Будет видно, от кого пересланы сообщения.", "The original sender will be shown."))
                         .font(.system(size: 12)).foregroundStyle(theme.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1751,5 +2081,46 @@ private struct BackWithUnread: View {
         .glassCapsule()
         .contentShape(Capsule())
         .animation(.easeOut(duration: 0.15), value: unread)
+    }
+}
+
+
+/// Строка поиска над плеером в чате — появляется, когда листаешь вверх
+struct PeekSearchRow: View {
+    let visible: Bool
+    let action: () -> Void
+    @EnvironmentObject private var player: AudioPlayer
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        if visible && player.current != nil {
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
+                    Text(Strings(lang: lang).t("Поиск по переписке", "Search messages"))
+                        .font(.system(size: 15)).foregroundStyle(theme.textTertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14).frame(height: 38)
+                .glassCapsule().contentShape(Capsule())
+            }
+            .buttonStyle(.plain).padding(.horizontal, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+}
+
+
+final class ActionTargetState: ObservableObject {
+    @Published var target: ChatMessage?
+}
+
+/// Подписан на выбранное сообщение сам — родитель (чат) при этом не перестраивается
+struct ActionTargetHost<Content: View>: View {
+    @ObservedObject var state: ActionTargetState
+    @ViewBuilder var content: (ChatMessage) -> Content
+    var body: some View {
+        if let t = state.target { content(t) }
     }
 }

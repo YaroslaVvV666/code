@@ -24,7 +24,7 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 KDF_SALT = b"orbita-kdf-v1"
-SCOPES = ("profile", "posts", "comments", "media")
+SCOPES = ("profile", "posts", "comments", "media", "messages")
 
 # колонки базы (входят в AAD: шифртекст нельзя переставить в другую запись или поле)
 COL = {

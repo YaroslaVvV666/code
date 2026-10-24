@@ -97,8 +97,11 @@ struct CachedImage<Content: View>: View {
                 failed = false
                 let loaded = await ImageCache.shared.load(url, maxPixel: maxPixel)
                 guard !Task.isCancelled else { return }
-                image = loaded
-                failed = loaded == nil
+                // картинка проявляется плавно, а не выскакивает на место заглушки
+                withAnimation(.easeOut(duration: 0.22)) {
+                    image = loaded
+                    failed = loaded == nil
+                }
             }
     }
 }

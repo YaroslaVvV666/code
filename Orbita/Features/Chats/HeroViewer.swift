@@ -58,6 +58,7 @@ struct HeroViewerHost: View {
     @State private var fadeOut = false
     @State private var fly = false
     @State private var index: Int
+    @State private var dragY: CGFloat = 0
 
     init(media: [MediaItem], start: Int, meta: [MediaMeta] = [], hero: HeroSource.Snapshot?, onClose: @escaping () -> Void) {
         self.media = media
@@ -75,18 +76,41 @@ struct HeroViewerHost: View {
     }
 
     var body: some View {
+        viewerBody.onAppear { hideKeyboard() }
+    }
+
+    private var viewerBody: some View {
         GeometryReader { geo in
             let origin = geo.frame(in: .global).origin
             ZStack(alignment: .topLeading) {
-                Color.black.opacity(Double(ready && !closing ? 1 : progress)).ignoresSafeArea()
-
                 MediaViewer(media: media, start: start, meta: meta, embedded: true,
                             pagesVisible: ready && !closing, flyIn: fly,
                             onClose: close, onIndex: { index = $0 })
+                    .offset(y: dragY)
+                    .simultaneousGesture(DragGesture(minimumDistance: 24)
+                        .onChanged { v in
+                            guard ready, !closing, abs(v.translation.height) > abs(v.translation.width) * 1.3 else { return }
+                            dragY = v.translation.height
+                        }
+                        .onEnded { v in
+                            if abs(dragY) > 110 || abs(v.predictedEndTranslation.height) > 380, dragY != 0 {
+                                close()
+                            } else {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { dragY = 0 }
+                            }
+                        })
 
                 if (!ready || closing), let image = heroImage, let hero {
                     heroLayer(image, hero: hero, origin: origin, size: geo.size)
                 }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .background(alignment: .topLeading) {
+                // фон не участвует в раскладке (раньше он раздувал её и сдвигал фото вниз)
+                Color.black.opacity(Double(ready && !closing ? 1 - min(0.85, abs(dragY) / 420) : min(1, progress * 2.4)))
+                    .frame(width: geo.size.width + 400, height: geo.size.height + 800)
+                    .offset(x: -200, y: -400)
+                    .ignoresSafeArea()
             }
             .opacity(fadeOut ? 0 : 1)
             .scaleEffect(fadeOut ? 0.94 : 1)

@@ -88,6 +88,11 @@ extension Strings {
             case "bio_too_long":      return t("«О себе» — не больше 70 символов.", "Bio is limited to 70 characters.")
             case "comments_disabled": return commentsOff
             case "too_large":         return t("Файл слишком большой.", "The file is too large.")
+            case "wall_closed":       return t("Этот человек не принимает записи на стене.", "This person doesn't accept wall posts.")
+            case "too_many":          return t("Слишком много записей. Попробуйте позже.", "Too many posts. Try again later.")
+            case "bad_entry", "bad_text": return t("Напишите текст или добавьте фото.", "Write some text or add a photo.")
+            case "content_blocked":   return t("Этот файл нарушает правила сообщества и не может быть загружен.", "This file breaks the community rules and can't be uploaded.")
+            case "moderation_unavailable": return t("Проверка контента временно недоступна. Попробуйте позже.", "Content check is temporarily unavailable. Try again later.")
             case "unsupported_media": return t("Этот формат файла не поддерживается.", "This file format isn't supported.")
             case "too_many_media":    return t("В одной публикации — не больше 10 файлов.", "A post can have up to 10 files.")
             case "text_too_long":     return t("Текст слишком длинный.", "The text is too long.")

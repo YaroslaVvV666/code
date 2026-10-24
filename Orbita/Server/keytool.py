@@ -8,6 +8,9 @@ keytool — выдача ключей по запросу, без раскрыт
                                                            пакет ключей ОДНОГО пользователя (нужен мастер-ключ, у оператора)
   python3 keytool.py decrypt --bundle файл [--db путь] [--media-out папка]
                                                            расшифровать данные пользователя ТОЛЬКО по пакету ключей
+  python3 keytool.py dossier --user @name --reason "…" [--with @собеседник] [--authority "орган"] [--case "№ запроса"] [--out файл]
+                                                           досье для органа: переписка ОДНОГО человека (или его диалог с одним собеседником)
+                                                           в открытом виде; ключи не раскрываются, выдача пишется в журнал
   python3 keytool.py log                                   журнал выдач
 
 Пакет содержит производные ключи (HKDF): по ним нельзя восстановить мастер-ключ
@@ -26,7 +29,9 @@ import time
 from orbita_crypto import COL, SCOPES, KeyRing, decrypt_range, field_aad, file_key, unseal
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("ORBITA_DATA", os.path.join(BASE, "data"))
+# те же места, что у server.py: данные и мастер-ключ лежат вне папки проекта
+STATE_DIR = os.environ.get("ORBITA_HOME", os.path.join(os.path.expanduser("~"), ".orbita"))
+DATA_DIR = os.environ.get("ORBITA_DATA", os.path.join(STATE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "orbita-v2.db")
 MEDIA_DIR = os.path.join(DATA_DIR, "media-v2")
 LOG_PATH = os.path.join(DATA_DIR, "disclosure.log")
@@ -45,7 +50,7 @@ def connect(path, readonly=True):
 # ---------- команды оператора (нужен мастер-ключ) ----------
 
 def cmd_init(args):
-    kr = KeyRing.load(BASE)
+    kr = KeyRing.load(STATE_DIR)
     print("Мастер-ключ найден. Отпечаток: %s" % kr.fingerprint())
 
 
@@ -61,7 +66,7 @@ def resolve_user(db, kr, ref):
 
 
 def cmd_users(args):
-    kr = KeyRing.load(BASE)
+    kr = KeyRing.load(STATE_DIR)
     db = connect(DB_PATH)
     for r in db.execute("SELECT * FROM users ORDER BY created_at"):
         uid = r["id"]
@@ -76,7 +81,7 @@ def cmd_users(args):
 
 
 def cmd_export(args):
-    kr = KeyRing.load(BASE)
+    kr = KeyRing.load(STATE_DIR)
     db = connect(DB_PATH)
     uid = resolve_user(db, kr, args.user)
     scopes = [s.strip() for s in args.scope.split(",")] if args.scope else list(SCOPES)
@@ -98,6 +103,65 @@ def cmd_export(args):
 
     print("Пакет ключей записан: %s" % out)
     print("  пользователь: %s\n  категории: %s\n  в журнал выдач добавлена запись" % (uid, ", ".join(scopes)))
+
+
+def cmd_dossier(args):
+    """Досье для органа: оператор расшифровывает сам и отдаёт только то, что запрошено. Ключи и мастер-ключ не передаются."""
+    kr = KeyRing.load(STATE_DIR)
+    db = connect(DB_PATH)
+    uid = resolve_user(db, kr, args.user)
+    other = resolve_user(db, kr, args.with_user) if args.with_user else None
+
+    def op(owner, scope, col, rid, blob):
+        if blob is None:
+            return None
+        try:
+            return unseal(kr.scope_key(owner, scope), blob, field_aad(col, rid)).decode("utf-8")
+        except Exception:
+            return "[не расшифровано]"
+
+    def name_of(u):
+        r = db.execute("SELECT username_enc FROM users WHERE id = ?", (u,)).fetchone()
+        return "@" + (op(u, "profile", COL["username"], u, r["username_enc"]) or "?") if r else u
+
+    q = "SELECT * FROM messages WHERE (sender = ? OR recipient = ?)"
+    a = [uid, uid]
+    if other:
+        q = "SELECT * FROM messages WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))"
+        a = [uid, other, other, uid]
+    q += " ORDER BY created_at"
+    direct = []
+    for m in db.execute(q, a):
+        item = {"id": m["id"], "time": m["created_at"], "from": name_of(m["sender"]), "to": name_of(m["recipient"]),
+                "text": op(m["sender"], "messages", COL["msg_text"], m["id"], m["text_enc"])}
+        if "attachments_enc" in m.keys() and m["attachments_enc"]:
+            item["attachments"] = op(m["sender"], "messages", COL["msg_attach"], m["id"], m["attachments_enc"])
+        direct.append(item)
+
+    groups = []
+    if not other:
+        try:
+            for m in db.execute("SELECT * FROM group_messages WHERE sender = ? ORDER BY created_at", (uid,)):
+                groups.append({"id": m["id"], "group_id": m["group_id"], "time": m["created_at"],
+                               "text": op(uid, "messages", COL["msg_text"], m["id"], m["text_enc"])})
+        except sqlite3.Error:
+            pass
+
+    dossier = {"user": name_of(uid), "user_id": uid, "with": name_of(other) if other else None,
+               "authority": args.authority, "case": args.case, "reason": args.reason,
+               "issued_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "operator": getpass.getuser(),
+               "messages": direct, "group_messages_sent": groups}
+    payload = json.dumps(dossier, ensure_ascii=False, indent=2)
+    out = args.out or "dossier-%s-%s.json" % (uid[:8], time.strftime("%Y%m%d-%H%M%S"))
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(payload)
+    entry = {"time": time.time(), "type": "dossier", "user_id": uid, "with": other, "authority": args.authority,
+             "case": args.case, "reason": args.reason, "operator": getpass.getuser(), "messages": len(direct),
+             "file_sha256": hashlib.sha256(payload.encode()).hexdigest()}
+    with open(LOG_PATH, "a") as log:
+        log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print("Досье записано: %s (сообщений: %d). Запись добавлена в журнал выдач." % (out, len(direct)))
 
 
 def cmd_log(args):
@@ -149,6 +213,24 @@ def cmd_decrypt(args):
         "text": text("comments", COL["comment_text"], c["id"], c["text_enc"]),
     } for c in db.execute("SELECT * FROM comments WHERE author = ? ORDER BY created_at", (uid,))]
 
+    # переписка: каждое сообщение зашифровано ключом ОТПРАВИТЕЛЯ. Свои отправленные читаются по этому пакету,
+    # входящие — только если приложен пакет собеседника (--partner-bundle, можно несколько)
+    mkeys = {uid: keys["messages"]} if "messages" in keys else {}
+    for pb in (args.partner_bundle or []):
+        b2 = json.load(open(pb))
+        if "messages" in b2.get("scopes", {}):
+            mkeys[b2["user_id"]] = base64.b64decode(b2["scopes"]["messages"])
+    if "messages" in keys:
+        msgs = []
+        for m in db.execute("SELECT * FROM messages WHERE sender = ? OR recipient = ? ORDER BY created_at", (uid, uid)):
+            k = mkeys.get(m["sender"])
+            try:
+                body = unseal(k, m["text_enc"], field_aad(COL["msg_text"], m["id"])).decode("utf-8") if k else "[нужен пакет собеседника]"
+            except Exception:
+                body = "[не расшифровано]"
+            msgs.append({"id": m["id"], "time": m["created_at"], "sender": m["sender"], "recipient": m["recipient"], "text": body})
+        result["messages"] = msgs
+
     media = []
     for m in db.execute("SELECT * FROM media WHERE owner = ? ORDER BY created_at", (uid,)):
         item = {"id": m["id"], "kind": m["kind"], "bytes": m["size"]}
@@ -185,10 +267,20 @@ def main():
     e.add_argument("--out")
     e.set_defaults(fn=cmd_export)
 
+    o = sub.add_parser("dossier")
+    o.add_argument("--user", required=True, help="@username или id")
+    o.add_argument("--with", dest="with_user", help="только диалог с этим собеседником")
+    o.add_argument("--reason", required=True, help="основание (номер запроса, статья) — в журнал")
+    o.add_argument("--authority", help="запрашивающий орган")
+    o.add_argument("--case", help="номер дела/запроса")
+    o.add_argument("--out")
+    o.set_defaults(fn=cmd_dossier)
+
     d = sub.add_parser("decrypt")
     d.add_argument("--bundle", required=True)
     d.add_argument("--db")
     d.add_argument("--media-out")
+    d.add_argument("--partner-bundle", action="append", help="пакет собеседника — чтобы прочитать и входящие сообщения (можно несколько раз)")
     d.set_defaults(fn=cmd_decrypt)
 
     args = parser.parse_args()

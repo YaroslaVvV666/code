@@ -352,6 +352,7 @@ struct PageScrollMarker: View {
     @EnvironmentObject private var tracker: PageScrollTracker
     @Environment(\.pageTopInset) private var topInset
     var lockTop = false
+    var reportPull = false
 
     var body: some View {
         GeometryReader { g in
@@ -360,7 +361,7 @@ struct PageScrollMarker: View {
         }
         .frame(height: 0)
         .background {
-            ScrollOffsetProbe(lockTop: lockTop) { tracker.setProbe($0) }
+            ScrollOffsetProbe(lockTop: lockTop, reportPull: reportPull) { tracker.setProbe($0) }
                 .frame(width: 1, height: 1)
         }
     }
@@ -395,14 +396,14 @@ struct StickyProfileBar: View {
     let subtitle: String
     let color: Int?
     var height: CGFloat = 54
-    var startAt: CGFloat = 70
+    var startAt: CGFloat = 92
     @Environment(\.theme) private var theme
     @Environment(\.pageTopInset) private var topInset
     @ObservedObject var tracker: PageScrollTracker
 
     var body: some View {
         let offset = tracker.offset
-        let appear = Double(max(0, min(1, (offset - startAt) / 45)))
+        let appear = Double(max(0, min(1, (offset - startAt) / 30)))
         ZStack {
             ProfileBarBackground(color: color, height: height + topInset)
             VStack(spacing: 1) {

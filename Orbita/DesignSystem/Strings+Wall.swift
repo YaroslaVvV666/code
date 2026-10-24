@@ -119,6 +119,7 @@ extension Strings {
         case "forwards": return rowForwards
         case "invites": return rowInvites
         case "find": return t("Найти меня по номеру", "Find me by number")
+        case "followers": return t("Число подписчиков", "Followers count")
         default: return rowComments
         }
     }
@@ -130,6 +131,7 @@ extension Strings {
         case "bio": return t("Описание профиля увидят только те, кому вы разрешили.", "Only people you allow will see your bio.")
         case "birthday": return t("Дата рождения показывается на вашей странице.", "Your birthday is shown on your page.")
         case "music": return t("Скрывает плейлист и бегущую строку под именем.", "Hides the playlist and the running line under your name.")
+        case "followers": return t("Если выбрано «Никто», другие не увидят, сколько у вас подписчиков.", "If set to Nobody, others won't see how many followers you have.")
         case "find": return t("Если выбрано «Никто», знакомые не найдут вас по номеру и не получат уведомление, что вы в Orbita.", "If set to Nobody, people can't find you by number and won't be told you joined Orbita.")
         case "comments": return t("Касается ваших публикаций. Сами вы всегда можете комментировать.", "Applies to your posts. You can always comment yourself.")
         case "invites": return t("Кто может добавлять вас в группы и каналы.", "Who can add you to groups and channels.")

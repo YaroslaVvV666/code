@@ -1,6 +1,57 @@
 import SwiftUI
 import Combine
 
+/// Предзагрузка переписок: последние сообщения чатов из списка подтягиваются заранее (без пометки «прочитано»),
+/// и чат открывается уже с готовыми сообщениями, а не с пустым экраном и загрузкой
+@MainActor
+final class ThreadPrefetcher {
+    static let shared = ThreadPrefetcher()
+    private struct Entry { var thread: ChatThread; var stamp: Date }
+    private var store: [String: Entry] = [:]
+    private var inflight = Set<String>()
+    private var queue: [(summary: ChatSummary, limit: Int)] = []
+    private var running = 0
+    private let maxParallel = 3
+    private var repo: MessengerRepository?
+
+    func get(_ id: String) -> ChatThread? { store[id]?.thread }
+
+    /// При входе в «Чаты»: сначала самые свежие (список уже отсортирован), по 10 сообщений
+    func warm(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 8, limit: Int = 10) {
+        self.repo = repo
+        for c in chats.prefix(count) { enqueue(c, limit: limit) }
+    }
+
+    /// Когда строка чата показалась на экране при прокрутке: по 5 сообщений
+    func visible(_ chat: ChatSummary, repo: MessengerRepository) {
+        self.repo = repo
+        enqueue(chat, limit: 5)
+    }
+
+    private func enqueue(_ c: ChatSummary, limit: Int) {
+        if let e = store[c.id], e.stamp >= c.updatedAt { return }            // уже есть и ничего нового
+        guard !inflight.contains(c.id) else { return }
+        inflight.insert(c.id)
+        queue.append((c, limit))
+        pump()
+    }
+
+    private func pump() {
+        while running < maxParallel, !queue.isEmpty, let repo {
+            let job = queue.removeFirst()
+            running += 1
+            Task { [weak self] in
+                let t = try? await repo.thread(peerID: job.summary.id, limit: job.limit, peek: true)
+                guard let self else { return }
+                self.running -= 1
+                self.inflight.remove(job.summary.id)
+                if let t { self.store[job.summary.id] = Entry(thread: t, stamp: job.summary.updatedAt) }
+                self.pump()
+            }
+        }
+    }
+}
+
 /// Список переписок (и счётчик непрочитанных для нижней панели)
 @MainActor
 final class ChatsModel: ObservableObject {
@@ -51,6 +102,7 @@ final class ChatsModel: ObservableObject {
                 }
             }
             if result.chats != chats { chats = result.chats }
+            ThreadPrefetcher.shared.warm(result.chats, repo: repo)
             if result.unread != unread {
                 unread = result.unread
                 PushManager.shared.setBadge(result.unread)
@@ -126,6 +178,8 @@ struct DraftAttachment: Identifiable {
 @MainActor
 final class ChatModel: ObservableObject {
     @Published private(set) var peer: ChatPeer
+    /// Сообщения, которые прямо сейчас «рассыпаются» (эффект удаления); из списка уходят после анимации
+    @Published var dissolving: Set<String> = []
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var pending: [ChatMessage] = []
     @Published private(set) var typing: String?
@@ -146,6 +200,10 @@ final class ChatModel: ObservableObject {
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
+    /// Растёт, когда поверх предзагруженных сообщений разом приходит длинная история: экран переписки создаётся заново
+    /// и сразу открывается внизу — вместо кадров, где список стоял на месте, а контент под ним вырос
+    @Published private(set) var generation = 0
+    private var refreshedOnce = false
 
     let peerID: String
     let repo: MessengerRepository
@@ -155,6 +213,20 @@ final class ChatModel: ObservableObject {
         self.peer = peer
         self.peerID = peer.id
         self.repo = repo
+        // предзагруженные сообщения показываем сразу; свежие приходят следом обычным обновлением
+        if let t = ThreadPrefetcher.shared.get(peer.id) {
+            messages = t.messages
+            self.peer = t.peer
+            lastSeen = t.lastSeen
+            canWrite = t.canWrite
+            group = t.group
+            isContact = t.isContact
+            realName = t.realName
+            pinned = t.pinned
+            isPreview = t.isPreview
+            firstUnreadID = t.firstUnread
+            loaded = true
+        }
     }
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
@@ -172,8 +244,17 @@ final class ChatModel: ObservableObject {
                 if let key = keys[m.id] { m.key = key }
                 return m
             }
-            if loaded, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count { Haptics.impact(.soft) }
-            if fresh != messages { messages = fresh }
+            if refreshedOnce, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count, fresh.count - messages.count <= 3 { Haptics.impact(.soft) }       // только на настоящее новое сообщение, не на подгрузку истории при входе
+            if fresh != messages {
+                if abs(fresh.count - messages.count) > 3 {
+                    // длинная история разом (10 предзагруженных → 100): без анимации появления — иначе строки «въезжали» с нулевой прозрачностью
+                    // и экран на миг оставался пустым, пока не пролистаешь
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { messages = fresh }
+                } else {
+                    messages = fresh
+                }
+            }
             peer = thread.peer
             typing = thread.typing
             lastSeen = thread.lastSeen
@@ -185,6 +266,8 @@ final class ChatModel: ObservableObject {
             isPreview = thread.isPreview
             if !loaded { firstUnreadID = thread.firstUnread }
             loaded = true
+            refreshedOnce = true
+            if !outbox.isEmpty, !NetworkState.shared.offline { Task { await retryQueued() } }
         } catch let e as APIError {
             if !loaded { error = e }
         } catch {}
@@ -268,10 +351,23 @@ final class ChatModel: ObservableObject {
 
     // MARK: Отправка
 
+    /// То, что нужно, чтобы повторить отправку, когда появится сеть
+    private struct Outgoing {
+        var text: String
+        var entities: [TextEntity]
+        var media: [OutgoingMedia]
+        var replyID: String?
+        var silent: Bool
+        var cleanup: URL?
+    }
+    private var outbox: [(key: String, item: Outgoing)] = []
+    private var retrying = false
+
     /// Загружает вложения и отправляет сообщение. Сначала в списке появляется «ожидающее» сообщение.
+    /// Нет сети — сообщение остаётся «Отправляется…» с красным значком и уходит само, как только связь вернётся.
     @discardableResult
     func deliver(text: String, entities: [TextEntity], media: [OutgoingMedia] = [],
-                 placeholders: [ChatAttachment] = [], silent: Bool = false) async -> Bool {
+                 placeholders: [ChatAttachment] = [], silent: Bool = false, cleanup: URL? = nil) async -> Bool {
         guard !text.isEmpty || !media.isEmpty else { return false }
         let reply = replyTo
         replyTo = nil
@@ -280,23 +376,55 @@ final class ChatModel: ObservableObject {
                                 reply: reply.map { ReplyRef(id: $0.id, name: "", text: String($0.summary.prefix(140)), fromMe: $0.mine) },
                                 attachments: placeholders, isPending: true)
         pending.append(local)
+        let item = Outgoing(text: text, entities: entities, media: media, replyID: reply?.id, silent: silent, cleanup: cleanup)
+        return await attempt(local.key, item, restoreReply: reply)
+    }
+
+    private func setFailed(_ key: String, _ value: Bool) {
+        if let i = pending.firstIndex(where: { $0.key == key }), pending[i].failed != value { pending[i].failed = value }
+    }
+
+    /// true — сообщение принято (отправлено или ждёт сеть), false — отклонено сервером
+    private func attempt(_ key: String, _ item: Outgoing, restoreReply: ChatMessage?) async -> Bool {
         do {
             var uploaded: [OutgoingAttachment] = []
-            for item in media {
-                if case .sticker = item {} else { ping(Self.action(for: item)) }
-                uploaded.append(try await repo.upload(item))
+            for m in item.media {
+                if case .sticker = m {} else { ping(Self.action(for: m)) }
+                uploaded.append(try await repo.upload(m))
             }
-            var sent = try await repo.send(peerID: peerID, text: text, entities: entities,
-                                           attachments: uploaded, replyTo: reply?.id, silent: silent)
-            sent.key = local.key
-            pending.removeAll { $0.key == local.key }
+            var sent = try await repo.send(peerID: peerID, text: item.text, entities: item.entities,
+                                           attachments: uploaded, replyTo: item.replyID, silent: item.silent)
+            sent.key = key
+            pending.removeAll { $0.key == key }
+            outbox.removeAll { $0.key == key }
             if let i = messages.firstIndex(where: { $0.id == sent.id }) { messages[i] = sent } else { messages.append(sent) }
+            if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             return true
         } catch {
-            pending.removeAll { $0.key == local.key }
+            if let e = error as? APIError, e == .offline {
+                if !outbox.contains(where: { $0.key == key }) { outbox.append((key, item)) }
+                setFailed(key, true)
+                return true
+            }
+            pending.removeAll { $0.key == key }
+            outbox.removeAll { $0.key == key }
+            if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             if let e = error as? APIError { self.error = e }
-            replyTo = reply
+            replyTo = restoreReply
             return false
+        }
+    }
+
+    /// Связь вернулась — отправляем накопившееся по порядку
+    func retryQueued() async {
+        guard !retrying, !outbox.isEmpty else { return }
+        retrying = true
+        defer { retrying = false }
+        for entry in outbox {
+            guard pending.contains(where: { $0.key == entry.key }) else { outbox.removeAll { $0.key == entry.key }; continue }
+            setFailed(entry.key, false)
+            _ = await attempt(entry.key, entry.item, restoreReply: nil)
+            if outbox.contains(where: { $0.key == entry.key }) { break }          // опять нет сети — остальное позже
         }
     }
 
@@ -320,8 +448,7 @@ final class ChatModel: ObservableObject {
     func sendVoice(url: URL, duration: Double, waveform: [Int]) {
         Task {
             await deliver(text: "", entities: [], media: [.voice(url: url, duration: duration, waveform: waveform)],
-                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform)])
-            try? FileManager.default.removeItem(at: url)
+                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform)], cleanup: url)
         }
     }
 
@@ -329,8 +456,7 @@ final class ChatModel: ObservableObject {
         Task {
             await deliver(text: "", entities: [], media: [.circle(url: url, thumb: thumb, duration: duration)],
                           placeholders: [ChatAttachment(kind: .circle, width: 480, height: 480, duration: duration,
-                                                        localPreview: thumb)])
-            try? FileManager.default.removeItem(at: url)
+                                                        localPreview: thumb)], cleanup: url)
         }
     }
 
@@ -352,8 +478,16 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    func delete(_ message: ChatMessage, forEveryone: Bool) async {
-        messages.removeAll { $0.id == message.id }
+    func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
+        if animated {
+            dissolving.insert(message.id)
+            Haptics.impact(.soft)
+            try? await Task.sleep(nanoseconds: 950_000_000)
+        }
+        withAnimation(.easeOut(duration: 0.25)) {
+            messages.removeAll { $0.id == message.id }
+            dissolving.remove(message.id)
+        }
         do { try await repo.delete(messageID: message.id, forEveryone: forEveryone) }
         catch let e as APIError { error = e } catch {}
         await refresh()
@@ -363,4 +497,14 @@ final class ChatModel: ObservableObject {
 struct ChatRoute: Identifiable, Hashable {
     let peer: ChatPeer
     var id: String { peer.id }
+}
+
+
+/// Найденное сообщение в глобальном поиске по чатам
+struct MessageHit: Identifiable, Hashable {
+    let id: String
+    let peer: ChatPeer
+    let text: String
+    let mine: Bool
+    let date: Date
 }

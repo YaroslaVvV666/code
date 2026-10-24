@@ -23,7 +23,11 @@ struct ReelComposerView: View {
     @State private var errorText: String?
     @State private var tracks: [Track] = []
     @State private var music: Track?
+    @State private var options = PostOptions()
     @FocusState private var focused: Bool
+
+    /// Пока видео не выбрано и не снято — показываем камеру (слева внизу — «Галерея»)
+    private var cameraVisible: Bool { prepared == nil && editModel == nil && !preparing && !showEditor }
 
     private let maxSeconds: Double = 180
     private let maxCaption = 300
@@ -45,6 +49,9 @@ struct ReelComposerView: View {
                         videoCard
                         editRow
                         captionField
+                        if prepared != nil { feedPreview }
+                        PostOptionsCard(options: $options, showsRepost: true,
+                                        hashtags: PostOptionsCard.hashtags(in: caption), detail: videoDetail)
                         hints
                         if let errorText {
                             Text(errorText).font(.system(size: 14)).foregroundStyle(theme.danger)
@@ -55,6 +62,13 @@ struct ReelComposerView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 publishBar
+            }
+        }
+        .overlay {
+            if cameraVisible {
+                ReelCameraView(error: errorText, onClose: { dismiss() }, onGallery: { errorText = nil; showPicker = true },
+                               onRecorded: { url in await loadRecorded(url) })
+                    .transition(.opacity)
             }
         }
         .preferredColorScheme(theme.dark ? .dark : .light)
@@ -71,6 +85,7 @@ struct ReelComposerView: View {
                                onClose: { showEditor = false; if prepared == nil { discard() } })
             }
         }
+        .holdsMedia()
         .onDisappear { if !showEditor { discard() } }
         .task {
             if let list = try? await session.socialRepo.playlist(userID: session.serverID) { tracks = list }
@@ -110,6 +125,51 @@ struct ReelComposerView: View {
         }
     }
 
+    // MARK: Предпросмотр и детали
+
+    /// Технические детали ролика: размер кадра и длительность
+    private var videoDetail: String {
+        guard let p = prepared else { return "" }
+        var parts: [String] = []
+        if p.width > 0, p.height > 0 { parts.append("\(p.width)×\(p.height)") }
+        if let d = p.duration { parts.append(clock(d)) }
+        parts.append(aspectOK ? s.t("вертикальное — на весь экран", "vertical — fills the screen")
+                              : s.t("горизонтальное — с полосами", "horizontal — with bars"))
+        return parts.joined(separator: " · ")
+    }
+
+    /// Так ролик увидят в ленте «Шортс»: кадр, подпись, музыка и кнопки справа
+    private var feedPreview: some View {
+        let w: CGFloat = 150, h = w * 16 / 9
+        return VStack(spacing: 8) {
+            Text(s.t("КАК ЭТО УВИДЯТ", "HOW IT LOOKS"))
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+            ZStack(alignment: .bottomLeading) {
+                if let prepared, let image = UIImage(data: prepared.thumbnail) {
+                    Image(uiImage: image).resizable().scaledToFill().frame(width: w, height: h).clipped()
+                }
+                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("@" + (session.profile.profile?.username ?? session.profile.profile?.name ?? ""))
+                        .font(.system(size: 10, weight: .bold))
+                    if !caption.isEmpty { Text(caption).font(.system(size: 8)).lineLimit(2) }
+                    if let music { Label(music.display, systemImage: "music.note").font(.system(size: 7, weight: .medium)).lineLimit(1) }
+                }
+                .foregroundStyle(.white).padding(8).frame(maxWidth: w - 34, alignment: .leading)
+                VStack(spacing: 8) {
+                    Image(systemName: "heart.fill"); Image(systemName: "bubble.fill").opacity(options.commentsOff ? 0.3 : 1)
+                    Image(systemName: "bookmark.fill"); Image(systemName: "arrow.2.squarepath").opacity(options.noRepost ? 0.3 : 1)
+                }
+                .font(.system(size: 11)).foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(8)
+            }
+            .frame(width: w, height: h)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+        }
+    }
+
     // MARK: Части экрана
 
     private var header: some View {
@@ -125,7 +185,7 @@ struct ReelComposerView: View {
             Spacer()
             Color.clear.frame(width: 38, height: 38)
         }
-        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 10)
     }
 
     private var videoCard: some View {
@@ -255,6 +315,25 @@ struct ReelComposerView: View {
         }
     }
 
+    /// Видео, снятое камерой: сжимаем, и дальше как с выбранным из галереи
+    private func loadRecorded(_ file: URL) async -> Bool {
+        errorText = nil
+        discard()
+        do {
+            let media = try await MediaPreparer.prepare(videoFile: file)
+            try? FileManager.default.removeItem(at: file)
+            guard case .video(let url) = media.source else { return false }
+            original = media
+            prepared = media
+            editModel = ReelEditModel(video: url)
+            Haptics.impact(.light)
+            showEditor = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func editorFinished(_ media: PreparedMedia?, _ track: Track?) {
         if let old = prepared, case .video(let u) = old.source {
             var keep = false
@@ -285,7 +364,7 @@ struct ReelComposerView: View {
             defer { uploading = false }
             do {
                 let item = try await session.feedRepo.uploadMedia(media)
-                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: item, musicTrack: music?.id)
+                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: item, musicTrack: music?.id, options: options)
                 discard()
                 Haptics.notify(.success)
                 await onPosted()

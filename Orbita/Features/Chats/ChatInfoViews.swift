@@ -8,6 +8,11 @@ private struct InfoViewerItem: Identifiable {
     var hero: HeroSource.Snapshot?
 }
 
+private struct InfoAvatarTopKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 // MARK: - Профиль переписки (как в Telegram: нажали на имя сверху)
 
 struct ChatInfoView: View {
@@ -38,6 +43,18 @@ struct ChatInfoView: View {
     @State private var notice: String?
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
+    // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
+    @State private var stage = 0
+    @State private var stageForward = true
+    @State private var stageStarted = false            // при первом открытии сразу встаём в среднее положение
+    @State private var avatarTop: CGFloat = 0
+    @State private var pullArmed = true
+    @State private var tracker = PageScrollTracker()
+    private var pageTop: CGFloat { TopInset.value }
+    private static let avatarPad: CGFloat = 40
+    private var headerHeight: CGFloat { UIScreen.main.bounds.width * 0.96 }
+    private var hasStagePhotos: Bool { !isGroup && profile?.blockedMe != true && !(profile?.avatars.isEmpty ?? true) }
+    private var st: Int { hasStagePhotos ? stage : 0 }
 
     private var s: Strings { Strings(lang: lang) }
     private var isGroup: Bool { model.peer.isGroup }
@@ -76,10 +93,20 @@ struct ChatInfoView: View {
                     if isGroup, let group, !group.members.isEmpty { membersCard(group) }
                     sharedSection
                 }
-                .padding(.top, 56)
+                .coordinateSpace(name: "infoBody")
+                .environmentObject(tracker)
+                .overlay(alignment: .topLeading) { stageOverlay }
+                .onPreferenceChange(InfoAvatarTopKey.self) { v in if st == 0 { avatarTop = v } }
+                .onAppear {
+                    tracker.onChange = { offset in handleScroll(offset) }
+                }
+                .padding(.top, pageTop)                         // отступ снаружи: фото рисуется от верха страницы без сдвига, пустоты под ним нет
                 .padding(.bottom, 40)
             }
+            .coordinateSpace(name: "pageScroll")
             .scrollIndicators(.hidden)
+            .ignoresSafeArea(edges: .top)
+            .environment(\.pageTopInset, pageTop)
             topBar
         }
         .overlay {
@@ -200,25 +227,98 @@ struct ChatInfoView: View {
     private var headerBlock: some View {
         VStack(spacing: 6) {
             // фото профиля сразу здесь: нажали — раскрывается на весь экран и листается
-            if !isGroup, let photos = profile?.avatars, !photos.isEmpty {
+            if hasStagePhotos, let photos = profile?.avatars {
                 AvatarPager(name: model.peer.name, photos: photos, size: 112, index: $pagerIndex) {
-                    avatarRoute = AvatarViewerRoute(index: 0)
+                    setStage(1)
                 }
+                .opacity(st >= 1 ? 0 : 1)                              // вместо кружка рисует AvatarStage
+                .frame(height: st >= 1 ? max(112, headerHeight - (Self.avatarPad + pageTop) - 4) : 112, alignment: .top)
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: InfoAvatarTopKey.self, value: g.frame(in: .named("infoBody")).minY)
+                })
+                .padding(.top, Self.avatarPad)
             } else {
                 AvatarView(name: model.peer.name, size: 112, avatarID: model.peer.avatarID).clipShape(Circle())
+                    .padding(.top, Self.avatarPad)
             }
-            Text(model.peer.name)
-                .font(.system(size: 26, weight: .bold)).foregroundStyle(theme.text)
-                .multilineTextAlignment(.center).padding(.horizontal, 24)
-            if let real = model.realName, model.isContact, real != model.peer.name, !isGroup {
-                Text(real).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
+            if st == 0 {
+                Text(model.peer.name)
+                    .font(.system(size: 26, weight: .bold)).foregroundStyle(theme.text)
+                    .multilineTextAlignment(.center).padding(.horizontal, 24)
+                if let real = model.realName, model.isContact, real != model.peer.name, !isGroup {
+                    Text(real).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
+                }
+                Text(subtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(theme.textSecondary)
             }
-            Text(subtitle)
-                .font(.system(size: 15))
-                .foregroundStyle(theme.textSecondary)
             requestsBanner.padding(.top, 8)
         }
         .frame(maxWidth: .infinity)
+        .background(alignment: .top) { PageScrollMarker(lockTop: true, reportPull: hasStagePhotos) }
+    }
+
+    // MARK: Три положения аватарки
+
+    @ViewBuilder
+    private var stageOverlay: some View {
+        if hasStagePhotos, let p = profile {
+            let count = p.avatars.count
+            AvatarStage(expand: CGFloat(st), circleTop: avatarTop + pageTop, screen: UIScreen.main.bounds.size,
+                        headerHeight: headerHeight, topInset: pageTop,
+                        photos: p.avatars, page: pagerIndex, forward: stageForward,
+                        name: model.peer.name, status: subtitle,
+                        onStep: { stepPhoto($0, count: count) },
+                        onCenter: { setStage(stage == 1 ? 2 : 1) },
+                        onVertical: { stageDrag($0) },
+                        onClose: { setStage(0) })
+                .offset(y: -pageTop)
+                .allowsHitTesting(st >= 1)
+            if st == 2 {
+                AvatarViewer(name: p.name, photos: p.avatars, start: pagerIndex, onClose: { setStage(0) })
+                    .padding(.top, pageTop)
+                    .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+                    .background(Color.black)
+                    .offset(y: -pageTop)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private func handleScroll(_ offset: CGFloat) {
+        if offset > -8, !pullArmed { pullArmed = true }
+        guard hasStagePhotos else { return }
+        let pull = -offset
+        if pull > 62, stage == 0, pullArmed { pullArmed = false; Haptics.impact(.medium); setStage(1) }
+        if pull > 150, stage == 1, pullArmed { pullArmed = false; Haptics.impact(.heavy); setStage(2) }
+        if offset > 40, stage == 1 { setStage(0) }
+    }
+
+    private func setStage(_ n: Int) {
+        guard stage != n else { return }
+        Haptics.impact(.light)
+        if n == 0 || stage == 0 { stageForward = false }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
+            stage = n
+            if n == 0 { pagerIndex = 0 }
+        }
+    }
+
+    private func stepPhoto(_ delta: Int, count: Int) {
+        guard count > 1 else { return }
+        let next = max(0, min(count - 1, pagerIndex + delta))
+        guard next != pagerIndex else { return }
+        Haptics.select()
+        stageForward = delta > 0
+        withAnimation(.easeInOut(duration: 0.28)) { pagerIndex = next }
+    }
+
+    private func stageDrag(_ dy: CGFloat) {
+        if stage == 1 {
+            if dy > 50 { Haptics.impact(.medium); setStage(2) } else if dy < -50 { setStage(0) }
+        } else if stage == 2, abs(dy) > 60 {
+            setStage(1)
+        }
     }
 
     private var subtitle: String {
@@ -456,6 +556,7 @@ struct ChatInfoView: View {
                         var image: UIImage?
                         if let url = ServerConfig.mediaURL(item.thumbID ?? item.id) { image = ImageCache.shared.cached(url, maxPixel: 1280) }
                         HeroSource.shared.set(id: item.id, rect: frames.box(index).rect, image: image)
+                        hideKeyboard()
                         viewer = InfoViewerItem(media: items, start: index, hero: HeroSource.shared.take())
                     }
             }
@@ -540,6 +641,10 @@ struct ChatInfoView: View {
     private func loadProfile() async {
         guard !isGroup else { return }
         profile = try? await session.profileRepo.profile(id: model.peer.id)
+        if !stageStarted, hasStagePhotos {                     // по умолчанию человек открывается в среднем положении
+            stageStarted = true
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) { stage = 1 }
+        }
     }
 
     private func setBlocked(_ blocked: Bool) {

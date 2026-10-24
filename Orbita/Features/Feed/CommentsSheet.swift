@@ -244,20 +244,20 @@ struct CommentsSheet: View {
         Button { toggleLike(comment) } label: {
             VStack(spacing: 2) {
                 Image(systemName: comment.likedByMe ? "heart.fill" : "heart")
-                    .font(.system(size: 19))
+                    .font(.system(size: 28))
                     .foregroundStyle(comment.likedByMe ? theme.like : theme.textTertiary)
                     .symbolEffect(.bounce, value: comment.likedByMe)
                 Text(comment.likes > 0 ? "\(comment.likes)" : " ")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(theme.textSecondary)
             }
-            .frame(width: 32)
+            .frame(width: 48)
         }
         .buttonStyle(.plain)
         .overlay(alignment: .topTrailing) {
             if comment.likedByAuthor {
                 Image(systemName: "heart.circle.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 16))
                     .foregroundStyle(theme.like)
                     .background(theme.sheet, in: Circle())
                     .offset(x: 4, y: -4)

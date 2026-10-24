@@ -12,8 +12,11 @@ final class UserPageModel: ObservableObject {
     @Published private(set) var profile: UserProfile?
     @Published private(set) var posts: [Post] = []
     @Published private(set) var wallLoaded = false
+    @Published private(set) var guestEntries: [WallEntry] = []        // записи гостей на стене
+    @Published private(set) var guestCanWrite = false
     @Published private(set) var ownReels: [Post] = []
     @Published private(set) var repostedReels: [Post] = []
+    private var reelsRefreshing = false
     @Published private(set) var savedReels: [Post] = []
     @Published private(set) var reelsLoaded = false
     @Published private(set) var savedLoaded = false
@@ -31,6 +34,7 @@ final class UserPageModel: ObservableObject {
     private let profileRepo: ProfileRepository
     private let feedRepo: FeedRepository
     private let social: SocialRepository
+    private let extras: ExtrasAPI
     private weak var ownStore: ProfileStore?
     private weak var feed: FeedViewModel?
 
@@ -40,6 +44,7 @@ final class UserPageModel: ObservableObject {
         profileRepo = session.profileRepo
         feedRepo = session.feedRepo
         social = session.socialRepo
+        extras = session.extras
         ownStore = session.profile
         feed = session.feed
     }
@@ -66,8 +71,19 @@ final class UserPageModel: ObservableObject {
         }
     }
 
+    /// Пока страница открыта, раз в несколько секунд узнаём, слушает ли человек музыку (аватарка оживает)
+    func refreshListening() async {
+        guard let id = profile?.id, !isMe else { return }
+        if let fresh = try? await profileRepo.profile(id: id), fresh.listening != profile?.listening {
+            profile?.listening = fresh.listening
+        }
+    }
+
     func loadReels() async {
-        guard let id = profile?.id, !reelsLoaded else { return }
+        guard let id = profile?.id, !reelsRefreshing else { return }
+        reelsRefreshing = true
+        defer { reelsRefreshing = false }
+        // каждый раз берём свежие данные: счётчики и «репостнул» меняются прямо в ленте шортсов
         async let own = social.reels(userID: id, reposts: false)
         async let rep = social.reels(userID: id, reposts: true)
         ownReels = (try? await own) ?? []
@@ -92,6 +108,27 @@ final class UserPageModel: ObservableObject {
             posts = wall.posts
             wallLoaded = true
         }
+        if let guests = try? await social.wallEntries(userID: id) {
+            guestEntries = guests.entries
+            guestCanWrite = guests.canWrite
+        }
+    }
+
+    /// Запись гостя: фото и рисунок сначала загружаются (там проверка на 18+), потом создаётся сама запись
+    func addGuestEntry(kind: String, text: String, image: WallImage?) async throws {
+        guard let id = profile?.id else { return }
+        var mediaID: String?
+        if let image {
+            mediaID = try await social.uploadWallImage(image.data, mime: image.mime, width: image.width, height: image.height)
+        }
+        let entry = try await social.addWallEntry(userID: id, kind: kind, text: text, mediaID: mediaID)
+        guestEntries.insert(entry, at: 0)
+    }
+
+    func deleteGuestEntry(_ entry: WallEntry) {
+        guestEntries.removeAll { $0.id == entry.id }
+        let social = social, id = entry.id
+        Task { try? await social.deleteWallEntry(id: id) }
     }
 
     // MARK: Записи на стене
@@ -148,6 +185,22 @@ final class UserPageModel: ObservableObject {
     func toggleFriend() async {
         guard let p = profile else { return }
         await setFriend(id: p.id, add: p.friendState == "none" || p.friendState == "incoming")
+    }
+
+    func toggleFollow() async {
+        guard let p = profile else { return }
+        let on = !p.following
+        profile?.following = on
+        if let n = profile?.followersCount { profile?.followersCount = max(0, n + (on ? 1 : -1)) }
+        if let (f, n) = await extras.setFollow(id: p.id, on: on) {
+            profile?.following = f
+            if profile?.followersCount != nil { profile?.followersCount = n }
+            Haptics.notify(.success)
+        } else {
+            profile?.following = !on
+            if let n = profile?.followersCount { profile?.followersCount = max(0, n + (on ? -1 : 1)) }
+        }
+        if let r = try? await profileRepo.profile(id: p.id) { profile = r }
     }
 
     func setFriend(id: String, add: Bool) async {
@@ -265,32 +318,62 @@ struct UserPageView: View {
     @State private var avatarTop: CGFloat = 0          // верх аватарки в координатах страницы
     @State private var pullArmed = true
     @State private var tracker = PageScrollTracker()
+    /// Ник страницы и плашка появляются только после того, как раскрытое фото свернулось (иначе ник наезжает на фото)
+    @State private var namesReady = true
     @State private var tab = 0
+    @State private var showWallCompose = false
     @State private var reelOpen: Post?
+    @State private var reelContext: [Post] = []
 
-    private enum TabKind { case posts, shorts, reposts, saved, photos, friends }
-    private var tabKinds: [TabKind] { model.isMe ? [.posts, .shorts, .reposts, .saved, .photos, .friends]
-                                                 : [.posts, .shorts, .reposts, .photos, .friends] }
-    private func tabTitle(_ k: TabKind) -> String {
-        switch k {
-        case .posts:   return s.postsStat
+    /// Три вкладки: «Стена · Медиа · Друзья». Фото, шортсы, истории, репосты (и «Избранное» — только у владельца) лежат внутри «Медиа»
+    private enum TabKind { case posts, media, friends }
+    private let tabKinds: [TabKind] = [.posts, .media, .friends]
+    private enum MediaFilter { case photos, shorts, stories, reposts, saved }
+    @State private var mediaFilter: MediaFilter = .photos
+    private var mediaFilters: [MediaFilter] { model.isMe ? [.photos, .shorts, .stories, .reposts, .saved] : [.photos, .shorts, .stories, .reposts] }
+    private func filterTitle(_ f: MediaFilter) -> String {
+        switch f {
+        case .photos:  return s.photosStat
         case .shorts:  return s.t("Шортсы", "Shorts")
+        case .stories: return s.t("Истории", "Stories")
         case .reposts: return s.t("Репосты", "Reposts")
         case .saved:   return s.t("Избранное", "Saved")
-        case .photos:  return s.photosStat
+        }
+    }
+    private func tabTitle(_ k: TabKind) -> String {
+        switch k {
+        case .posts:   return s.t("Стена", "Wall")
+        case .media:   return s.t("Медиа", "Media")
         case .friends: return model.profile.map(friendsTabTitle) ?? ""
         }
     }
-    /// Две строки вкладок: «Шортсы · Репосты · Избранное» и «Публикации · Фото · Друзья»
     private var tabRows: some View {
-        let titles = tabKinds.map(tabTitle)
-        let reelRow = tabKinds.indices.filter { [.shorts, .reposts, .saved].contains(tabKinds[$0]) }
-        let restRow = tabKinds.indices.filter { ![.shorts, .reposts, .saved].contains(tabKinds[$0]) }
-        return VStack(spacing: 8) {
-            ProfileTabs(titles: titles, selection: $tab, only: reelRow)
-            ProfileTabs(titles: titles, selection: $tab, only: restRow)
+        ProfileTabs(titles: tabKinds.map(tabTitle), selection: $tab)
+            .padding(.horizontal, 16)
+    }
+
+    /// Мелкие переключатели внутри «Медиа»
+    private var mediaChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(mediaFilters, id: \.self) { f in
+                    Button { withAnimation(.easeOut(duration: 0.15)) { mediaFilter = f } } label: {
+                        Text(filterTitle(f))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(mediaFilter == f ? Color.white : theme.textSecondary)
+                            .padding(.horizontal, 14).frame(height: 32)
+                            .background(mediaFilter == f ? AnyShapeStyle(theme.accentColor) : AnyShapeStyle(theme.surface), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
+    }
+
+    private func loadMedia(_ f: MediaFilter) {
+        if f == .shorts || f == .reposts { Task { await model.loadReels() } }
+        if f == .saved, !model.savedLoaded { Task { await model.loadSaved() } }
     }
     @State private var muted = false
     @State private var soonText: String?
@@ -308,7 +391,7 @@ struct UserPageView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let profile = model.profile {
-                PageScrollMarker(lockTop: profile.avatars.isEmpty || profile.blockedMe)
+                PageScrollMarker(lockTop: true, reportPull: !(profile.avatars.isEmpty || profile.blockedMe))
                 header(profile)
                 if profile.blockedMe {
                     notice(icon: "hand.raised.slash", title: s.restrictedYou, text: s.restrictedYouHint)
@@ -316,17 +399,23 @@ struct UserPageView: View {
                     VStack(spacing: 14) {
                         actions(profile)
                         info(profile)
-                        PermanentStoriesStrip(userID: profile.id, name: profile.name, avatarID: profile.avatarID)
                         tabRows
                         switch tabKinds[min(tab, tabKinds.count - 1)] {
                         case .posts:   wall(profile)
-                        case .shorts:  reelGrid(model.ownReels, loaded: model.reelsLoaded,
-                                                empty: s.t("Шортсов пока нет", "No shorts yet"))
-                        case .reposts: reelGrid(model.repostedReels, loaded: model.reelsLoaded,
-                                                empty: s.t("Репостов пока нет", "No reposts yet"))
-                        case .saved:   reelGrid(model.savedReels, loaded: model.savedLoaded,
-                                                empty: s.t("Сохранённых шортсов нет", "No saved shorts"))
-                        case .photos:  photoGrid(profile)
+                        case .media:
+                            VStack(spacing: 12) {
+                                mediaChips
+                                switch mediaFilter {
+                                case .photos:  photoGrid(profile)
+                                case .shorts:  reelGrid(model.ownReels, loaded: model.reelsLoaded,
+                                                        empty: s.t("Шортсов пока нет", "No shorts yet"))
+                                case .stories: StoriesGrid(userID: profile.id, name: profile.name, avatarID: profile.avatarID)
+                                case .reposts: reelGrid(model.repostedReels, loaded: model.reelsLoaded,
+                                                        empty: s.t("Репостов пока нет", "No reposts yet"))
+                                case .saved:   reelGrid(model.savedReels, loaded: model.savedLoaded,
+                                                        empty: s.t("Сохранённых шортсов нет", "No saved shorts"))
+                                }
+                            }
                         case .friends: FriendsTab(model: model, profile: profile) { friendSheet = $0 }
                         }
                     }
@@ -347,6 +436,23 @@ struct UserPageView: View {
         .environmentObject(tracker)
         .overlay(alignment: .topLeading) {
             if let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe { avatarStage(profile) }
+            if stage == 2, let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe {
+                Group {
+                    if model.isMe {
+                        AvatarViewer(name: profile.name, photos: profile.avatars, start: page,
+                                     onReorder: { ids in Task { _ = await session.profile.reorderPhotos(ids) } },
+                                     onDelete: { id in Task { _ = await session.profile.removePhoto(id) } },
+                                     onClose: { setStage(0) })
+                    } else {
+                        AvatarViewer(name: profile.name, photos: profile.avatars, start: page, onClose: { setStage(0) })
+                    }
+                }
+                .padding(.top, pageTop)                     // кнопки — под статус-баром
+                .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+                .background(Color.black)
+                .offset(y: -pageTop)
+                .transition(.opacity)
+            }
         }
         .onPreferenceChange(PageAvatarTopKey.self) { v in if stage == 0 { avatarTop = v } }
         .onAppear {
@@ -355,11 +461,22 @@ struct UserPageView: View {
             }
         }
         .overlay(alignment: .top) {
-            if let profile = model.profile, !profile.blockedMe, stage == 0 {
+            if let profile = model.profile, !profile.blockedMe, stage == 0, namesReady {
                 StickyProfileBar(name: profile.displayName, subtitle: statusLine(profile), color: profile.styleColor, tracker: tracker)
             }
         }
         .task { await model.load() }
+        .onChange(of: stage) { _, new in
+            if new == 0 {
+                namesReady = false
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 450_000_000)
+                    if stage == 0 { withAnimation(.easeOut(duration: 0.25)) { namesReady = true } }
+                }
+            } else {
+                namesReady = false
+            }
+        }
         .onChange(of: ownStore.profile?.avatars) { _, _ in
             if model.isMe { Task { await model.load() } }
         }
@@ -407,6 +524,15 @@ struct UserPageView: View {
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .presentationBackground(theme.sheet)
         }
+        .sheet(isPresented: $showWallCompose) {
+            WallComposeSheet(ownerName: model.profile?.name ?? "") { kind, text, image in
+                try await model.addGuestEntry(kind: kind, text: text, image: image)
+            }
+            .environmentObject(session)
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .preferredColorScheme(theme.dark ? .dark : .light)
+            .presentationBackground(theme.sheet)
+        }
         .sheet(item: $commentsPost, onDismiss: { Task { await model.reloadWall() } }) { post in
             CommentsSheet(post: post, vm: feed)
                 .environmentObject(session)
@@ -421,17 +547,24 @@ struct UserPageView: View {
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .presentationBackground(theme.sheet)
         }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                await model.refreshListening()
+            }
+        }
         .onChange(of: tab) { _, new in
             let kind = tabKinds[min(new, tabKinds.count - 1)]
             if kind == .friends, !model.friendsLoaded { Task { await model.loadFriends() } }
-            if kind == .shorts || kind == .reposts { Task { await model.loadReels() } }
-            if kind == .saved, !model.savedLoaded { Task { await model.loadSaved() } }
+            if kind == .media { loadMedia(mediaFilter) }
         }
-        .fullScreenCover(item: $reelOpen) { post in
-            PostLinkSheet(postID: post.id)
+        .onChange(of: mediaFilter) { _, f in loadMedia(f) }
+        .fullScreenCover(item: $reelOpen, onDismiss: { Task { await model.loadReels() } }) { post in
+            // шортсы и репосты открываются вертикальной лентой шортсов, а не отдельным постом
+            MusicShortsCover(reels: (reelContext.isEmpty ? [post] : reelContext).map { Reel(post: $0, state: "none") },
+                             startID: post.id, onClose: { reelOpen = nil })
                 .environmentObject(session).environmentObject(flow)
-                .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .environment(\.theme, theme).environment(\.lang, lang)
         }
         .sheet(isPresented: $showContact) {
             if let profile = model.profile {
@@ -463,6 +596,7 @@ struct UserPageView: View {
         guard !profile.avatars.isEmpty, !profile.blockedMe else { return }
         let pull = -offset
         if pull > 62, stage == 0, pullArmed {
+            pullArmed = false                // в третье — только новым жестом, после отпускания
             Haptics.impact(.medium)
             setStage(1)
         }
@@ -476,6 +610,7 @@ struct UserPageView: View {
 
     private func setStage(_ n: Int) {
         guard stage != n else { return }
+        Haptics.impact(.light)
         if n == 0 || stage == 0 { stageForward = false }
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             stage = n
@@ -500,7 +635,10 @@ struct UserPageView: View {
         }
     }
 
+    /// Отступ аватарки от верха страницы. Высота раскрытой шапки считается от него, а не от замера: замер в чужих профилях мог давать сдвиг и пустое место над кнопками
+    private static let avatarTopPadding: CGFloat = 34
     private var headerHeight: CGFloat { UIScreen.main.bounds.width * 0.96 }
+
 
     private func avatarStage(_ profile: UserProfile) -> some View {
         let screen: CGSize = UIScreen.main.bounds.size
@@ -511,7 +649,10 @@ struct UserPageView: View {
                            name: profile.displayName, status: statusLine(profile),
                            onStep: { stepPhoto($0, count: count) },
                            onCenter: { setStage(stage == 1 ? 2 : 1) },
-                           onVertical: { stageDrag($0) })
+                           onVertical: { stageDrag($0) },
+                        onClose: { setStage(0) },
+                           track: model.tracks.first ?? profile.track, queue: model.tracks, player: player,
+                           onMusic: { showPlaylist = true })
             .offset(y: -pageTop)
             .allowsHitTesting(stage >= 1)
     }
@@ -524,38 +665,52 @@ struct UserPageView: View {
     private func compactHeader(_ profile: UserProfile) -> some View {
         VStack(spacing: 6) {
             ZStack(alignment: .top) {
+                if !profile.orbit.isEmpty {
+                    OrbitRing(friends: profile.orbit, avatarSize: 118, front: false, mine: model.isMe, listening: profile.listening)      // пузыри, залетевшие за аватарку
+                        .collapsing(endScale: 0.5, fadeFrom: 0, fadeTo: 0.3)
+                        .opacity(stage >= 1 ? 0 : 1)
+                }
                 AvatarPager(name: profile.name, photos: profile.avatars, size: 118, index: $page,
-                            addStore: model.isMe ? session.profile : nil) {
+                            addStore: model.isMe ? session.profile : nil,
+                            listening: profile.listening, isMine: model.isMe) {
                     if !profile.avatars.isEmpty { setStage(1) }
                 }
-                .collapsing(endScale: 0.5, fadeFrom: 0, fadeTo: 0.62)      // аватарка сжимается и «вплавляется» в потолок
+                .collapsing(endScale: 0.5, fadeFrom: 0, fadeTo: 0.46)      // аватарка сжимается и «вплавляется» в потолок
                 .opacity(stage >= 1 ? 0 : 1)                               // вместо кружка рисует AvatarStage
+                if !profile.orbit.isEmpty {
+                    OrbitRing(friends: profile.orbit, avatarSize: 118, front: true, mine: model.isMe, listening: profile.listening)
+                        .collapsing(endScale: 0.5, fadeFrom: 0, fadeTo: 0.3)
+                        .opacity(stage >= 1 ? 0 : 1)
+                }
             }
             // при раскрытой шапке под фото освобождается место, а содержимое плавно съезжает вниз
-            .frame(height: stage >= 1 ? max(118, headerHeight - (avatarTop + pageTop) + 4) : 118, alignment: .top)
+            .frame(height: stage >= 1 ? max(118, headerHeight - (Self.avatarTopPadding + pageTop) - 4) : 118, alignment: .top)
+            .zIndex(1)                                                  // орбита пролетает поверх никнейма
             .background(GeometryReader { g in
                 Color.clear.preference(key: PageAvatarTopKey.self, value: g.frame(in: .named("userPageBody")).minY)
             })
-            .padding(.top, 34)
-            .padding(.bottom, 6)
+            .padding(.top, Self.avatarTopPadding)
+            .padding(.bottom, stage >= 1 ? 0 : (profile.orbit.isEmpty ? 6 : 36))
 
             if stage == 0 {
-                Text(profile.displayName)
+                NameWithStatus(name: profile.name, emoji: profile.statusEmoji, fontSize: 28)
                     .font(.system(size: 28, weight: .bold))
                     .foregroundStyle(ProfilePalette.ink(profile.styleColor, fallback: theme.text))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .padding(.horizontal, 24)
-                    .collapsing(fadeFrom: 0.45, fadeTo: 0.65)               // крупный ник уходит, ник в плашке остаётся
+                    .collapsing(fadeFrom: 0.5, fadeTo: 0.7)               // крупный ник уходит, ник в плашке остаётся
+                    .opacity(namesReady ? 1 : 0)
                 Text(statusLine(profile))
                     .font(.system(size: 15))
                     .foregroundStyle(statusIsOnline(profile) ? (profile.styleColor == nil ? theme.accentColor : Color.white)
                                                              : ProfilePalette.inkSecondary(profile.styleColor, fallback: theme.textSecondary))
                     .lineLimit(1)
                     .collapsing(fadeFrom: 0.3, fadeTo: 0.55)
+                    .opacity(namesReady ? 1 : 0)
             }
 
-            if !profile.blockedMe { musicRow(profile).padding(.top, 8) }
+            if !profile.blockedMe, stage == 0 { musicRow(profile).padding(.top, 8) }
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 4)
@@ -579,8 +734,17 @@ struct UserPageView: View {
 
     /// «в сети» / «был(а) …»; ник вынесен в карточку с данными
     private func statusLine(_ profile: UserProfile) -> String {
-        if model.isMe { return profile.username.map { "@" + $0 } ?? "" }
-        return s.lastSeenText(profile.lastSeen)
+        let base = model.isMe ? (profile.username.map { "@" + $0 } ?? "") : s.lastSeenText(profile.lastSeen)
+        guard let n = profile.followersCount else { return base }
+        let f = followersText(n)
+        return base.isEmpty ? f : base + " · " + f
+    }
+
+    private func followersText(_ n: Int) -> String {
+        if lang == .en { return "\(n) follower" + (n == 1 ? "" : "s") }
+        let m10 = n % 10, m100 = n % 100
+        let w = (m10 == 1 && m100 != 11) ? "подписчик" : ((2...4).contains(m10) && !(12...14).contains(m100) ? "подписчика" : "подписчиков")
+        return "\(n) \(w)"
     }
 
     private func friendsTabTitle(_ profile: UserProfile) -> String {
@@ -621,6 +785,7 @@ struct UserPageView: View {
                         }
                     }
                 }
+                if !profile.blockedMe { followButton(profile) }
                 if !profile.blockedMe { friendButton(profile) }
                 // «в контакты» и «заблокировать» — каждая отдельной строкой
                 rowButton(icon: profile.isContact ? "person.fill.checkmark" : "person.badge.plus",
@@ -639,6 +804,14 @@ struct UserPageView: View {
                 }
             }
         }
+    }
+
+    private func followButton(_ profile: UserProfile) -> some View {
+        rowButton(icon: profile.following ? "person.fill.checkmark" : "person.fill.badge.plus",
+                  title: profile.following ? s.t("Вы подписаны · отписаться", "Following · unfollow") : s.t("Подписаться", "Follow")) {
+            Task { await model.toggleFollow() }
+        }
+        .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
     }
 
     private func friendButton(_ profile: UserProfile) -> some View {
@@ -727,7 +900,18 @@ struct UserPageView: View {
 
     // MARK: Фото
 
-    /// Сетка шортсов как в TikTok: вертикальные обложки и сердечки с числом
+    /// 1 234 → «1,2 тыс.», 1 600 000 → «1,6 млн» — как в TikTok
+    static func compactCount(_ n: Int, ru: Bool) -> String {
+        func one(_ v: Double) -> String {
+            let r = (v * 10).rounded() / 10
+            return r == r.rounded() ? String(Int(r)) : String(format: "%.1f", r).replacingOccurrences(of: ".", with: ru ? "," : ".")
+        }
+        if n >= 1_000_000 { return one(Double(n) / 1_000_000) + (ru ? " млн" : "M") }
+        if n >= 1000 { return one(Double(n) / 1000) + (ru ? " тыс." : "K") }
+        return "\(n)"
+    }
+
+    /// Сетка шортсов как в TikTok: вертикальные обложки и число просмотров
     @ViewBuilder
     private func reelGrid(_ posts: [Post], loaded: Bool, empty: String) -> some View {
         if posts.isEmpty {
@@ -744,15 +928,15 @@ struct UserPageView: View {
                         }
                         .overlay(alignment: .bottomLeading) {
                             HStack(spacing: 4) {
-                                Image(systemName: "heart.fill").font(.system(size: 10))
-                                Text("\(post.likes)").font(.system(size: 12, weight: .semibold))
+                                Image(systemName: "play.fill").font(.system(size: 11))
+                                Text(Self.compactCount(post.views, ru: lang == .ru)).font(.system(size: 13, weight: .semibold))
                             }
                             .foregroundStyle(.white).shadow(color: .black.opacity(0.6), radius: 3)
                             .padding(6)
                         }
                         .clipped()
                         .contentShape(Rectangle())
-                        .onTapGesture { reelOpen = post }
+                        .onTapGesture { reelContext = posts; reelOpen = post }
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -805,6 +989,11 @@ struct UserPageView: View {
                 .buttonStyle(PressStyle())
             }
 
+            if !profile.wallPrivate {
+                WallGuestSection(entries: model.guestEntries, canWrite: model.guestCanWrite && !model.isMe,
+                                 onCompose: { showWallCompose = true }, onDelete: { model.deleteGuestEntry($0) })
+            }
+
             if profile.wallPrivate {
                 notice(icon: "lock.fill", title: s.wallClosed, text: s.wallClosedHint)
             } else if model.posts.isEmpty {
@@ -851,4 +1040,190 @@ struct UserPageView: View {
 private struct PageAvatarTopKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+
+// MARK: - Лучшие друзья: аватарки на орбите вокруг аватарки
+
+private struct OrbitRingRectKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+/// Цвет пузыря по аватарке: оттенок самых насыщенных пикселей, насыщенность ≥ 0.55, яркость 0.6–0.9
+enum OrbitTone {
+    private static var cache: [String: UIColor] = [:]
+    private static let lock = NSLock()
+
+    static func cached(_ id: String) -> UIColor? { lock.lock(); defer { lock.unlock() }; return cache[id] }
+
+    static func load(_ f: OrbitFriend) async -> UIColor {
+        if let hit = cached(f.id) { return hit }
+        var hue: CGFloat = CGFloat(f.name.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % 360) / 360     // нет фото — оттенок по имени
+        if let id = f.avatarID, let url = ServerConfig.mediaURL(id),
+           let image = await ImageCache.shared.load(url, maxPixel: 160), let h = dominantHue(image) { hue = h }
+        let color = UIColor(hue: hue, saturation: 0.78, brightness: 0.88, alpha: 1)
+        lock.lock(); cache[f.id] = color; lock.unlock()
+        return color
+    }
+
+    private static func dominantHue(_ image: UIImage) -> CGFloat? {
+        guard let cg = image.cgImage else { return nil }
+        let n = 12
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        guard let ctx = CGContext(data: &px, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+        var x: CGFloat = 0, y: CGFloat = 0, weight: CGFloat = 0
+        for k in 0..<(n * n) {
+            let c = UIColor(red: CGFloat(px[k * 4]) / 255, green: CGFloat(px[k * 4 + 1]) / 255, blue: CGFloat(px[k * 4 + 2]) / 255, alpha: 1)
+            var h: CGFloat = 0, sat: CGFloat = 0, b: CGFloat = 0
+            c.getHue(&h, saturation: &sat, brightness: &b, alpha: nil)
+            let w = pow(sat * b, 2)
+            x += cos(h * 2 * .pi) * w; y += sin(h * 2 * .pi) * w; weight += w
+        }
+        guard weight > 0.05 else { return nil }
+        var h = atan2(y, x) / (2 * .pi)
+        if h < 0 { h += 1 }
+        return h
+    }
+}
+
+/// Следит за плеером, чтобы орбита реагировала на старт и остановку музыки
+private struct OrbitPlayerProbe<Content: View>: View {
+    @ObservedObject var player: AudioPlayer
+    @ViewBuilder let content: (Bool) -> Content
+    init(player: AudioPlayer, @ViewBuilder content: @escaping (Bool) -> Content) { self.player = player; self.content = content }
+    var body: some View { content(player.isPlaying) }
+}
+
+/// Лучшие друзья по орбите вокруг аватарки. `front: false` — слой позади аватарки, `front: true` — перед ней.
+/// Орбита — наклонный эллипс почти во всю ширину экрана; z = sin(угла) даёт глубину: размер и прозрачность меняются.
+struct OrbitRing: View {
+    let friends: [OrbitFriend]
+    let avatarSize: CGFloat
+    let front: Bool
+    var mine = false                 // свой профиль: «плещется» в такт своему плееру
+    var listening = false            // чужой профиль: человек сейчас слушает (по данным сервера)
+    @EnvironmentObject private var session: AppSession
+    @EnvironmentObject private var flow: AuthFlow
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var tones: [String: UIColor] = [:]
+    @State private var opened: OrbitFriend?
+
+    private var shown: [OrbitFriend] { Array(friends.prefix(5)) }
+
+    private func hash(_ id: String, _ k: Int) -> Double {
+        var h: UInt32 = 2166136261
+        for u in id.unicodeScalars { h = (h ^ u.value) &* 16777619 }
+        h = (h ^ UInt32(k)) &* 2654435761
+        return Double(h % 10000) / 10000
+    }
+
+    /// Своя траектория у каждого: разные размер, наклон и высота эллипса. Скорость у всех одинаковая и стартовые углы равномерные —
+    /// поэтому расстояние по кругу между соседями не меняется, а мягкое расталкивание не даёт им сблизиться там, где пути пересекаются
+    private func positions(_ t: TimeInterval) -> [(x: CGFloat, y: CGFloat, z: Double)] {
+        let n = shown.count
+        let rx0 = Double(min(UIScreen.main.bounds.width / 2 - 34, 158))
+        let rxK = [1.0, 0.76, 0.92, 0.66, 0.84], ryK = [1.0, 1.3, 0.78, 1.12, 0.9]
+        let tiltK = [-0.22, 0.20, -0.04, 0.30, -0.30], yK = [0.34, 0.18, 0.48, 0.26, 0.42]
+        let speed = 0.17
+        var out: [(x: CGFloat, y: CGFloat, z: Double)] = []
+        for i in 0..<n {
+            let k = i % 5
+            let a = Double(i) / Double(max(n, 1)) * 2 * .pi + t * speed
+            let ex = rx0 * rxK[k] * cos(a), ey = Double(avatarSize) * 0.78 * ryK[k] * sin(a)
+            let tl = tiltK[k]
+            out.append((CGFloat(ex * cos(tl) - ey * sin(tl)),
+                        CGFloat(ex * sin(tl) + ey * cos(tl) + Double(avatarSize) * yK[k]), sin(a)))
+        }
+        let minD = avatarSize * 0.5
+        for _ in 0..<2 {
+            for i in 0..<n {
+                for j in (i + 1)..<max(n, i + 1) {
+                    let dx = out[j].x - out[i].x, dy = out[j].y - out[i].y
+                    let dist = max(0.001, hypot(dx, dy))
+                    guard dist < minD else { continue }
+                    let push = (minD - dist) / 2 / dist
+                    out[i].x -= dx * push; out[i].y -= dy * push
+                    out[j].x += dx * push; out[j].y += dy * push
+                }
+            }
+        }
+        return out
+    }
+
+    var body: some View {
+        Group {
+            if mine { OrbitPlayerProbe(player: session.player) { ring($0) } } else { ring(listening) }
+        }
+        .frame(width: avatarSize, height: avatarSize)
+        .task(id: friends.map(\.id)) {
+            for f in shown where tones[f.id] == nil { tones[f.id] = await OrbitTone.load(f) }
+        }
+        .fullScreenCover(item: $opened) { f in
+            PublicProfileSheet(source: .id(f.id), backButton: true)
+                .environmentObject(session)
+                .environmentObject(flow)
+                .environment(\.theme, theme)
+                .environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+        }
+    }
+
+    private func ring(_ active: Bool) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 45)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            let pos = positions(t)
+            ZStack {
+                ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
+                    let p = pos[i]
+                    if (p.z >= 0) == front {
+                        bubble(f, z: p.z, t: t, active: active)
+                            .offset(x: p.x, y: p.y)
+                            .zIndex(p.z)
+                    }
+                }
+            }
+            .frame(width: UIScreen.main.bounds.width, height: avatarSize * 3)      // внутри своих границ — иначе нажатия вне аватарки не доходят
+        }
+    }
+
+    private func hueOf(_ ui: UIColor) -> Double {
+        var h: CGFloat = 0
+        ui.getHue(&h, saturation: nil, brightness: nil, alpha: nil)
+        return Double(h)
+    }
+
+    private func bubble(_ f: OrbitFriend, z: Double, t: TimeInterval, active: Bool) -> some View {
+        let ui = tones[f.id] ?? OrbitTone.cached(f.id) ?? UIColor(hue: 0.85, saturation: 0.7, brightness: 0.88, alpha: 1)
+        let neon = Color(ui)
+        let k = 0.80 + 0.30 * (z + 1) / 2                        // дальше — меньше
+        let d = avatarSize * 0.36 * k
+        return ZStack {
+            Circle().fill(RadialGradient(colors: [neon.opacity(0.45), neon.opacity(0)], center: .center, startRadius: d * 0.3, endRadius: d * 0.72))
+                .frame(width: d * 1.5, height: d * 1.5)
+            AvatarView(name: f.name, size: d, avatarID: f.avatarID).clipShape(Circle())
+            Circle().stroke(LinearGradient(colors: [neon, Color.white.opacity(0.9), neon], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2)
+                .frame(width: d, height: d)
+        }
+        .background {
+            if active {                                                // идёт музыка — вокруг каждой аватарки «плещется» в её цвете
+                BeatVisualizer(size: d, energy: mine ? session.player.energy() : Beat.calm(t + hash(f.id, 3) * 20), time: t, hue: hueOf(ui))
+            }
+        }
+        .frame(width: d, height: d)
+        .opacity(0.72 + 0.28 * (z + 1) / 2)
+        .padding(20)                                                  // зона нажатия шире самой аватарки на 20pt со всех сторон
+        .background(Circle().fill(Color.white.opacity(0.001)))        // нажимается даже там, где нет фото и ничего не нарисовано
+        .contentShape(Circle())
+        .highPriorityGesture(TapGesture().onEnded { Haptics.impact(.light); opened = f })
+        .padding(-20)
+        .accessibilityElement()
+        .accessibilityLabel(lang == .ru ? "Лучший друг: \(f.name)" : "Best friend: \(f.name)")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { opened = f }
+    }
 }

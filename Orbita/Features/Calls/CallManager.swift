@@ -39,6 +39,8 @@ final class CallManager: ObservableObject {
             let repo = self.repo
             Task { await repo.signal(id, kind: "ice", data: json) }
         }
+        CallRinger.shared.onAnswer = { [weak self] in self?.accept() }
+        CallRinger.shared.onDecline = { [weak self] in self?.decline() }
         engine.onConnected = { [weak self] in self?.connected() }
         engine.onDisconnected = { [weak self] in self?.finish(text: "Соединение потеряно", notify: true) }
     }
@@ -143,6 +145,7 @@ final class CallManager: ObservableObject {
             do {
                 let servers = try await repo.answer(id)
                 setPhase(.connecting)
+                try? await Task.sleep(nanoseconds: 450_000_000)        // CallKit отпускает аудио, потом его берёт разговор
                 engine.prepare(servers: servers.isEmpty ? ice : servers, video: video)
                 engine.setSpeaker(video)
                 // оффер мог ещё не дойти: ждём до 6 секунд
@@ -196,13 +199,21 @@ final class CallManager: ObservableObject {
         }
     }
 
+    /// Короткий отбой — только если звонок уже был (не после отклонённого входящего без ответа)
+    private func playEndTone(after was: Phase) {
+        guard was == .active || was == .connecting || was == .outgoing else { return }
+        CallTones.shared.play(.end, takeOverSession: true)
+    }
+
     private func finish(text: String, notify: Bool, silent: Bool = false) {
+        let was = phase
         if notify, let id = callID { Task { await repo.end(id) } }
         timer?.invalidate(); timer = nil
         engine.close()
         callID = nil
         buffered = []
         endText = text
+        defer { playEndTone(after: was) }                   // после смены фазы, иначе мелодия звонка «глушит» отбой
         if silent || text.isEmpty {
             setPhase(.idle)
         } else {
@@ -231,21 +242,27 @@ final class CallManager: ObservableObject {
         }
     }
 
-    /// Звук и вибрация, пока звонит
+    /// Мелодия и мягкая вибрация, пока звонит: у аудио- и видеозвонка звук разный
     private func updateRinging() {
         ringTimer?.invalidate(); ringTimer = nil
+        CallTones.shared.stop()
+        if phase != .incoming { CallRinger.shared.end() }
         guard phase == .incoming || phase == .outgoing else { return }
         let incoming = phase == .incoming
-        func tick() {
-            if incoming {
-                AudioServicesPlaySystemSound(1005)
+        if incoming {
+            // рингтон, который человек выбрал у себя в настройках iPhone, играет сам CallKit;
+            // наша мелодия — только если система не дала показать звонок
+            let isVideo = video
+            CallRinger.shared.reportIncoming(name: peer?.name ?? "Focus", video: isVideo) { [weak self] ok in
+                guard !ok, let self, self.phase == .incoming else { return }
+                CallTones.shared.play(isVideo ? .incomingVideo : .incomingVoice, takeOverSession: true)
                 AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
-            } else {
-                Haptics.impact(.soft)
             }
+        } else {
+            // у исходящего звонка сессия уже настроена под разговор — её не трогаем
+            CallTones.shared.play(video ? .outgoingVideo : .outgoingVoice, takeOverSession: false)
+            Haptics.impact(.soft)
         }
-        tick()
-        ringTimer = Timer.scheduledTimer(withTimeInterval: incoming ? 2.2 : 3, repeats: true) { _ in tick() }
     }
 
     private func permissions(video: Bool) async -> Bool {

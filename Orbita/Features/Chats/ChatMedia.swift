@@ -91,14 +91,16 @@ final class VoiceRecorder: NSObject, ObservableObject {
     private func stopEngine() {
         timer?.invalidate()
         timer = nil
+        let wasRecording = recorder != nil
         recorder?.stop()
         recorder = nil
         isRecording = false
         level = 0
         recent = []
         startedAt = nil
-        // деактивация сессии на главном потоке может подвесить интерфейс — делаем в фоне
-        AudioSessionGate.deactivate()
+        // деактивация сессии на главном потоке может подвесить интерфейс — делаем в фоне.
+        // Если записи не было (например, вышли из переписки), сессию не трогаем: иначе замолкает играющий трек
+        if wasRecording { AudioSessionGate.deactivate() }
     }
 
     /// Сжимает запись до 40 столбиков 0...31 (как рисует Telegram)
@@ -155,6 +157,7 @@ final class VoicePlayer: ObservableObject {
             return
         }
         stop()
+        CircleFocus.shared.stop()
         onStart?()
         guard let url = ServerConfig.mediaURL(mediaID) else { return }
         try? AVAudioSession.sharedInstance().setCategory(.playback)
@@ -215,6 +218,8 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 
     /// Момент, когда AVFoundation реально начала писать (для счётчика с долями секунды)
     private(set) var startedAt: Date?
+    /// Для часов и кольца: реальный старт записи, а пока AVFoundation не ответила — момент запроса
+    var clockStart: Date? { startedAt ?? (startRequested ? requestedAt : nil) }
     var elapsed: TimeInterval { startedAt.map { Date().timeIntervalSince($0) } ?? 0 }
 
     private let output = AVCaptureMovieFileOutput()
@@ -256,6 +261,12 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                     output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
                     session.commitConfiguration()
                 }
+                // микрофон мог быть снят после неудачной записи — возвращаем
+                if !session.inputs.contains(where: { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.audio) == true }),
+                   let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
+                   session.canAddInput(micInput) {
+                    session.beginConfiguration(); session.addInput(micInput); session.commitConfiguration()
+                }
                 if let connection = output.connection(with: .video) {
                     if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
                     if connection.isVideoMirroringSupported { connection.automaticallyAdjustsVideoMirroring = false; connection.isVideoMirrored = true }
@@ -295,6 +306,18 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private var autoFinished: URL?
     private var startRequested = false          // запись запрошена, но AVFoundation могла ещё не начать
     private var stopWhenStarted = false
+
+    /// Вспышка-фонарик (работает на основной камере)
+    func setTorch(_ on: Bool) {
+        let session = session
+        queue.async {
+            guard let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: { $0.device.hasMediaType(.video) })?.device,
+                  device.hasTorch else { return }
+            try? device.lockForConfiguration()
+            device.torchMode = on ? .on : .off
+            device.unlockForConfiguration()
+        }
+    }
 
     /// Переключает фронтальную и основную камеру (можно и во время записи)
     func flipCamera() {
@@ -337,8 +360,33 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { output.stopRecording() }
     }
 
+    private var attempt = 0
+
+    private func retryRecording() {
+        attempt += 1
+        startedAt = nil                       // часы идут от requestedAt — человек не видит перезапуска
+        let session = session, output = output, dropMic = attempt >= 2
+        if !dropMic { configureAudio() }
+        queue.async { [weak self] in
+            if dropMic {
+                session.beginConfiguration()
+                for input in session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }) where input.device.hasMediaType(.audio) {
+                    session.removeInput(input)
+                }
+                session.commitConfiguration()
+            }
+            if !session.isRunning { session.startRunning() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                guard let self, self.startRequested, !output.isRecording else { return }
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+                output.startRecording(to: file, recordingDelegate: self)
+            }
+        }
+    }
+
     func startRecording() {
         guard ready, !output.isRecording, !startRequested else { return }
+        attempt = 0
         autoFinished = nil
         startRequested = true
         stopWhenStarted = false
@@ -396,6 +444,13 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         let usable = error == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) == true || size > 4096
         let code = nsError?.code
         Task { @MainActor in
+            // запись оборвалась сразу после старта, а человек ещё держит кнопку — тихо пробуем снова:
+            // сначала с обновлённым звуком, затем без микрофона (лучше видео без звука, чем ничего)
+            if !usable, self.finishing == nil, self.startRequested, self.attempt < 2,
+               Date().timeIntervalSince(self.requestedAt ?? Date()) < 3 {
+                self.retryRecording()
+                return
+            }
             self.lastErrorCode = usable ? nil : code
             self.isRecording = false
             self.startRequested = false
