@@ -290,8 +290,9 @@ struct MessageRow: View {
             VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
                 let value = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if value.count == 1 {
-                    // одно эмодзи — анимированное: 5 секунд крутится, по нажатию снова
-                    TimedLottieEmoji(emoji: value, size: emojiSize * 1.25)
+                    // одно эмодзи — анимированное. Только что отправили или пришло при открытом чате — один круг анимации; старые — по нажатию
+                    let fresh = message.isPending || Date().timeIntervalSince(message.createdAt) < 20
+                    TimedLottieEmoji(emoji: value, size: emojiSize * 1.25, playOnceKey: fresh && interactive ? message.key : nil)
                 } else {
                     Text(value).font(.system(size: emojiSize))
                 }

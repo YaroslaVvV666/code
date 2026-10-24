@@ -582,13 +582,22 @@ final class PlaybackGate {
 struct TimedLottieEmoji: View {
     let emoji: String
     var size: CGFloat = 64
+    /// Только что отправленное или пришедшее сообщение: один круг анимации сам. nil — старое, играет только по нажатию
+    var playOnceKey: String? = nil
 
     @State private var token = 0
     @State private var playing = false              // при входе в переписку не играет — только по нажатию
+    /// Уже сыгравшие сами: после подтверждения отправки (и в копии сообщения в меню) повторно не играют
+    private static var played = Set<String>()
 
     var body: some View {
         LottieEmojiView(emoji: emoji, size: size, playing: playing, onFinish: { playing = false })
             .id(token)
+            .onAppear {
+                guard let key = playOnceKey, !Self.played.contains(key) else { return }
+                Self.played.insert(key)
+                playing = true
+            }
             .contentShape(Rectangle())
             .onTapGesture {
                 Haptics.impact(.light)

@@ -1242,9 +1242,15 @@ struct ChatScreen: View {
                     if startIdx > 0, let firstKey = list.first?.id {
                         // Ранние сообщения добавляются сами, когда долистал до верха; при входе список не растёт —
                         // иначе большой чат строил десятки строк разом, пустел и перескакивал
+                        // «долистал до верха» — по настоящему положению метки на экране. Список не ленивый, поэтому
+                        // onAppear срабатывал сразу при входе, и первое же касание подгружало раннее и кидало в середину
                         Color.clear.frame(height: 1)
-                            .onAppear { topVisible = true }
-                            .onDisappear { topVisible = false }
+                            .background(GeometryReader { g in
+                                let near = g.frame(in: .named("chatScroll")).minY > -300
+                                Color.clear
+                                    .onAppear { topVisible = near }
+                                    .onChange(of: near) { _, now in topVisible = now }
+                            })
                             .onChange(of: topVisible && userDragged) { _, go in
                                 guard go else { return }
                                 topKey = all[max(0, startIdx - 40)].id
