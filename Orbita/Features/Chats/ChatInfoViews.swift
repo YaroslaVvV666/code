@@ -208,10 +208,9 @@ struct ChatInfoView: View {
             .buttonStyle(.plain)
             .zIndex(10)
             Spacer()
+            // «Изм.» — только в своей группе (админу); на профиле человека кнопки нет
             if isGroup, group?.isAdmin == true {
                 Button { showEdit = true } label: { pillLabel(s.t("Изм.", "Edit")) }.buttonStyle(.plain)
-            } else if !isGroup {
-                Button { showContact = true } label: { pillLabel(s.t("Изм.", "Edit")) }.buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 14).padding(.top, 6)
