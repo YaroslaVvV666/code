@@ -528,6 +528,9 @@ struct ProfileView: View {
                     .padding(.horizontal, 20)
                     .frame(height: 42)
                     .glassCapsule(interactive: true)
+                    // нажимается вся капсула и ещё ~12 pt вокруг, а не только буквы: стеклянный фон на iOS 26
+                    // не считается областью нажатия, и раньше срабатывал лишь точный тап по «Изм.»
+                    .contentShape(Rectangle().inset(by: -12))
             }
             .buttonStyle(.plain)
 
@@ -539,6 +542,7 @@ struct ProfileView: View {
                     .foregroundStyle(theme.text)
                     .frame(width: 42, height: 42)
                     .glassCircle()
+                    .contentShape(Rectangle().inset(by: -12))
             }
             .buttonStyle(.plain)
         }
