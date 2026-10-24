@@ -74,8 +74,7 @@ extension Strings {
         case .notConfigured:
             return t("Укажите адрес сервера: Профиль → Сервер.", "Set the server address: Profile → Server.")
         case .offline:
-            return t("Нет связи с сервером Orbita. Проверьте адрес и подключение к сети.",
-                     "Can't reach the Orbita server. Check the address and your connection.")
+            return t("Соединение…", "Connecting…")                // как в Telegram: без страшных слов про сервер
         case .unauthorized:
             return t("Сервер не принял вход. Попробуйте ещё раз.", "The server rejected the sign-in. Please try again.")
         case .invalidResponse:

@@ -366,6 +366,9 @@ struct OutgoingAttachment {
 protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
     func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread
+    /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
+    func cachedChats() -> (chats: [ChatSummary], unread: Int)?
+    func cachedThread(peerID: String) -> ChatThread?
     func react(messageID: String, emoji: String?) async throws -> ChatMessage
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
@@ -723,7 +726,18 @@ struct RemoteMessengerRepository: MessengerRepository {
     let api: ServerAPI
 
     func chats() async throws -> (chats: [ChatSummary], unread: Int) {
-        let data = try await api.requestCached("/v1/chats")
+        try decodeChats(try await api.requestCached("/v1/chats"))
+    }
+
+    func cachedChats() -> (chats: [ChatSummary], unread: Int)? {
+        api.cachedResponse("/v1/chats").flatMap { try? decodeChats($0) }
+    }
+
+    func cachedThread(peerID: String) -> ChatThread? {
+        api.cachedResponse("/v1/chats/\(peerID)/messages", slot: "", fallback: ["p"]).flatMap { try? decodeThread($0) }
+    }
+
+    private func decodeChats(_ data: Data) throws -> (chats: [ChatSummary], unread: Int) {
         let dto = try decodeAPI(ChatListDTO.self, from: data)
         let list = dto.chats.map {
             ChatSummary(peer: $0.peer.model, unread: $0.unread, updatedAt: Date(timeIntervalSince1970: $0.updatedAt),
@@ -751,6 +765,10 @@ struct RemoteMessengerRepository: MessengerRepository {
         // быстрый просмотр (предзагрузка) и полная загрузка хранятся отдельно: короткая копия не затирает длинную
         let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
                                                slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
+        return try decodeThread(data)
+    }
+
+    private func decodeThread(_ data: Data) throws -> ChatThread {
         let dto = try decodeAPI(ThreadDTO.self, from: data)
         let peer = ChatPeer(id: dto.peer.id, name: dto.peer.name, username: dto.peer.username, avatarID: dto.peer.avatar,
                             isGroup: dto.peer.group ?? false, kind: dto.peer.kind, memberCount: dto.peer.members ?? 0,

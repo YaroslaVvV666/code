@@ -44,6 +44,8 @@ enum UsernameStatus: Equatable {
 
 protocol ProfileRepository: Sendable {
     func load() async throws -> UserProfile
+    /// Свой профиль из сохранённой на телефоне копии — виден и без интернета (вместе с аватаркой)
+    func cachedProfile() -> UserProfile?
     func update(_ patch: ProfilePatch) async throws -> UserProfile
     func uploadAvatar(_ jpeg: Data) async throws -> String
     func addAvatar(mediaID: String) async throws -> UserProfile
@@ -183,7 +185,11 @@ struct RemoteProfileRepository: ProfileRepository {
     let api: ServerAPI
 
     func load() async throws -> UserProfile {
-        try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/me")).model
+        try decodeAPI(ProfileDTO.self, from: try await api.requestCached("/v1/me")).model
+    }
+
+    func cachedProfile() -> UserProfile? {
+        api.cachedResponse("/v1/me").flatMap { try? decodeAPI(ProfileDTO.self, from: $0).model }
     }
 
     func update(_ patch: ProfilePatch) async throws -> UserProfile {

@@ -16,10 +16,19 @@ final class ThreadPrefetcher {
 
     func get(_ id: String) -> ChatThread? { store[id]?.thread }
 
-    /// При входе в «Чаты»: сначала самые свежие (список уже отсортирован), по 10 сообщений
-    func warm(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 8, limit: Int = 10) {
+    /// При входе в «Чаты»: сначала самые свежие (список уже отсортирован). Сохраняются и на телефон —
+    /// поэтому переписки открываются сразу и без интернета
+    func warm(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 30, limit: Int = 30) {
         self.repo = repo
         for c in chats.prefix(count) { enqueue(c, limit: limit) }
+    }
+
+    /// Без сети: переписки из сохранённых на телефоне копий — сразу в память, чтобы открывались мгновенно
+    func warmFromDisk(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 30) {
+        self.repo = repo
+        for c in chats.prefix(count) where store[c.id] == nil {
+            if let t = repo.cachedThread(peerID: c.id) { store[c.id] = Entry(thread: t, stamp: .distantPast) }
+        }
     }
 
     /// Когда строка чата показалась на экране при прокрутке: по 5 сообщений
@@ -58,6 +67,8 @@ final class ChatsModel: ObservableObject {
     @Published private(set) var chats: [ChatSummary] = []
     @Published private(set) var unread = 0
     @Published private(set) var loaded = false
+    /// Уже был ответ сервера (а не только сохранённая на телефоне копия)
+    private var gotFresh = false
     @Published var error: APIError?
     /// Открыта переписка — нижняя панель вкладок прячется (как в Telegram)
     @Published var chatOpen = false
@@ -88,10 +99,17 @@ final class ChatsModel: ObservableObject {
 
     func refresh() async {
         ticks += 1
+        // первый раз — сразу сохранённый список (без сети и без ожидания ответа), свежий приходит следом
+        if !loaded, chats.isEmpty, let cached = repo.cachedChats() {
+            chats = cached.chats
+            unread = cached.unread
+            loaded = true
+            ThreadPrefetcher.shared.warmFromDisk(cached.chats, repo: repo)
+        }
         if ticks % 3 == 1 { await refreshNotices() }
         do {
             let result = try await repo.chats()
-            if loaded {
+            if gotFresh {                    // баннер — только на новое после первого ответа сервера, а не на разницу с сохранённой копией
                 let old = Dictionary(chats.map { ($0.id, $0.unread) }, uniquingKeysWith: { a, _ in a })
                 let oldTags = Dictionary(chats.map { ($0.id, $0.mentions) }, uniquingKeysWith: { a, _ in a })
                 // если тегнули — баннер показывается, даже когда чат отключён
@@ -102,6 +120,7 @@ final class ChatsModel: ObservableObject {
                 }
             }
             if result.chats != chats { chats = result.chats }
+            gotFresh = true
             ThreadPrefetcher.shared.warm(result.chats, repo: repo)
             if result.unread != unread {
                 unread = result.unread
@@ -213,8 +232,9 @@ final class ChatModel: ObservableObject {
         self.peer = peer
         self.peerID = peer.id
         self.repo = repo
-        // предзагруженные сообщения показываем сразу; свежие приходят следом обычным обновлением
-        if let t = ThreadPrefetcher.shared.get(peer.id) {
+        // предзагруженные (или сохранённые на телефоне) сообщения показываем сразу — и без интернета;
+        // свежие приходят следом обычным обновлением
+        if let t = ThreadPrefetcher.shared.get(peer.id) ?? repo.cachedThread(peerID: peer.id) {
             messages = t.messages
             self.peer = t.peer
             lastSeen = t.lastSeen

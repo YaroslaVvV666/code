@@ -125,6 +125,15 @@ actor ServerAPI {
         }
     }
 
+    /// Последний сохранённый ответ без обращения к сети: экран показывается сразу (и без интернета),
+    /// а свежие данные приходят следом обычным запросом
+    nonisolated func cachedResponse(_ path: String, slot: String = "", fallback: [String] = []) -> Data? {
+        for s in [slot] + fallback {
+            if let data = OfflineStore.load(user: userID, path: path, slot: s) { return data }
+        }
+        return nil
+    }
+
     /// Выход: завершаем свой сеанс на сервере и забываем токен
     func signOut() async {
         OfflineStore.wipe(user: userID)
