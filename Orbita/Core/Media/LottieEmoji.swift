@@ -323,7 +323,7 @@ private struct EmojiFramePlayer: UIViewRepresentable {
 /// Свои анимированные эмодзи (Lottie JSON). Чужие скачанные анимации убраны: пока своих нет, везде показывается обычный эмодзи.
 /// Когда появятся свои — кладём файлы `<код>.json` в папку CustomEmoji внутри приложения (код — юникод эмодзи, как «1f525»),
 /// и они начнут играть сами, без правок экранов.
-/// Сейчас есть: 👍 (1f44d.json), ❤️ (2764_fe0f.json), 🔥 (1f525.json), 🖕 (1f595.json), 🤣 (1f923.json), 🤡 (1f921.json), 🍾 (1f37e.json), 🏆 (1f3c6.json), 🚀 (1f680.json), 🌹 (1f339.json), 💐 (1f490.json), 💩 (1f4a9.json), 🧑‍💻 (1f9d1_200d_1f4bb.json), 😔 (1f614.json), 😀 (1f600.json), 😃 (1f603.json), 😄 (1f604.json), 😁 (1f601.json), 😆 (1f606.json), 🥹 (1f979.json), 😅 (1f605.json), 😂 (1f602.json), 🥲 (1f972.json), ☺️ (263a_fe0f.json), 😇 (1f607.json), 😊 (1f60a.json), 😉 (1f609.json), 🙂 (1f642.json), 🙃 (1f643.json), 😍 (1f60d.json), 😌 (1f60c.json), 😘 (1f618.json), 🥰 (1f970.json), 😙 (1f619.json), 😗 (1f617.json), 😚 (1f61a.json), 😋 (1f60b.json), 😛 (1f61b.json), 😝 (1f61d.json), 😜 (1f61c.json), 🤪 (1f92a.json), 👄 (1f444.json), 👅 (1f445.json), 👀 (1f440.json), 🤰 (1f930.json), 🤦‍♀️ (1f926_200d_2640_fe0f.json), 🤷‍♀️ (1f937_200d_2640_fe0f.json), 🤦 (1f926.json), 🤦‍♂️ (1f926_200d_2642_fe0f.json). Файл должен входить в Copy Bundle Resources цели Focus/Orbita.
+/// Сейчас есть: 👍 (1f44d.json), ❤️ (2764_fe0f.json), 🔥 (1f525.json), 🖕 (1f595.json), 🤣 (1f923.json), 🤡 (1f921.json), 🍾 (1f37e.json), 🏆 (1f3c6.json), 🚀 (1f680.json), 🌹 (1f339.json), 💐 (1f490.json), 💩 (1f4a9.json), 🧑‍💻 (1f9d1_200d_1f4bb.json), 😔 (1f614.json), 😀 (1f600.json), 😃 (1f603.json), 😄 (1f604.json), 😁 (1f601.json), 😆 (1f606.json), 🥹 (1f979.json), 😅 (1f605.json), 😂 (1f602.json), 🥲 (1f972.json), ☺️ (263a_fe0f.json), 😇 (1f607.json), 😊 (1f60a.json), 😉 (1f609.json), 🙂 (1f642.json), 🙃 (1f643.json), 😍 (1f60d.json), 😌 (1f60c.json), 😘 (1f618.json), 🥰 (1f970.json), 😙 (1f619.json), 😗 (1f617.json), 😚 (1f61a.json), 😋 (1f60b.json), 😛 (1f61b.json), 😝 (1f61d.json), 😜 (1f61c.json), 🤪 (1f92a.json), 👄 (1f444.json), 👅 (1f445.json), 👀 (1f440.json), 🤰 (1f930.json), 🤦‍♀️ (1f926_200d_2640_fe0f.json), 🤷‍♀️ (1f937_200d_2640_fe0f.json), 🤦 (1f926.json), 🤦‍♂️ (1f926_200d_2642_fe0f.json), 🤷 (1f937.json). Файл должен входить в Copy Bundle Resources цели Focus/Orbita.
 actor LottieEmojiStore {
     static let shared = LottieEmojiStore()
 
@@ -622,5 +622,5 @@ enum AnimatedEmoji {
                       "\u{1F61C}", "\u{1F92A}", "\u{1F444}", "\u{1F445}",
                       "\u{1F440}", "\u{1F930}", "\u{1F926}\u{200D}\u{2640}\u{FE0F}",
                       "\u{1F937}\u{200D}\u{2640}\u{FE0F}", "\u{1F926}",
-                      "\u{1F926}\u{200D}\u{2642}\u{FE0F}"]
+                      "\u{1F926}\u{200D}\u{2642}\u{FE0F}", "\u{1F937}"]
 }
