@@ -765,7 +765,7 @@ struct ChatScreen: View {
             // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
             // меню по зажатию оживает сразу, а не после разбора JSON в момент открытия
             #if canImport(Lottie)
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             await LottieEmojiStore.shared.warm(AnimatedEmoji.all)
             #endif
         }

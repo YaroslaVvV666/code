@@ -179,22 +179,27 @@ struct MessageActionOverlay: View {
     }
 }
 
-/// Эмодзи в ряду реакций. Сразу стоит готовой картинкой первого кадра (снимок с диска, без Lottie), а анимация стартует
-/// чуть позже и по очереди: Lottie-сцены создаются не все в одном кадре вместе с открытием меню, а по одной,
-/// и вью при этом не пересоздаётся — тот же LottieEmojiView просто переключается playing false → true
+/// Эмодзи в ряду реакций: анимация стартует сразу при открытии меню. Первое эмодзи играет с первого кадра,
+/// остальные — с разницей в один кадр (~16 мс), это глазом не видно, но Lottie-сцены создаются не все
+/// в одном кадре вместе с меню, а по одной. Вью не пересоздаётся — тот же LottieEmojiView переключается playing false → true
 private struct ReactionBarEmoji: View {
     let emoji: String
     let index: Int
-    @State private var live = false
+    @State private var live: Bool
 
-    /// Пока меню проявляется (~0.2 с), всё стоит; дальше эмодзи оживают волной слева направо
-    private static let start: Double = 0.2
-    private static let step: Double = 0.035
+    private static let step: Double = 0.016
+
+    init(emoji: String, index: Int) {
+        self.emoji = emoji
+        self.index = index
+        _live = State(initialValue: index == 0)
+    }
 
     var body: some View {
         LottieEmojiView(emoji: emoji, size: 34, playing: live, idleAtStart: true)      // один круг при появлении и стоп
             .task {
-                try? await Task.sleep(nanoseconds: UInt64((Self.start + Double(index) * Self.step) * 1_000_000_000))
+                guard !live else { return }
+                try? await Task.sleep(nanoseconds: UInt64(Double(index) * Self.step * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 live = true
             }
