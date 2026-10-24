@@ -1004,8 +1004,15 @@ struct ChatScreen: View {
     // MARK: Шапка
 
     private var header: some View {
-        ZStack {
-            // ник и статус — строго по центру экрана, независимо от кнопок по краям
+        // кнопки по краям, ник и статус — по центру экрана; ширина островка — по длине надписи («был(а) 59 минут назад»
+        // всегда влезает целиком). Если островок шире места в центре, он сдвигается, но не налезает на кнопки
+        ChatHeaderLayout {
+            Button { dismiss() } label: {
+                BackWithUnread(model: session.chats, excluding: route.peer.id)
+            }
+            .buttonStyle(.plain)
+            .zIndex(5)
+
             Button { if !isSaved { showInfo = true } } label: {
                 VStack(spacing: 1) {
                     Text(isSaved ? s.t("Избранное", "Saved messages") : model.peer.name)
@@ -1027,25 +1034,17 @@ struct ChatScreen: View {
                     }
                     .font(.system(size: 12))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)                   // запас на совсем узкий экран
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 44)
-                .frame(minWidth: 156)                           // пузырь сразу такой, чтобы «был(а) 59 минут назад» помещалось
+                .frame(minWidth: 120)
                 .glassCapsule(interactive: true)
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 116)                      // место под кнопки слева и справа поровну
 
             HStack(spacing: 8) {
-                Button { dismiss() } label: {
-                    BackWithUnread(model: session.chats, excluding: route.peer.id)
-                }
-                .buttonStyle(.plain)
-                .zIndex(5)
-
-                Spacer(minLength: 0)
-
                 Button { startSearch() } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
@@ -1069,8 +1068,16 @@ struct ChatScreen: View {
                 .buttonStyle(.plain)
             }
         }
+        // статус сменился («был(а) 5 минут назад» → «печатает…») — островок плавно меняет ширину
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: headerStatusKey)
         .padding(.horizontal, 10)
         .padding(.top, 2)
+    }
+
+    /// Что сейчас написано под ником — от этого зависит ширина островка
+    private var headerStatusKey: String {
+        if let action = model.typing { return "typing:\(action)" }
+        return s.lastSeenText(model.lastSeen)
     }
 
     // MARK: Запланированные сообщения
@@ -2130,5 +2137,33 @@ struct ActionTargetHost<Content: View>: View {
     @ViewBuilder var content: (ChatMessage) -> Content
     var body: some View {
         if let t = state.target { content(t) }
+    }
+}
+
+/// Шапка чата: [назад] [ник и статус] [кнопки справа]. Ник со статусом — по центру экрана и по ширине своей надписи;
+/// если он шире места в центре, сдвигается в сторону, но не заходит на кнопки
+struct ChatHeaderLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let height = subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 44
+        return CGSize(width: proposal.width ?? UIScreen.main.bounds.width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 3 else { return }
+        let left = subviews[0].sizeThatFits(.unspecified)
+        let right = subviews[2].sizeThatFits(.unspecified)
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(left))
+        subviews[2].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: ProposedViewSize(right))
+
+        let minX = bounds.minX + left.width + spacing
+        let maxX = bounds.maxX - right.width - spacing
+        let room = max(0, maxX - minX)
+        let ideal = subviews[1].sizeThatFits(.unspecified)
+        let width = min(ideal.width, room)
+        let x = min(max(bounds.midX - width / 2, minX), maxX - width)       // по центру экрана, пока хватает места
+        subviews[1].place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
+                          proposal: ProposedViewSize(width: width, height: ideal.height))
     }
 }

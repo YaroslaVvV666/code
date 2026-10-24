@@ -105,6 +105,8 @@ struct AvatarViewer: View {
     @State private var showOrder = false
     @State private var shareItems: ShareItems?
     @State private var sharing = false
+    @State private var dragY: CGFloat = 0          // свайп вверх/вниз: фото едет за пальцем, отпустили дальше порога — просмотр закрывается
+    @State private var dragVertical: Bool?         // направление жеста определяется в начале: вбок — листание фото
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.lang) private var lang
@@ -126,10 +128,37 @@ struct AvatarViewer: View {
     private var index: Int { photos.firstIndex { $0.id == currentID } ?? 0 }
     private var isEditable: Bool { onReorder != nil }
 
+    /// 0 — фото на месте, 1 — утянуто далеко (фон и кнопки почти исчезли)
+    private var pull: CGFloat { min(1, abs(dragY) / 420) }
+
+    private var dismissDrag: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { v in
+                if dragVertical == nil { dragVertical = abs(v.translation.height) > abs(v.translation.width) * 1.3 }
+                guard dragVertical == true else { return }
+                dragY = v.translation.height
+            }
+            .onEnded { v in
+                defer { dragVertical = nil }
+                guard dragVertical == true else { return }
+                let dy = v.translation.height, fling = v.predictedEndTranslation.height
+                if abs(dy) > 110 || abs(fling) > 320 {
+                    // улетает в сторону свайпа (вверх — вверх), затем просмотр закрывается
+                    Haptics.impact(.light)
+                    let up = (abs(fling) > abs(dy) ? fling : dy) < 0
+                    withAnimation(.easeOut(duration: 0.2)) { dragY = (up ? -1 : 1) * UIScreen.main.bounds.height }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { close() }
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) { dragY = 0 }
+                }
+            }
+    }
+
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - Double(pull) * 0.85).ignoresSafeArea()
 
+            Group {
             if photos.isEmpty {
                 AvatarView(name: name, size: 200).clipShape(Circle())
             } else {
@@ -147,6 +176,10 @@ struct AvatarViewer: View {
                 .scrollPosition(id: $currentID)
                 .ignoresSafeArea()
             }
+            }
+            .offset(y: dragY)
+            .scaleEffect(1 - pull * 0.12)
+            .simultaneousGesture(dismissDrag)
 
             VStack(spacing: 10) {
                 topBar
@@ -163,6 +196,7 @@ struct AvatarViewer: View {
             }
             .padding(.top, 8)
             .padding(.bottom, 10)
+            .opacity(1 - Double(pull) * 2)              // кнопки уходят быстрее фото
         }
         .preferredColorScheme(.dark)
         .confirmationDialog(s.deletePhotoQuestion, isPresented: $confirmDelete, titleVisibility: .visible) {
