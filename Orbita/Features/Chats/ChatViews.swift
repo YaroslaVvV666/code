@@ -720,6 +720,8 @@ struct ChatScreen: View {
                     .zIndex(10)
                 }
             ActionTargetHost(state: actionState) { target in
+                // меню — в отдельном окне поверх клавиатуры; сообщение в нём стоит там же, где в переписке
+                MessageMenuPresenter {
                 MessageActionOverlay(
                     message: target, model: model, noForward: model.peer.noForward || model.group?.noForward == true,
                     showSender: model.peer.isGroup && !model.peer.isChannel,
@@ -734,7 +736,16 @@ struct ChatScreen: View {
                     isSaved: isSaved,
                     onForward: { forwardIDs = ForwardRoute(ids: [target.id]) },
                     onSelect: { selecting = true; selected = [target.id] },
-                    onInfo: { infoMessage = target })
+                    onInfo: { infoMessage = target },
+                    sourceFrame: messageFrames.frames[target.id])
+                    // в своём окне нет окружения экрана чата — передаём всё, что нужно пузырю сообщения
+                    .environment(\.theme, theme)
+                    .environment(\.lang, lang)
+                    .environmentObject(session)
+                    .environmentObject(flow)
+                    .environmentObject(session.player)
+                    .preferredColorScheme(theme.dark ? .dark : .light)
+                }
             }
             .zIndex(20)
         }

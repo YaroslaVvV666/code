@@ -34,6 +34,8 @@ struct MessageActionOverlay: View {
     var onForward: () -> Void = {}
     var onSelect: () -> Void = {}
     var onInfo: () -> Void = {}
+    /// Где сообщение стоит на экране (экранные координаты): копия встаёт ровно туда же, как в Telegram
+    var sourceFrame: CGRect? = nil
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -71,55 +73,91 @@ struct MessageActionOverlay: View {
         }
     }
 
-    var body: some View {
-        ZStack {
-            // размытие ставится сразу и без анимации прозрачности (анимированный blur пересчитывается каждый кадр и тормозит);
-            // плавно проявляется и уходит только затемнение
-            Rectangle().fill(.ultraThinMaterial)
-                .contentShape(Rectangle())
-                .overlay(Color.black.opacity(shown ? (theme.dark ? 0.35 : 0.12) : 0)
-                    .animation(closing ? .easeOut(duration: Self.closeDuration) : .easeOut(duration: 0.25), value: shown))
-                .ignoresSafeArea()
-                .onTapGesture { dismiss() }
+    // Раскладка: сверху ряд реакций, посередине сообщение на своём месте, снизу кнопки
+    private static let barHeight: CGFloat = 52
+    private static let gap: CGFloat = 10
+    private static let rowHeight: CGFloat = 46
 
-            VStack(alignment: message.mine ? .trailing : .leading, spacing: 10) {
-                reactionBar
-                    .opacity(confirming ? 0 : 1).scaleEffect(confirming ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
-                    .allowsHitTesting(!confirming)
-                    // ряд реакций «вырастает» из угла над сообщением
-                    .scaleEffect(shown ? 1 : 0.4, anchor: message.mine ? .bottomTrailing : .bottomLeading)
-                    .opacity(shown ? 1 : 0)
-                    .animation(motion(0.03), value: shown)
-                ScrollView {
-                    MessageRow(message: message, isFirst: true, isLast: true,
-                               onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
-                               showSender: showSender, noForward: noForward, interactive: false)
-                        .allowsHitTesting(false)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 300)
-                .fixedSize(horizontal: false, vertical: true)
-                // сообщение видно сразу (оно — опора меню), только мягко «приподнимается»
-                .scaleEffect(shown ? 1 : 0.96, anchor: lead)
-                .opacity(closing ? 0 : 1)
-                .animation(motion(0), value: shown)
+    /// Высота списка действий — считается заранее, чтобы сразу знать, сколько места нужно под сообщением
+    private var actionCount: Int {
+        var n = 3                                                                   // ответить, выбрать, удалить
+        if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
+        if !message.text.isEmpty && !noForward && message.poll == nil { n += 1 }
+        if model.canPin { n += 1 }
+        if showSender || message.mine { n += 1 }
+        if canEdit && message.poll == nil { n += 1 }
+        return n
+    }
+    private var listHeight: CGFloat { CGFloat(actionCount) * Self.rowHeight + CGFloat(actionCount - 1) * 0.5 }
+
+    var body: some View {
+        GeometryReader { g in
+            let screen = g.size
+            let top = TopInset.value + 8
+            let bottom = screen.height - max(BottomInset.value, 12) - 8
+            let f = sourceFrame ?? CGRect(x: 0, y: screen.height * 0.35, width: screen.width, height: 80)
+            // сообщение слишком высокое — показываем его в прокрутке нужной высоты
+            let maxMessage = max(60, bottom - top - (Self.barHeight + Self.gap) - (Self.gap + listHeight))
+            let messageH = min(f.height, maxMessage)
+            // стоит на своём месте; сдвигается, только если сверху не хватает места для реакций или снизу — для кнопок
+            let target = min(max(f.minY, top + Self.barHeight + Self.gap), bottom - listHeight - Self.gap - messageH)
+            let y = shown ? target : f.minY                      // при закрытии сообщение возвращается на место
+            let side: Alignment = message.mine ? .trailing : .leading
+
+            ZStack(alignment: .topLeading) {
+                // размытие ставится сразу и без анимации прозрачности (анимированный blur пересчитывается каждый кадр и тормозит);
+                // плавно проявляется и уходит только затемнение. Размыто всё, включая клавиатуру под меню
+                Rectangle().fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(shown ? (theme.dark ? 0.35 : 0.12) : 0)
+                        .animation(closing ? .easeOut(duration: Self.closeDuration) : .easeOut(duration: 0.25), value: shown))
+                    .frame(width: screen.width, height: screen.height)
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismiss() }
+
                 Group {
-                    if confirming {
-                        confirmList
-                            .transition(.scale(scale: 0.6, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
-                    } else {
-                        actionList
-                            .transition(.scale(scale: 0.85, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                    reactionBar
+                        .opacity(confirming ? 0 : 1).scaleEffect(confirming ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
+                        .allowsHitTesting(!confirming)
+                        // ряд реакций «вырастает» из угла над сообщением
+                        .scaleEffect(shown ? 1 : 0.4, anchor: message.mine ? .bottomTrailing : .bottomLeading)
+                        .opacity(shown ? 1 : 0)
+                        .animation(motion(0.03), value: shown)
+                        .frame(width: screen.width - 24, alignment: side)
+                        .offset(x: 12, y: y - Self.gap - Self.barHeight)
+
+                    ScrollView {
+                        MessageRow(message: message, isFirst: true, isLast: true,
+                                   onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
+                                   showSender: showSender, noForward: noForward, interactive: false)
+                            .allowsHitTesting(false)
                     }
+                    .scrollDisabled(f.height <= messageH + 1)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(width: f.width, height: messageH)
+                    .offset(x: f.minX, y: y)
+
+                    Group {
+                        if confirming {
+                            confirmList
+                                .transition(.scale(scale: 0.6, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                        } else {
+                            actionList
+                                .transition(.scale(scale: 0.85, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                        }
+                    }
+                    // список действий раскрывается из угла под сообщением
+                    .scaleEffect(shown ? 1 : 0.5, anchor: message.mine ? .topTrailing : .topLeading)
+                    .opacity(shown ? 1 : 0)
+                    .animation(motion(0.05), value: shown)
+                    .frame(width: screen.width - 24, alignment: side)
+                    .offset(x: 12, y: y + messageH + Self.gap)
                 }
-                // список действий раскрывается из угла под сообщением
-                .scaleEffect(shown ? 1 : 0.5, anchor: message.mine ? .topTrailing : .topLeading)
-                .opacity(shown ? 1 : 0)
-                .animation(motion(0.05), value: shown)
+                // сообщение (и всё вокруг) плавно встаёт на место, если пришлось сдвинуть
+                .animation(closing ? .easeOut(duration: Self.closeDuration) : .spring(response: 0.36, dampingFraction: 0.86), value: shown)
+                .allowsHitTesting(!closing)               // пункты меню — только пока не закрывается
             }
-            .padding(.horizontal, 12)
-            .allowsHitTesting(!closing)               // пункты меню — только пока не закрывается
         }
+        .ignoresSafeArea()
         // размытый фон ловит все касания, в том числе пока меню плавно уходит: под ним ничего не нажимается
         .onAppear { appear = true; MessageMenu.isOpen = true }
         .onDisappear { MessageMenu.isOpen = false }
@@ -305,4 +343,45 @@ private struct MenuSurface<S: Shape>: ViewModifier {
 
 private extension View {
     func menuSurface<S: Shape>(_ shape: S) -> some View { modifier(MenuSurface(shape: shape)) }
+}
+
+// MARK: - Меню поверх клавиатуры
+
+/// Меню зажатого сообщения показывается в отдельном окне выше клавиатуры: клавиатура не прячется,
+/// а размывается вместе со всем экраном (как в Telegram). Окно не становится главным — поле ввода не теряет фокус
+@MainActor
+enum MessageMenuWindow {
+    private static var window: UIWindow?
+
+    static func show<V: View>(_ view: V) {
+        hide()
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        let host = UIHostingController(rootView: view)
+        host.view.backgroundColor = .clear
+        let w = UIWindow(windowScene: scene)
+        w.windowLevel = UIWindow.Level(rawValue: 10_000_001)          // выше окна клавиатуры
+        w.backgroundColor = .clear
+        w.rootViewController = host
+        w.isHidden = false
+        window = w
+    }
+
+    static func hide() {
+        window?.isHidden = true
+        window = nil
+    }
+}
+
+/// Пока выбрано сообщение, держит его меню в окне поверх клавиатуры; сообщение сбросили — окно убирается
+struct MessageMenuPresenter<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .onAppear { MessageMenuWindow.show(content) }
+            .onDisappear { MessageMenuWindow.hide() }
+    }
 }
