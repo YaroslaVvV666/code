@@ -6,8 +6,12 @@ import PhotosUI
 struct WallGuestSection: View {
     let entries: [WallEntry]
     let canWrite: Bool
+    /// Отвечать на записи могут все, кому можно писать на эту стену (и сам владелец)
+    var canReply = false
     let onCompose: () -> Void
     let onDelete: (WallEntry) -> Void
+    var onReply: (WallEntry) -> Void = { _ in }
+    var onReact: (WallEntry, String) -> Void = { _, _ in }
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     private var s: Strings { Strings(lang: lang) }
@@ -36,7 +40,8 @@ struct WallGuestSection: View {
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                 }
                 ForEach(entries) { entry in
-                    WallEntryRow(entry: entry, onDelete: { onDelete(entry) })
+                    WallEntryRow(entry: entry, canReply: canReply, onDelete: { onDelete(entry) },
+                                 onReply: { onReply(entry) }, onReact: { onReact(entry, $0) })
                 }
             }
             .padding(.horizontal, 16)
@@ -44,11 +49,18 @@ struct WallGuestSection: View {
     }
 }
 
+/// Запись на стене — как сообщение в чате: цитата, если это ответ; реакции под записью;
+/// двойной тап — ❤️, свайп влево — ответить, «😊» — выбрать реакцию
 struct WallEntryRow: View {
     let entry: WallEntry
+    var canReply = false
     let onDelete: () -> Void
+    var onReply: () -> Void = {}
+    var onReact: (String) -> Void = { _ in }
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @State private var picking = false               // открыт ряд эмодзи для реакции
+    @State private var dragX: CGFloat = 0
     private var s: Strings { Strings(lang: lang) }
 
     private var ratio: CGFloat {
@@ -64,15 +76,22 @@ struct WallEntryRow: View {
                     Text(entry.author.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
                     Text(ChatTime.short(entry.createdAt, lang: lang)).font(.system(size: 12)).foregroundStyle(theme.textTertiary)
                     Spacer(minLength: 0)
-                    if entry.canDelete {
-                        Menu {
-                            Button(role: .destructive, action: onDelete) { Label(s.t("Удалить", "Delete"), systemImage: "trash") }
-                        } label: {
-                            Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(theme.textTertiary).frame(width: 30, height: 24)
+                    Menu {
+                        if canReply {
+                            Button(action: onReply) { Label(s.t("Ответить", "Reply"), systemImage: "arrowshape.turn.up.left") }
                         }
+                        if !entry.text.isEmpty {
+                            Button { UIPasteboard.general.string = entry.text } label: { Label(s.copy, systemImage: "doc.on.doc") }
+                        }
+                        if entry.canDelete {
+                            Button(role: .destructive, action: onDelete) { Label(s.t("Удалить", "Delete"), systemImage: "trash") }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(theme.textTertiary).frame(width: 30, height: 24)
                     }
                 }
+                if let reply = entry.reply { quote(reply) }
                 if !entry.text.isEmpty {
                     Text(entry.text).font(.system(size: 15)).foregroundStyle(theme.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -83,10 +102,108 @@ struct WallEntryRow: View {
                         .frame(maxHeight: 320)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                footer
+                if picking { emojiStrip.transition(.scale(scale: 0.8, anchor: .topLeading).combined(with: .opacity)) }
             }
         }
         .padding(12)
         .card(theme, radius: 16)
+        .offset(x: dragX)
+        .overlay(alignment: .trailing) {
+            // свайп влево — ответить, как в чате
+            Image(systemName: "arrowshape.turn.up.left.circle.fill")
+                .font(.system(size: 24)).foregroundStyle(theme.accentColor)
+                .opacity(Double(min(1, -dragX / 56)))
+                .scaleEffect(min(1, -dragX / 56))
+                .offset(x: 30)
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onReact("\u{2764}\u{FE0F}") })
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 18)
+                .onChanged { v in
+                    guard canReply, abs(v.translation.width) > abs(v.translation.height) * 1.6 else { return }
+                    dragX = max(-80, min(0, v.translation.width))
+                }
+                .onEnded { _ in
+                    if dragX <= -56 { Haptics.impact(.medium); onReply() }
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { dragX = 0 }
+                }
+        )
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: picking)
+    }
+
+    /// Цитата записи, на которую отвечают — полоска слева и имя, как в чате
+    private func quote(_ reply: WallReply) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5).fill(theme.accentColor).frame(width: 3)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(reply.authorName).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor).lineLimit(1)
+                Text(reply.text.isEmpty ? (reply.kind == "drawing" ? s.t("Рисунок", "Drawing") : s.t("Фото", "Photo")) : reply.text)
+                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6).padding(.horizontal, 8)
+        .background(theme.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Реакции, «😊» и «Ответить»
+    private var footer: some View {
+        HStack(spacing: 6) {
+            ForEach(entry.reactions, id: \.emoji) { r in
+                Button { onReact(r.emoji) } label: {
+                    HStack(spacing: 4) {
+                        AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
+                        Text("\(r.count)").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(r.mine ? Color.white : theme.text)
+                    }
+                    .padding(.horizontal, 8).frame(height: 26)
+                    .background(r.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.accentColor.opacity(0.1)), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
+            }
+            Button { Haptics.select(); picking.toggle() } label: {
+                Image(systemName: picking ? "xmark" : "face.smiling")
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                    .frame(width: 30, height: 26)
+                    .background(theme.accentColor.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            Spacer(minLength: 0)
+            if canReply {
+                Button(action: onReply) {
+                    Text(s.t("Ответить", "Reply")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor)
+                        .padding(.horizontal, 6).frame(height: 26)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: entry.reactions)
+    }
+
+    /// Ряд эмодзи для реакции — те же, что в чате
+    private var emojiStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(AnimatedEmoji.all, id: \.self) { e in
+                    Button {
+                        onReact(e)
+                        picking = false
+                    } label: {
+                        LottieEmojiView(emoji: e, size: 30, playing: false)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+        }
+        .frame(height: 44)
+        .background(theme.accentColor.opacity(0.08), in: Capsule())
+        .clipShape(Capsule())
     }
 }
 
@@ -101,6 +218,8 @@ struct WallImage {
 
 struct WallComposeSheet: View {
     let ownerName: String
+    /// Ответ на запись: её цитата показывается сверху
+    var replyTo: WallEntry? = nil
     let onSend: (String, String, WallImage?) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -134,8 +253,24 @@ struct WallComposeSheet: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text(s.t("Запись на стене", "Wall post")).font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
+            Text(replyTo == nil ? s.t("Запись на стене", "Wall post") : s.t("Ответ", "Reply"))
+                .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
                 .padding(.top, 18)
+            if let replyTo {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(theme.accentColor).frame(width: 3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(replyTo.author.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor)
+                        Text(replyTo.text.isEmpty ? s.t("Фото", "Photo") : replyTo.text)
+                            .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(theme.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+            }
             Picker("", selection: $mode) {
                 Text(s.t("Текст", "Text")).tag(Mode.text)
                 Text(s.t("Фото", "Photo")).tag(Mode.photo)
@@ -160,7 +295,7 @@ struct WallComposeSheet: View {
                     if let errorText {
                         Text(errorText).font(.system(size: 13)).foregroundStyle(theme.danger).multilineTextAlignment(.center)
                     }
-                    Text(s.t("Фото и рисунки проверяются: контент 18+ не публикуется.", "Photos and drawings are checked: 18+ content is not published."))
+                    Text(s.t("Все записи должны соответствовать правилам сообщества.", "All posts must follow the community guidelines."))
                         .font(.system(size: 12)).foregroundStyle(theme.textTertiary).multilineTextAlignment(.center)
                 }
                 .padding(.horizontal, 16)

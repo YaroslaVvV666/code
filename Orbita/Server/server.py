@@ -323,6 +323,10 @@ DB.execute("CREATE TABLE IF NOT EXISTS wall_entries(id TEXT PRIMARY KEY, owner T
            "text_enc BLOB, media_id TEXT, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_wall_owner ON wall_entries(owner, created_at)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_wall_author ON wall_entries(author, created_at)")
+ensure_column("wall_entries", "reply_to", "reply_to TEXT")                         # ответ на другую запись этой стены
+DB.execute("CREATE TABLE IF NOT EXISTS wall_reactions(entry_id TEXT NOT NULL, user_id TEXT NOT NULL, emoji TEXT NOT NULL, "
+           "created_at REAL NOT NULL, PRIMARY KEY(entry_id, user_id))")          # одна реакция на человека, как в чатах
+ensure_column("posts", "wall_only", "wall_only INTEGER NOT NULL DEFAULT 0")        # запись только на стене профиля, не в ленте
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author, created_at)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
 ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
@@ -2626,7 +2630,7 @@ def list_posts(req, me):
         limit = max(1, min(int(params.get("limit", 40)), 100))
     except ValueError:
         raise ApiError(400, "bad_value")
-    rows = q("SELECT * FROM posts WHERE created_at < ? AND reel = 0 "
+    rows = q("SELECT * FROM posts WHERE created_at < ? AND reel = 0 AND wall_only = 0 "          # записи «только на стене» в ленту не идут
              "AND author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
              "AND author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
              "ORDER BY created_at DESC LIMIT ?", (before, me["id"], me["id"], 150 if params.get("sort") == "for_you" else limit))
@@ -2707,10 +2711,11 @@ def create_post(req, me):
         run("BEGIN")
         try:
             run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, music_media, music_key, "
-                "comments_off, no_repost) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "comments_off, no_repost, wall_only) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (pid, uid, enc(uid, "posts", COL["post_text"], pid, text),
                  enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
-                 music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0))
+                 music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
+                 1 if (not reel and body.get("wall_only")) else 0))
             write_post_media(pid, items)
             run("COMMIT")
         except Exception:
@@ -3024,11 +3029,28 @@ def user_wall(req, me, uid):
 
 # ---------- записи гостей на стене ----------
 
+def wall_entry_text(e):
+    return (dec(e["author"], "comments", COL["comment_text"], e["id"], e["text_enc"]) if e["text_enc"] else "") or ""
+
+
+def wall_entry_reactions(eid, viewer):
+    """Реакции на запись: [{emoji, count, mine}], самые частые — первыми"""
+    rows = q("SELECT emoji, COUNT(*) c, MAX(user_id = ?) mine FROM wall_reactions WHERE entry_id = ? GROUP BY emoji "
+             "ORDER BY c DESC, MIN(created_at)", (viewer, eid))
+    return [{"emoji": r["emoji"], "count": r["c"], "mine": bool(r["mine"])} for r in rows]
+
+
 def wall_entry_json(e, viewer):
-    text = dec(e["author"], "comments", COL["comment_text"], e["id"], e["text_enc"]) if e["text_enc"] else ""
-    return {"id": e["id"], "owner": e["owner"], "author": user_brief(e["author"], viewer), "kind": e["kind"],
-            "text": text or "", "media": e["media_id"], "width": e["width"], "height": e["height"],
-            "created_at": e["created_at"], "can_delete": viewer in (e["author"], e["owner"])}
+    out = {"id": e["id"], "owner": e["owner"], "author": user_brief(e["author"], viewer), "kind": e["kind"],
+           "text": wall_entry_text(e), "media": e["media_id"], "width": e["width"], "height": e["height"],
+           "created_at": e["created_at"], "can_delete": viewer in (e["author"], e["owner"]),
+           "reactions": wall_entry_reactions(e["id"], viewer)}
+    if e["reply_to"]:
+        r = q1("SELECT * FROM wall_entries WHERE id = ?", (e["reply_to"],))
+        if r:
+            out["reply"] = {"id": r["id"], "author_name": user_brief(r["author"], viewer)["name"],
+                            "text": wall_entry_text(r)[:200], "kind": r["kind"]}
+    return out
 
 
 def wall_can_write(owner, viewer):
@@ -3089,10 +3111,14 @@ def wall_entry_add(req, me, uid):
         media_id, width, height = m["id"], m["width"] or 0, m["height"] or 0
     if q1("SELECT COUNT(*) c FROM wall_entries WHERE author = ? AND created_at > ?", (me["id"], time.time() - 3600))["c"] >= 20:
         raise ApiError(429, "too_many")
+    reply_to = str(data.get("reply_to") or "") or None
+    if reply_to and not q1("SELECT 1 FROM wall_entries WHERE id = ? AND owner = ?", (reply_to, owner["id"])):
+        reply_to = None                          # отвечать можно только на запись этой же стены
     eid = uuid.uuid4().hex
-    run("INSERT INTO wall_entries(id, owner, author, kind, text_enc, media_id, width, height, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+    run("INSERT INTO wall_entries(id, owner, author, kind, text_enc, media_id, width, height, created_at, reply_to) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (eid, owner["id"], me["id"], kind, enc(me["id"], "comments", COL["comment_text"], eid, text) if text else None,
-         media_id, width, height, time.time()))
+         media_id, width, height, time.time(), reply_to))
     req.send_json(201, wall_entry_json(q1("SELECT * FROM wall_entries WHERE id = ?", (eid,)), me["id"]))
 
 
@@ -3104,7 +3130,31 @@ def wall_entry_delete(req, me, eid):
     if me["id"] not in (e["author"], e["owner"]):
         raise ApiError(403, "forbidden")
     run("DELETE FROM wall_entries WHERE id = ?", (eid,))
+    run("DELETE FROM wall_reactions WHERE entry_id = ?", (eid,))
     req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/wall/([a-f0-9]+)/react")
+def wall_entry_react(req, me, eid):
+    """Реакция на запись стены: emoji — поставить (заменяет прежнюю), null — снять"""
+    e = q1("SELECT * FROM wall_entries WHERE id = ?", (eid,))
+    if not e:
+        req.drain()
+        raise ApiError(404, "not_found")
+    owner = q1("SELECT * FROM users WHERE id = ?", (e["owner"],))
+    if not owner or (owner["id"] != me["id"] and (either_blocked(owner["id"], me["id"]) or not can_see(owner, me["id"], "wall"))):
+        req.drain()
+        raise ApiError(403, "forbidden")
+    emoji = (req.body_json() or {}).get("emoji")
+    if emoji is None or emoji == "":
+        run("DELETE FROM wall_reactions WHERE entry_id = ? AND user_id = ?", (eid, me["id"]))
+    else:
+        emoji = str(emoji)
+        if len(emoji) > 16:
+            raise ApiError(400, "bad_emoji")
+        run("INSERT OR REPLACE INTO wall_reactions(entry_id, user_id, emoji, created_at) VALUES (?,?,?,?)",
+            (eid, me["id"], emoji, time.time()))
+    req.send_json(200, wall_entry_json(e, me["id"]))
 
 
 @route("GET", r"/v1/music/([A-Za-z0-9_\-]+)/reels")

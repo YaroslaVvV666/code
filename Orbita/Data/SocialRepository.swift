@@ -33,6 +33,16 @@ struct WallEntry: Identifiable, Equatable {
     let height: Int
     let createdAt: Date
     let canDelete: Bool
+    var reply: WallReply? = nil                     // ответ на другую запись этой стены — цитата сверху, как в чате
+    var reactions: [MessageReaction] = []           // реакции, как на сообщения в чате: одна на человека
+}
+
+/// Цитата записи, на которую ответили
+struct WallReply: Equatable {
+    let id: String
+    let authorName: String
+    let text: String
+    let kind: String
 }
 
 struct WallEntries: Equatable {
@@ -43,7 +53,9 @@ struct WallEntries: Equatable {
 
 protocol SocialRepository: Sendable {
     func wallEntries(userID: String) async throws -> WallEntries
-    func addWallEntry(userID: String, kind: String, text: String, mediaID: String?) async throws -> WallEntry
+    func addWallEntry(userID: String, kind: String, text: String, mediaID: String?, replyTo: String?) async throws -> WallEntry
+    /// emoji — поставить реакцию (заменяет прежнюю), nil — снять
+    func reactWallEntry(id: String, emoji: String?) async throws -> WallEntry
     func uploadWallImage(_ data: Data, mime: String, width: Int, height: Int) async throws -> String
     func deleteWallEntry(id: String) async throws
     func wall(userID: String) async throws -> Wall
@@ -75,10 +87,27 @@ private struct WallEntryDTO: Decodable {
     let height: Int?
     let createdAt: Double
     let canDelete: Bool?
+    let reply: WallReplyDTO?
+    let reactions: [WallReactionDTO]?
     var model: WallEntry {
         WallEntry(id: id, author: author.model, kind: kind, text: text, mediaID: media, width: width ?? 0, height: height ?? 0,
-                  createdAt: Date(timeIntervalSince1970: createdAt), canDelete: canDelete ?? false)
+                  createdAt: Date(timeIntervalSince1970: createdAt), canDelete: canDelete ?? false,
+                  reply: reply.map { WallReply(id: $0.id, authorName: $0.authorName ?? "", text: $0.text ?? "", kind: $0.kind ?? "text") },
+                  reactions: (reactions ?? []).map { MessageReaction(emoji: $0.emoji, count: $0.count, mine: $0.mine ?? false) })
     }
+}
+
+private struct WallReplyDTO: Decodable {
+    let id: String
+    let authorName: String?
+    let text: String?
+    let kind: String?
+}
+
+private struct WallReactionDTO: Decodable {
+    let emoji: String
+    let count: Int
+    let mine: Bool?
 }
 
 private struct WallEntriesDTO: Decodable {
@@ -124,14 +153,15 @@ struct RemoteSocialRepository: SocialRepository {
         return WallEntries(entries: dto.entries.map(\.model), canWrite: dto.canWrite ?? false, isPrivate: dto.private ?? false)
     }
 
-    func addWallEntry(userID: String, kind: String, text: String, mediaID: String?) async throws -> WallEntry {
+    func addWallEntry(userID: String, kind: String, text: String, mediaID: String?, replyTo: String?) async throws -> WallEntry {
         var body: [String: Any] = ["kind": kind, "text": text]
         if let mediaID { body["media"] = mediaID }
+        if let replyTo { body["reply_to"] = replyTo }
         let data = try await api.request("POST", "/v1/users/\(userID)/wall", body: ServerAPI.json(body))
         return try decodeAPI(WallEntryDTO.self, from: data).model
     }
 
-    /// Фото и рисунки проходят ту же проверку нейросетью на 18+, что и все загрузки: запрещённое сервер отклоняет (content_blocked)
+    /// Фото и рисунки проходят ту же проверку на соответствие правилам сообщества, что и все загрузки: запрещённое сервер отклоняет (content_blocked)
     func uploadWallImage(_ data: Data, mime: String, width: Int, height: Int) async throws -> String {
         let result = try await api.upload("/v1/media", query: ["kind": "image", "w": "\(width)", "h": "\(height)"],
                                           payload: .data(data), contentType: mime)
@@ -140,6 +170,13 @@ struct RemoteSocialRepository: SocialRepository {
 
     func deleteWallEntry(id: String) async throws {
         _ = try await api.request("DELETE", "/v1/wall/\(id)")
+    }
+
+    func reactWallEntry(id: String, emoji: String?) async throws -> WallEntry {
+        var body: [String: Any] = ["emoji": NSNull()]                    // null — снять реакцию
+        if let emoji { body["emoji"] = emoji }
+        let data = try await api.request("POST", "/v1/wall/\(id)/react", body: ServerAPI.json(body))
+        return try decodeAPI(WallEntryDTO.self, from: data).model
     }
 
     func blocks() async throws -> [BlockedUser] {

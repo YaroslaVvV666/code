@@ -71,6 +71,9 @@ final class FeedViewModel: ObservableObject {
         }
     }
 
+    /// Последняя опубликованная запись (в том числе «только на стене», которой нет в ленте)
+    private(set) var lastPublished: Post?
+
     func publish(text: String, entities: [TextEntity], media: [PreparedMedia], options: PostOptions = PostOptions()) async -> Bool {
         actionError = nil
         uploadProgress = 0
@@ -82,8 +85,11 @@ final class FeedViewModel: ObservableObject {
                 uploadProgress = Double(index + 1) / Double(media.count + 1)
             }
             let post = try await repo.createPost(text: text, entities: entities, media: uploaded, options: options)
-            posts.insert(post, at: 0)
-            state = .loaded
+            lastPublished = post
+            if !options.wallOnly {                 // запись «только на стене» в ленту не добавляем
+                posts.insert(post, at: 0)
+                state = .loaded
+            }
             return true
         } catch {
             actionError = Self.map(error)

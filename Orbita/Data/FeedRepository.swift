@@ -156,6 +156,7 @@ struct RemoteFeedRepository: FeedRepository {
         var body: [String: Any] = ["text": text, "entities": entityList, "media": mediaList]
         if options.commentsOff { body["comments_off"] = true }
         if options.noRepost { body["no_repost"] = true }
+        if options.wallOnly { body["wall_only"] = true }
         return ServerAPI.json(body)
     }
 

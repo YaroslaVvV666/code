@@ -132,15 +132,41 @@ final class UserPageModel: ObservableObject {
         if source == .me, wallLoaded { Self.myWall = (posts, guestEntries, guestCanWrite) }
     }
 
-    /// Запись гостя: фото и рисунок сначала загружаются (там проверка на 18+), потом создаётся сама запись
-    func addGuestEntry(kind: String, text: String, image: WallImage?) async throws {
+    /// Запись гостя: фото и рисунок сначала загружаются (там проверка на соответствие правилам сообщества), потом создаётся сама запись
+    func addGuestEntry(kind: String, text: String, image: WallImage?, replyTo: String? = nil) async throws {
         guard let id = profile?.id else { return }
         var mediaID: String?
         if let image {
             mediaID = try await social.uploadWallImage(image.data, mime: image.mime, width: image.width, height: image.height)
         }
-        let entry = try await social.addWallEntry(userID: id, kind: kind, text: text, mediaID: mediaID)
+        let entry = try await social.addWallEntry(userID: id, kind: kind, text: text, mediaID: mediaID, replyTo: replyTo)
         guestEntries.insert(entry, at: 0)
+    }
+
+    /// Реакция на запись стены — как в чате: одна на человека, новая заменяет старую, такая же — снимает.
+    /// На экране меняется сразу, ответ сервера потом уточняет счётчики
+    func reactGuestEntry(_ entry: WallEntry, emoji: String) {
+        guard let i = guestEntries.firstIndex(where: { $0.id == entry.id }) else { return }
+        let current = guestEntries[i].reactions.first(where: \.mine)?.emoji
+        let newEmoji: String? = current == emoji ? nil : emoji
+        var list = guestEntries[i].reactions
+        if let c = current, let j = list.firstIndex(where: { $0.emoji == c }) {
+            list[j].count -= 1; list[j].mine = false
+            if list[j].count <= 0 { list.remove(at: j) }
+        }
+        if let e = newEmoji {
+            if let j = list.firstIndex(where: { $0.emoji == e }) { list[j].count += 1; list[j].mine = true }
+            else { list.append(MessageReaction(emoji: e, count: 1, mine: true)) }
+        }
+        guestEntries[i].reactions = list
+        newEmoji == nil ? Haptics.impact(.light) : Haptics.impact(.soft)
+        let social = social, id = entry.id
+        Task {
+            if let fresh = try? await social.reactWallEntry(id: id, emoji: newEmoji),
+               let k = guestEntries.firstIndex(where: { $0.id == id }) {
+                guestEntries[k].reactions = fresh.reactions
+            }
+        }
     }
 
     func deleteGuestEntry(_ entry: WallEntry) {
@@ -340,6 +366,7 @@ struct UserPageView: View {
     @State private var namesReady = true
     @State private var tab = 0
     @State private var showWallCompose = false
+    @State private var wallReplyTo: WallEntry?              // отвечаем на эту запись стены
     @State private var reelOpen: Post?
     @State private var reelContext: [Post] = []
 
@@ -534,7 +561,7 @@ struct UserPageView: View {
                 .preferredColorScheme(theme.dark ? .dark : .light)
         }
         .sheet(isPresented: $showComposer) {
-            ComposerView(vm: feed, onSaved: { model.added($0) })
+            ComposerView(vm: feed, wallOnly: true, onSaved: { model.added($0) })      // со своей страницы — только на стену, не в ленту
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
@@ -547,9 +574,9 @@ struct UserPageView: View {
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .presentationBackground(theme.sheet)
         }
-        .sheet(isPresented: $showWallCompose) {
-            WallComposeSheet(ownerName: model.profile?.name ?? "") { kind, text, image in
-                try await model.addGuestEntry(kind: kind, text: text, image: image)
+        .sheet(isPresented: $showWallCompose, onDismiss: { wallReplyTo = nil }) {
+            WallComposeSheet(ownerName: model.profile?.name ?? "", replyTo: wallReplyTo) { [reply = wallReplyTo?.id] kind, text, image in
+                try await model.addGuestEntry(kind: kind, text: text, image: image, replyTo: reply)
             }
             .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
@@ -1014,7 +1041,11 @@ struct UserPageView: View {
 
             if !profile.wallPrivate {
                 WallGuestSection(entries: model.guestEntries, canWrite: model.guestCanWrite && !model.isMe,
-                                 onCompose: { showWallCompose = true }, onDelete: { model.deleteGuestEntry($0) })
+                                 canReply: model.guestCanWrite,
+                                 onCompose: { wallReplyTo = nil; showWallCompose = true },
+                                 onDelete: { model.deleteGuestEntry($0) },
+                                 onReply: { wallReplyTo = $0; showWallCompose = true },
+                                 onReact: { model.reactGuestEntry($0, emoji: $1) })
             }
 
             if profile.wallPrivate {

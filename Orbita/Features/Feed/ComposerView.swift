@@ -7,6 +7,8 @@ struct ComposerView: View {
     @ObservedObject var vm: FeedViewModel
     /// Если задана — это правка существующей публикации
     var editing: Post? = nil
+    /// Запись на своей стене: в ленту публикаций не попадает, видна только в профиле
+    var wallOnly = false
     var onSaved: ((Post) -> Void)? = nil
 
     @EnvironmentObject private var flow: AuthFlow
@@ -81,6 +83,14 @@ struct ComposerView: View {
                     if editing == nil {
                         PostOptionsCard(options: $options, hashtags: PostOptionsCard.hashtags(in: controller.plainText),
                                         detail: detailText)
+                    }
+
+                    if wallOnly && editing == nil {
+                        Label(s.t("Запись появится только на вашей стене, в ленту публикаций она не попадёт",
+                                  "This post will appear only on your wall, not in the feed"), systemImage: "person.crop.square")
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     if let message = mediaError ?? vm.actionError.map({ s.api($0) }) {
@@ -313,9 +323,11 @@ struct ComposerView: View {
                 dismiss()
                 return
             }
-            let ok = await vm.publish(text: controller.plainText, entities: controller.entities, media: picked, options: options)
+            var opts = options
+            opts.wallOnly = wallOnly
+            let ok = await vm.publish(text: controller.plainText, entities: controller.entities, media: picked, options: opts)
             if ok {
-                if let first = vm.posts.first { onSaved?(first) }
+                if let post = vm.lastPublished { onSaved?(post) }
                 for media in picked {
                     if case .video(let url) = media.source { try? FileManager.default.removeItem(at: url) }
                 }

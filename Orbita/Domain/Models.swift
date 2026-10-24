@@ -145,6 +145,7 @@ struct Post: Identifiable, Equatable {
 struct PostOptions: Equatable {
     var commentsOff = false          // выключить комментарии
     var noRepost = false             // запретить репосты (для шортсов)
+    var wallOnly = false             // запись на своей стене: видна в профиле, в ленту публикаций не попадает
 }
 
 struct PostMusic: Equatable, Identifiable {
