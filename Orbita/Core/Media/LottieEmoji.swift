@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 #if canImport(Lottie)
 import Lottie
 #endif
@@ -76,6 +77,237 @@ final class LottieSnapshots {
         return stride(from: 3, to: px.count, by: 4).contains { px[$0] > 8 }
     }
 }
+/// Готовые кадры анимаций, как у Telegram: каждое эмодзи один раз рисуется в последовательность картинок (30 кадров/с),
+/// кадры навсегда лежат на диске, а при показе просто сменяют друг друга — без Lottie, без построения векторной сцены
+/// и без пересчёта на главном потоке. Так играют мелкие эмодзи (ряд реакций, реакции под сообщением, панель);
+/// крупные (эмодзи-сообщение, большой эффект) по-прежнему через Lottie
+final class EmojiFrames {
+    static let shared = EmojiFrames()
+    static let fps: Double = 30
+    /// Кадры рисуются под этот размер в точках (ряд реакций); для эмодзи меньше — уменьшаются
+    static let pointSize: CGFloat = 34
+    /// Эмодзи больше этого размера играют через Lottie: кадры под них были бы размытыми
+    static let maxSize: CGFloat = 48
+    /// Разжатие кадров — в фоне, на главный поток попадает готовая картинка
+    static let decodeQueue = DispatchQueue(label: "orbita.emoji-frames", qos: .userInitiated, attributes: .concurrent)
+
+    /// Кадры одного эмодзи: файл с диска отображён в память (mmap) и не занимает её «по-настоящему»;
+    /// кадр — сжатый PNG, разжимается по одному перед показом
+    final class Clip {
+        let blob: Data
+        let ranges: [Range<Int>]
+        var count: Int { ranges.count }
+        var duration: Double { Double(ranges.count) / EmojiFrames.fps }
+        init(blob: Data, ranges: [Range<Int>]) { self.blob = blob; self.ranges = ranges }
+
+        func image(at index: Int) -> CGImage? {
+            guard !ranges.isEmpty else { return nil }
+            return EmojiFrames.decode(Data(blob[ranges[min(max(index, 0), ranges.count - 1)]]))
+        }
+    }
+
+    private let lock = NSLock()
+    private var clips: [String: Clip] = [:]
+
+    func clip(_ emoji: String) -> Clip? { lock.lock(); defer { lock.unlock() }; return clips[emoji] }
+    private func set(_ emoji: String, _ clip: Clip) { lock.lock(); clips[emoji] = clip; lock.unlock() }
+
+    /// Application Support, а не Caches: кэш система может вычистить, а кадры должны лежать «навсегда».
+    /// В резервную копию iCloud не попадают — их всегда можно нарисовать заново
+    private static let dir: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var d = base.appendingPathComponent("emoji-frames-v1", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? d.setResourceValues(values)
+        return d
+    }()
+
+    /// В имени файла — отпечаток самой анимации и размер в пикселях: поменяли JSON или экран другой — кадры рисуются заново
+    private static func file(_ emoji: String, source: Data, pixels: Int) -> URL {
+        var h: UInt64 = 0xcbf29ce484222325                    // FNV-1a
+        for b in source { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return dir.appendingPathComponent(LottieEmojiStore.code(emoji) + "_\(pixels)_" + String(h, radix: 16) + ".frames")
+    }
+
+    static func decode(_ data: Data) -> CGImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+    }
+
+    // Формат файла: "EMF1", число кадров (UInt32), длины кадров (UInt32 каждая), затем сами PNG подряд
+    private static let magic = Data("EMF1".utf8)
+
+    private static func pack(_ frames: [Data]) -> Data {
+        var out = magic
+        func put(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { out.append(contentsOf: $0) } }
+        put(UInt32(frames.count))
+        for f in frames { put(UInt32(f.count)) }
+        for f in frames { out.append(f) }
+        return out
+    }
+
+    private static func unpack(_ blob: Data) -> Clip? {
+        guard blob.count > 8, blob.prefix(4) == magic else { return nil }
+        func get(_ offset: Int) -> Int {
+            Int(UInt32(littleEndian: blob.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }))
+        }
+        let count = get(4)
+        guard count > 0, blob.count >= 8 + count * 4 else { return nil }
+        var ranges: [Range<Int>] = []
+        var offset = 8 + count * 4
+        for i in 0..<count {
+            let len = get(8 + i * 4)
+            guard len > 0, offset + len <= blob.count else { return nil }
+            ranges.append(offset..<(offset + len))
+            offset += len
+        }
+        return Clip(blob: blob, ranges: ranges)
+    }
+
+    /// Подхватить нарисованные раньше кадры с диска (вне главного потока)
+    func load(_ emoji: String, source: Data, pixels: Int) -> Bool {
+        if clip(emoji) != nil { return true }
+        let url = Self.file(emoji, source: source, pixels: pixels)
+        guard let blob = try? Data(contentsOf: url, options: .alwaysMapped), let clip = Self.unpack(blob) else { return false }
+        set(emoji, clip)
+        return true
+    }
+
+    /// Нарисовать кадры один раз (первый запуск или новая анимация). LottieAnimationView живёт только на главном потоке,
+    /// поэтому рисуем по кадру и отпускаем главный поток между кадрами — интерфейс в это время не подтормаживает
+    @MainActor
+    func render(_ emoji: String, _ animation: LottieAnimation, source: Data, pixels: Int) async {
+        guard clip(emoji) == nil else { return }
+        let side = CGFloat(pixels)
+        let view = LottieAnimationView(animation: animation, configuration: LottieConfiguration(renderingEngine: .mainThread))
+        view.frame = CGRect(x: 0, y: 0, width: side, height: side)
+        view.contentMode = .scaleAspectFit
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+        let count = max(1, Int((animation.duration * Self.fps).rounded()))
+        var frames: [Data] = []
+        frames.reserveCapacity(count)
+        for i in 0..<count {
+            view.currentProgress = count == 1 ? 1 : CGFloat(i) / CGFloat(count - 1)
+            view.forceDisplayUpdate()
+            view.layoutIfNeeded()
+            let image = renderer.image { ctx in view.layer.render(in: ctx.cgContext) }
+            guard let png = image.pngData() else { return }
+            frames.append(png)
+            try? await Task.sleep(nanoseconds: 6_000_000)
+        }
+        // пустые кадры (Lottie не нарисовал сцену вне окна) не запоминаем — тогда эмодзи продолжит играть через Lottie
+        guard let middle = Self.decode(frames[frames.count / 2]), Self.hasContent(middle) else { return }
+        let blob = Self.pack(frames)
+        guard let clip = Self.unpack(blob) else { return }
+        set(emoji, clip)
+        let url = Self.file(emoji, source: source, pixels: pixels)
+        Task.detached(priority: .utility) { try? blob.write(to: url, options: .atomic) }
+    }
+
+    private static func hasContent(_ cg: CGImage) -> Bool {
+        let n = 16
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        guard let ctx = CGContext(data: &px, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return true }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+        return stride(from: 3, to: px.count, by: 4).contains { px[$0] > 8 }
+    }
+
+    /// Старые версии папки с кадрами (после смены формата) и устаревшие файлы одного эмодзи
+    static func prune(keep: Set<URL>) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        let keepNames = Set(keep.map(\.lastPathComponent))
+        for f in files where !keepNames.contains(f.lastPathComponent) { try? FileManager.default.removeItem(at: f) }
+    }
+
+    static func url(_ emoji: String, source: Data, pixels: Int) -> URL { file(emoji, source: source, pixels: pixels) }
+}
+
+/// Проигрыватель готовых кадров: CADisplayLink на 30 кадров/с меняет картинку слоя, следующий кадр разжимается в фоне.
+/// SwiftUI при этом ничего не пересчитывает
+final class EmojiFramePlayerView: UIView {
+    private var clip: EmojiFrames.Clip?
+    private var link: CADisplayLink?
+    private var start: CFTimeInterval = 0
+    private var shown = -1
+    private var decoding = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        layer.contentsGravity = .resizeAspect
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { link?.invalidate() }
+
+    func play(_ clip: EmojiFrames.Clip) {
+        stop()
+        self.clip = clip
+        layer.contents = clip.image(at: 0)                 // первый кадр — сразу, совпадает с картинкой покоя
+        shown = 0
+        start = CACurrentMediaTime()
+        let link = CADisplayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: Float(EmojiFrames.fps), preferred: Float(EmojiFrames.fps))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    fileprivate func tick() {
+        guard let clip else { stop(); return }
+        let index = Int((CACurrentMediaTime() - start) * EmojiFrames.fps)
+        if index >= clip.count - 1 {
+            // последний кадр и стоп
+            if shown != clip.count - 1 { layer.contents = clip.image(at: clip.count - 1); shown = clip.count - 1 }
+            stop()
+            return
+        }
+        guard index != shown, !decoding else { return }
+        decoding = true
+        EmojiFrames.decodeQueue.async { [weak self] in
+            let image = clip.image(at: index)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.decoding = false
+                guard self.link != nil, let image else { return }
+                self.layer.contents = image
+                self.shown = index
+            }
+        }
+    }
+}
+
+/// CADisplayLink держит цель сильной ссылкой — через прокси вью освобождается как обычно
+private final class DisplayLinkProxy: NSObject {
+    weak var owner: EmojiFramePlayerView?
+    init(_ owner: EmojiFramePlayerView) { self.owner = owner }
+    @objc func tick() { owner?.tick() }
+}
+
+private struct EmojiFramePlayer: UIViewRepresentable {
+    let clip: EmojiFrames.Clip
+
+    func makeUIView(context: Context) -> EmojiFramePlayerView {
+        let view = EmojiFramePlayerView(frame: .zero)
+        view.play(clip)
+        return view
+    }
+
+    func updateUIView(_ uiView: EmojiFramePlayerView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: EmojiFramePlayerView, coordinator: ()) { uiView.stop() }
+}
 #endif
 
 /// Свои анимированные эмодзи (Lottie JSON). Чужие скачанные анимации убраны: пока своих нет, везде показывается обычный эмодзи.
@@ -113,24 +345,31 @@ actor LottieEmojiStore {
         return parsed
     }
 
-    /// При запуске приложения разбираем все свои анимации заранее: в чате и панели они появляются мгновенно
+    /// При запуске приложения всё готовится заранее и дальше лежит в памяти и на диске:
+    /// 1) картинки покоя и готовые кадры подхватываются с диска; 2) все анимации разбираются (вне главного потока);
+    /// 3) чего нет на диске (первый запуск, новая анимация) — рисуется один раз и сохраняется навсегда.
+    /// Порядок как в списке: сначала самые частые (❤️ 👍 🔥 🤣 — реакции), редкие потом
     func preloadAll() async {
-        // порядок как в списке: сначала самые частые (❤️ 👍 🔥 🤣 — реакции), редкие потом; между файлами уступаем очередь, чтобы не мешать запуску
         await LottieSnapshots.shared.loadFromDisk()
+        let pixels = await MainActor.run { Int((EmojiFrames.pointSize * UIScreen.main.scale).rounded(.up)) }
+        var keep: Set<URL> = []
+        var toRender: [(emoji: String, source: Data)] = []
         for emoji in AnimatedEmoji.all {
-            // обе картинки покоя (первый кадр — для ряда реакций, последний — для остального) уже есть с прошлого запуска —
-            // JSON даже не разбираем, он понадобится только при нажатии
-            let have = await MainActor.run(body: {
-                LottieSnapshots.shared.cached(emoji, atEnd: true) != nil && LottieSnapshots.shared.cached(emoji, atEnd: false) != nil
-            })
-            if have { continue }
+            guard let source = await data(for: emoji) else { continue }
+            keep.insert(EmojiFrames.url(emoji, source: source, pixels: pixels))
+            if !EmojiFrames.shared.load(emoji, source: source, pixels: pixels) { toRender.append((emoji: emoji, source: source)) }
             if let anim = await animation(for: emoji) {
                 await MainActor.run {
-                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: true)       // картинки покоя — заранее
+                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: true)       // уже есть — вернётся сразу
                     _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: false)
                 }
             }
             await Task.yield()
+        }
+        EmojiFrames.prune(keep: keep)                           // кадры старых версий анимаций
+        for item in toRender {
+            guard let anim = await animation(for: item.emoji) else { continue }
+            await EmojiFrames.shared.render(item.emoji, anim, source: item.source, pixels: pixels)
         }
     }
 
@@ -200,6 +439,10 @@ struct LottieEmojiView: View {
     #if canImport(Lottie)
     @State private var animation: LottieAnimation?
     private var shown: LottieAnimation? { animation ?? LottieSyncCache.shared.get(emoji) }
+    /// Готовые кадры с диска — для мелких эмодзи, которые играют один круг
+    private var frameClip: EmojiFrames.Clip? {
+        loop || size > EmojiFrames.maxSize ? nil : EmojiFrames.shared.clip(emoji)
+    }
     #endif
     @State private var loaded = false
     @State private var visible = false              // играет только то, что сейчас на экране
@@ -213,7 +456,7 @@ struct LottieEmojiView: View {
     private static let frameInterval = 1.0 / 30
     private var isLoaded: Bool {
         #if canImport(Lottie)
-        return shown != nil
+        return shown != nil || frameClip != nil
         #else
         return false
         #endif
@@ -238,7 +481,9 @@ struct LottieEmojiView: View {
         let run = wants && granted
         ZStack {
             #if canImport(Lottie)
-            if run && !finished, let animation = shown {
+            if run && !finished, let clip = frameClip {
+                EmojiFramePlayer(clip: clip)                             // готовые кадры, без Lottie
+            } else if run && !finished, let animation = shown {
                 let duration = max(0.1, animation.duration)
                 TimelineView(.animation(minimumInterval: Self.frameInterval)) { ctx in
                     let p = ctx.date.timeIntervalSince(startDate) / duration
@@ -272,8 +517,12 @@ struct LottieEmojiView: View {
         .task(id: "\(run)-\(isLoaded)") {
             // один круг: по окончании замираем на последнем кадре и сообщаем наверх
             #if canImport(Lottie)
-            guard run, !loop, let animation = shown else { return }
-            try? await Task.sleep(nanoseconds: UInt64(max(0.1, animation.duration) * 1_000_000_000))
+            guard run, !loop else { return }
+            let duration: Double
+            if let clip = frameClip { duration = clip.duration }
+            else if let animation = shown { duration = max(0.1, animation.duration) }
+            else { return }
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled else { return }
             finished = true
             PlaybackGate.shared.release(gateID)
@@ -286,6 +535,7 @@ struct LottieEmojiView: View {
             let rest = restAtEnd
             let hasSnap = LottieSnapshots.shared.cached(emoji, atEnd: rest) != nil
             guard run || !hasSnap else { loaded = true; return }
+            if frameClip != nil && hasSnap { loaded = true; return }        // играет готовыми кадрами — Lottie не нужен
             let ready = shown != nil                         // уже в памяти (прогрето заранее) — играет с момента старта
             animation = await LottieEmojiStore.shared.animation(for: emoji)
             if let anim = animation, !hasSnap {
