@@ -761,6 +761,14 @@ struct ChatScreen: View {
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
         }
         .onDisappear { session.chats.chatOpen = false; session.chats.openPeerID = nil }
+        .task {
+            // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
+            // меню по зажатию оживает сразу, а не после разбора JSON в момент открытия
+            #if canImport(Lottie)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            await LottieEmojiStore.shared.warm(AnimatedEmoji.all)
+            #endif
+        }
         .task(id: scenePhase) {
             // опрос только пока приложение на экране; в фоне — ни запросов, ни батареи
             guard scenePhase == .active else { return }

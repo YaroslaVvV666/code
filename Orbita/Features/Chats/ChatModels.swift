@@ -255,17 +255,19 @@ final class ChatModel: ObservableObject {
                     messages = fresh
                 }
             }
-            peer = thread.peer
-            typing = thread.typing
-            lastSeen = thread.lastSeen
-            canWrite = thread.canWrite
-            group = thread.group
-            isContact = thread.isContact
-            realName = thread.realName
+            // опрос идёт раз в секунду: присваиваем только изменившееся — каждое присваивание @Published перерисовывает
+            // весь экран чата (и открытое меню сообщения), даже если значение то же самое
+            if peer != thread.peer { peer = thread.peer }
+            if typing != thread.typing { typing = thread.typing }
+            if lastSeen != thread.lastSeen { lastSeen = thread.lastSeen }
+            if canWrite != thread.canWrite { canWrite = thread.canWrite }
+            if group != thread.group { group = thread.group }
+            if isContact != thread.isContact { isContact = thread.isContact }
+            if realName != thread.realName { realName = thread.realName }
             if thread.pinned != pinned { pinned = thread.pinned }
-            isPreview = thread.isPreview
+            if isPreview != thread.isPreview { isPreview = thread.isPreview }
             if !loaded { firstUnreadID = thread.firstUnread }
-            loaded = true
+            if !loaded { loaded = true }
             refreshedOnce = true
             if !outbox.isEmpty, !NetworkState.shared.offline { Task { await retryQueued() } }
         } catch let e as APIError {

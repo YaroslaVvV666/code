@@ -90,6 +90,10 @@ struct MessageRow: View {
     @Environment(\.lang) private var lang
     @State private var dragX: CGFloat = 0
     @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
+    /// Палец лежит на сообщении: пузырь чуть сжимается ещё до срабатывания зажатия — отклик сразу, а не через 0.25 с.
+    /// Только визуально: порог и допуск жеста те же, прокрутку это не перехватывает
+    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.3, dampingFraction: 0.7)))
+    private var pressing = false
 
     private var s: Strings { Strings(lang: lang) }
     private var colors: ChatColors { ChatColors(theme: theme) }
@@ -155,6 +159,7 @@ struct MessageRow: View {
         HStack(spacing: 0) {
             if mine { Spacer(minLength: 44) }
             content
+                .scaleEffect(pressing && interactive && !message.isPending ? 0.96 : 1, anchor: mine ? .trailing : .leading)
                 .offset(x: dragX)
                 .overlay(alignment: mine ? .leading : .trailing) {
                     Image(systemName: "arrowshape.turn.up.left.circle.fill")
@@ -171,6 +176,12 @@ struct MessageRow: View {
             if interactive, !message.isPending { onReact?("\u{2764}\u{FE0F}") }
         })
         .simultaneousGesture(LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .updating($pressing) { value, state, tx in
+                state = value
+                if value && interactive { Haptics.prepare(.medium) }
+                // короткое касание в начале прокрутки почти не успевает сжать пузырь — небольшая задержка и плавный вход
+                tx.animation = .easeOut(duration: 0.22).delay(0.05)
+            }
             .onEnded { _ in
                 if interactive, !message.isPending, let onLongPress {
                     longFired = true
@@ -1151,6 +1162,8 @@ private struct DustDissolve: ViewModifier {
     @State private var start: Date?
     private let duration: Double = 1.15
     private let pad: CGFloat = 70
+    /// Ступени прозрачности улетающих песчинок
+    private static let levels = 8
 
     private static func rand(_ x: Int, _ y: Int, _ k: Int) -> Double {
         var h = UInt32(truncatingIfNeeded: x &* 73856093 ^ y &* 19349663 ^ k &* 83492791)
@@ -1181,16 +1194,18 @@ private struct DustDissolve: ViewModifier {
                         Canvas { g, size in
                             let cell = Self.cell(for: size)
                             let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
+                            // все клетки — в один путь и одну заливку: тысячи отдельных fill на кадр и были основной ценой
+                            var path = Path()
                             for ix in 0..<cols {
                                 for iy in 0..<rows {
                                     let th = Self.threshold(ix, iy, cols: cols, rows: rows)
                                     let k = min(1, max(0, (th - p) * 9))              // песчинка сжимается и пропадает
                                     guard k > 0 else { continue }
                                     let d = cell * CGFloat(k)
-                                    g.fill(Path(CGRect(x: CGFloat(ix) * cell + (cell - d) / 2, y: CGFloat(iy) * cell + (cell - d) / 2, width: d, height: d)),
-                                           with: .color(.white))
+                                    path.addRect(CGRect(x: CGFloat(ix) * cell + (cell - d) / 2, y: CGFloat(iy) * cell + (cell - d) / 2, width: d, height: d))
                                 }
                             }
+                            g.fill(path, with: .color(.white))
                         }
                     }
                     .overlay {
@@ -1199,6 +1214,8 @@ private struct DustDissolve: ViewModifier {
                             let cell = Self.cell(for: size)
                             let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
                             let light = Color.white.opacity(0.9)
+                            // песчинки раскладываются по 2 цветам × 8 ступеням прозрачности: 16 заливок на кадр вместо тысяч
+                            var paths = [Path](repeating: Path(), count: Self.levels * 2)
                             for ix in 0..<cols {
                                 for iy in 0..<rows {
                                     guard Self.rand(ix, iy, 2) < 0.8 else { continue }
@@ -1211,9 +1228,13 @@ private struct DustDissolve: ViewModifier {
                                     let x = pad + CGFloat(ix) * cell + ease * CGFloat(30 + 110 * r1 * r1)
                                     let y = pad + CGFloat(iy) * cell - ease * CGFloat(10 + 55 * r2) + CGFloat(sin(age * 9 + r1 * 6)) * 3
                                     let d = cell * CGFloat(0.85 - 0.45 * age)
-                                    g.fill(Path(ellipseIn: CGRect(x: x, y: y, width: d, height: d)),
-                                           with: .color((r3 < 0.28 ? light : color).opacity(0.95 * (1 - age))))
+                                    let level = min(Self.levels - 1, Int((1 - age) * Double(Self.levels)))
+                                    paths[(r3 < 0.28 ? Self.levels : 0) + level].addEllipse(in: CGRect(x: x, y: y, width: d, height: d))
                                 }
+                            }
+                            for i in paths.indices where !paths[i].isEmpty {
+                                let alpha = 0.95 * (Double(i % Self.levels) + 0.5) / Double(Self.levels)
+                                g.fill(paths[i], with: .color((i >= Self.levels ? light : color).opacity(alpha)))
                             }
                         }
                         .padding(-pad)

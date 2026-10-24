@@ -118,11 +118,27 @@ actor LottieEmojiStore {
         // порядок как в списке: сначала самые частые (❤️ 👍 🔥 🤣 — реакции), редкие потом; между файлами уступаем очередь, чтобы не мешать запуску
         await LottieSnapshots.shared.loadFromDisk()
         for emoji in AnimatedEmoji.all {
-            // картинка покоя уже есть с прошлого запуска — JSON даже не разбираем, он понадобится только при нажатии
-            if await MainActor.run(body: { LottieSnapshots.shared.cached(emoji, atEnd: true) != nil }) { continue }
+            // обе картинки покоя (первый кадр — для ряда реакций, последний — для остального) уже есть с прошлого запуска —
+            // JSON даже не разбираем, он понадобится только при нажатии
+            let have = await MainActor.run(body: {
+                LottieSnapshots.shared.cached(emoji, atEnd: true) != nil && LottieSnapshots.shared.cached(emoji, atEnd: false) != nil
+            })
+            if have { continue }
             if let anim = await animation(for: emoji) {
-                await MainActor.run { _ = LottieSnapshots.shared.prepare(emoji, anim) }      // картинка покоя — заранее
+                await MainActor.run {
+                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: true)       // картинки покоя — заранее
+                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: false)
+                }
             }
+            await Task.yield()
+        }
+    }
+
+    /// Разобрать анимации в память заранее (вне главного потока): ряд реакций в меню сообщения начинает играть сразу,
+    /// а не после разбора 13 JSON по 300–500 КБ в момент открытия меню
+    func warm(_ emojis: [String]) async {
+        for emoji in emojis where LottieSyncCache.shared.get(emoji) == nil {
+            _ = await animation(for: emoji)
             await Task.yield()
         }
     }
@@ -175,6 +191,9 @@ struct LottieEmojiView: View {
     var loop = false
     /// false — замереть на последнем кадре
     var playing = true
+    /// В покое (до запуска) показывать первый кадр, а не последний: ряд реакций сначала стоит статично,
+    /// а потом плавно, без скачка картинки, начинает играть с того же кадра
+    var idleAtStart = false
     /// Сколько раз проиграть до конца и замереть на последнем кадре; для крупного эффекта
     var onFinish: (() -> Void)? = nil
 
@@ -184,7 +203,7 @@ struct LottieEmojiView: View {
     #endif
     @State private var loaded = false
     @State private var visible = false              // играет только то, что сейчас на экране
-    @State private var granted = true               // и не больше нескольких анимаций одновременно
+    @State private var granted = false              // и не больше нескольких анимаций одновременно
     @State private var gateID = UUID()
     @State private var startDate = Date()
     @State private var finished = false
@@ -200,8 +219,23 @@ struct LottieEmojiView: View {
         #endif
     }
 
+    /// Хочет играть прямо сейчас (если пустит PlaybackGate)
+    private var wants: Bool { playing && visible && scenePhase == .active }
+    /// Кадр покоя: до первого запуска — первый (если просили), после проигрывания — последний
+    private var restAtEnd: Bool { loop ? false : (finished || !idleAtStart) }
+
+    /// Место в PlaybackGate берём в момент старта, а не при появлении: эмодзи, которое появилось неподвижным
+    /// и запускается позже (playing false → true), тоже честно получает слот
+    private func updateGate() {
+        if wants && !finished {
+            granted = PlaybackGate.shared.request(gateID)
+        } else {
+            PlaybackGate.shared.release(gateID)
+        }
+    }
+
     var body: some View {
-        let run = playing && visible && granted && scenePhase == .active
+        let run = wants && granted
         ZStack {
             #if canImport(Lottie)
             if run && !finished, let animation = shown {
@@ -212,11 +246,11 @@ struct LottieEmojiView: View {
                         .currentProgress(loop ? p.truncatingRemainder(dividingBy: 1) : min(1, max(0, p)))
                         .resizable()
                 }
-            } else if let image = LottieSnapshots.shared.cached(emoji, atEnd: !loop) {
+            } else if let image = LottieSnapshots.shared.cached(emoji, atEnd: restAtEnd) {
                 Image(uiImage: image).resizable().scaledToFit()          // в покое — обычная картинка, без Lottie
             } else if let animation = shown {
                 LottieView(animation: animation)
-                    .currentProgress(loop ? 0 : 1)
+                    .currentProgress(restAtEnd ? 1 : 0)
                     .resizable()
             } else {
                 Text(emoji).font(.system(size: size * 0.78))
@@ -226,9 +260,15 @@ struct LottieEmojiView: View {
             #endif
         }
         .frame(width: size, height: size)
-        .onAppear { visible = true; granted = playing ? PlaybackGate.shared.request(gateID) : true }
-        .onDisappear { visible = false; PlaybackGate.shared.release(gateID) }
-        .onChange(of: run) { _, now in if now { startDate = Date(); finished = false } }
+        .onAppear { visible = true; updateGate() }
+        .onDisappear { visible = false; updateGate() }
+        .onChange(of: playing) { _, now in
+            // снова запустили после остановки — играем заново с первого кадра, без пересоздания вью через .id
+            if now { finished = false }
+            updateGate()
+        }
+        .onChange(of: scenePhase) { _, _ in updateGate() }
+        .onChange(of: run) { _, now in if now { startDate = Date() } }
         .task(id: "\(run)-\(isLoaded)") {
             // один круг: по окончании замираем на последнем кадре и сообщаем наверх
             #if canImport(Lottie)
@@ -243,24 +283,27 @@ struct LottieEmojiView: View {
         .task(id: "\(emoji)-\(run)") {
             #if canImport(Lottie)
             // неподвижному эмодзи с готовой картинкой анимация не нужна — грузим её только когда надо играть
-            let hasSnap = LottieSnapshots.shared.cached(emoji, atEnd: !loop) != nil
+            let rest = restAtEnd
+            let hasSnap = LottieSnapshots.shared.cached(emoji, atEnd: rest) != nil
             guard run || !hasSnap else { loaded = true; return }
+            let ready = shown != nil                         // уже в памяти (прогрето заранее) — играет с момента старта
             animation = await LottieEmojiStore.shared.animation(for: emoji)
             if let anim = animation, !hasSnap {
-                LottieSnapshots.shared.prepare(emoji, anim, atEnd: !loop)
+                LottieSnapshots.shared.prepare(emoji, anim, atEnd: rest)
                 snapTick += 1
             }
-            if run { startDate = Date() }
+            if run && !ready { startDate = Date() }
             #endif
             loaded = true
         }
     }
 }
 
-/// Не даёт играть слишком многим анимациям сразу: остальные стоят на последнем кадре (ровно столько, сколько выдерживает экран без лагов)
+/// Не даёт играть слишком многим анимациям сразу: остальные стоят на последнем кадре (ровно столько, сколько выдерживает экран без лагов).
+/// Ряд реакций — до ~10 видимых эмодзи плюс несколько в чате; слот освобождается сразу по окончании круга
 final class PlaybackGate {
     static let shared = PlaybackGate()
-    private let limit = 12
+    private let limit = 16
     private var active = Set<UUID>()
     private let lock = NSLock()
 

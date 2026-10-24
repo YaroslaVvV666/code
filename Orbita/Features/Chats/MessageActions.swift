@@ -3,7 +3,9 @@ import SwiftUI
 /// Зажатое сообщение: сверху ряд реакций, посередине само сообщение, снизу меню действий (стекло)
 struct MessageActionOverlay: View {
     let message: ChatMessage
-    @ObservedObject var model: ChatModel
+    /// Без подписки (@ObservedObject): чат опрашивает сервер раз в секунду, и каждая публикация модели перерисовывала бы
+    /// всё меню вместе с копией сообщения прямо во время анимации появления. Всё, что меню читает из модели, нужно один раз
+    let model: ChatModel
     var noForward: Bool
     var showSender: Bool
     var onClose: () -> Void
@@ -21,7 +23,6 @@ struct MessageActionOverlay: View {
     @Environment(\.lang) private var lang
     @State private var appear = false
     @State private var confirming = false
-    @State private var settled = false          // анимация эмодзи стартует после появления меню, а не вместе с ним
 
     private var s: Strings { Strings(lang: lang) }
     /// В реакциях — только эмодзи с анимацией
@@ -68,7 +69,6 @@ struct MessageActionOverlay: View {
         }
         .onAppear {
             withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { appear = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { settled = true }
         }
     }
 
@@ -76,14 +76,15 @@ struct MessageActionOverlay: View {
         // эмодзи больше, чем влезает в ширину экрана, — полоска листается вбок
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 2) {
-                ForEach(Self.emojis, id: \.self) { e in
+                let selected = current
+                ForEach(Array(Self.emojis.enumerated()), id: \.element) { index, e in
                     Button {
                         model.react(message, emoji: e)
                         onClose()
                     } label: {
-                        LottieEmojiView(emoji: e, size: 34, playing: settled).id(settled)      // один круг при появлении и стоп
+                        ReactionBarEmoji(emoji: e, index: index)
                             .frame(width: 38, height: 40)
-                            .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+                            .background(selected == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -91,7 +92,7 @@ struct MessageActionOverlay: View {
             .padding(.horizontal, 8).padding(.vertical, 6)
         }
         .frame(width: min(CGFloat(Self.emojis.count) * 40 + 16, UIScreen.main.bounds.width - 32), height: 52)
-        .glass(Capsule())
+        .menuSurface(Capsule())
     }
 
     private var actionList: some View {
@@ -131,7 +132,7 @@ struct MessageActionOverlay: View {
             }
         }
         .frame(width: 250)
-        .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .menuSurface(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
     }
 
@@ -148,7 +149,7 @@ struct MessageActionOverlay: View {
         }
         .frame(minWidth: 250)
         .fixedSize()
-        .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .menuSurface(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
     }
 
@@ -176,4 +177,60 @@ struct MessageActionOverlay: View {
         }
         .buttonStyle(.plain)
     }
+}
+
+/// Эмодзи в ряду реакций. Сразу стоит готовой картинкой первого кадра (снимок с диска, без Lottie), а анимация стартует
+/// чуть позже и по очереди: Lottie-сцены создаются не все в одном кадре вместе с открытием меню, а по одной,
+/// и вью при этом не пересоздаётся — тот же LottieEmojiView просто переключается playing false → true
+private struct ReactionBarEmoji: View {
+    let emoji: String
+    let index: Int
+    @State private var live = false
+
+    /// Пока меню проявляется (~0.2 с), всё стоит; дальше эмодзи оживают волной слева направо
+    private static let start: Double = 0.2
+    private static let step: Double = 0.035
+
+    var body: some View {
+        LottieEmojiView(emoji: emoji, size: 34, playing: live, idleAtStart: true)      // один круг при появлении и стоп
+            .task {
+                try? await Task.sleep(nanoseconds: UInt64((Self.start + Double(index) * Self.step) * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                live = true
+            }
+    }
+}
+
+/// Подложка ряда реакций и списка действий. На iOS 26 — системное стекло. На старых системах — не материал,
+/// а почти непрозрачная заливка: под меню и так уже размытый экран, второе размытие поверх первого не видно,
+/// а стоит дорого; тень считается по форме, а не по содержимому
+private struct MenuSurface<S: Shape>: ViewModifier {
+    let shape: S
+    @Environment(\.theme) private var theme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            fallback(content)
+        }
+        #else
+        fallback(content)
+        #endif
+    }
+
+    private func fallback(_ content: Content) -> some View {
+        content
+            .background {
+                shape.fill(theme.dark ? Color(white: 0.16).opacity(0.94) : Color.white.opacity(0.96))
+                    .shadow(color: Color.black.opacity(theme.dark ? 0.28 : 0.08), radius: 14, y: 5)
+            }
+            .overlay(shape.stroke(Color.white.opacity(theme.dark ? 0.12 : 0.6), lineWidth: 0.5))
+    }
+}
+
+private extension View {
+    func menuSurface<S: Shape>(_ shape: S) -> some View { modifier(MenuSurface(shape: shape)) }
 }
