@@ -327,6 +327,12 @@ ensure_column("wall_entries", "reply_to", "reply_to TEXT")                      
 DB.execute("CREATE TABLE IF NOT EXISTS wall_reactions(entry_id TEXT NOT NULL, user_id TEXT NOT NULL, emoji TEXT NOT NULL, "
            "created_at REAL NOT NULL, PRIMARY KEY(entry_id, user_id))")          # одна реакция на человека, как в чатах
 ensure_column("posts", "wall_only", "wall_only INTEGER NOT NULL DEFAULT 0")        # запись только на стене профиля, не в ленте
+# «Не интересует»: такой пост человеку больше никогда не рекомендуется (открыть можно, только если пришлют или найдёт сам)
+DB.execute("CREATE TABLE IF NOT EXISTS hidden_posts(user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at REAL NOT NULL, "
+           "PRIMARY KEY(user_id, post_id))")
+# сколько раз человек возвращался к посту (в разные заходы) — пересмотр — сильный плюс
+DB.execute("CREATE TABLE IF NOT EXISTS user_post_views(user_id TEXT NOT NULL, post_id TEXT NOT NULL, n INTEGER NOT NULL, "
+           "last REAL NOT NULL, PRIMARY KEY(user_id, post_id))")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author, created_at)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
 ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
@@ -2213,14 +2219,27 @@ def put_interests(req, me):
 # Хранится зашифрованно отдельно от явных «Интересов»: смена интересов в настройках вкус не стирает.
 
 TASTE_HALF = {"long": 30 * 86400.0, "recent": 3 * 86400.0}
-TASTE_W = {"like": 3.0, "unlike": -3.0, "comment": 4.0, "share": 5.0, "save": 3.0, "dislike": -6.0}
+# Очки за действия: плюс — тема и автор поднимаются в рекомендациях, минус — опускаются
+TASTE_W = {
+    "comment": 4.0,      # написал комментарий
+    "like": 3.0,         # лайк
+    "unlike": -3.0,      # снял лайк
+    "save": 3.0,         # сохранил
+    "unsave": -1.5,      # убрал из сохранённых
+    "repost": 5.0,       # репост к себе
+    "share": 5.0,        # поделился (в чат или ссылкой)
+    "search": 2.0,       # искал эту тему (по словам запроса)
+    "rewatch": 2.0,      # вернулся и посмотрел ещё раз в другой заход — прибавляется к очкам за просмотр
+    "dislike": -8.0,     # «Не интересует» / пожаловался
+}
+REWATCH_GAP = 10 * 60          # повторный просмотр считается, если с прошлого прошло больше 10 минут
 TASTE_LOCK = threading.Lock()
 
 
 def dwell_weight(ms):
-    """Сколько смотрел: пролистал — минус, задержался — плюс"""
-    if ms < 1200:
-        return -0.25
+    """Сколько смотрел: сразу пролистал — минус, задержался — плюс"""
+    if ms < 1000:
+        return -0.6
     if ms < 3000:
         return 0.1
     if ms < 8000:
@@ -2267,22 +2286,66 @@ def taste_bump(bucket, key, delta, half, now):
 
 def reel_weight(ratio):
     """Для коротких видео важна доля просмотра: досмотрел/пересмотрел — сильный плюс, смахнул сразу — минус"""
-    if ratio < 0.15:
-        return -0.7
-    if ratio < 0.4:
-        return 0.1
-    if ratio < 0.8:
-        return 1.0
+    if ratio < 0.12:
+        return -1.2          # сразу пролистнул
+    if ratio < 0.3:
+        return -0.2
+    if ratio < 0.6:
+        return 0.6
+    if ratio < 0.9:
+        return 1.2
     if ratio < 1.5:
-        return 2.0
-    return 2.6
+        return 2.0           # досмотрел
+    if ratio < 2.5:
+        return 2.6           # пересмотрел в том же заходе
+    return 3.2               # крутил несколько раз подряд
+
+
+def view_repeat(uid, pid, now):
+    """Отмечает просмотр; True — человек вернулся к посту в другой заход (не первый раз)"""
+    r = q1("SELECT n, last FROM user_post_views WHERE user_id = ? AND post_id = ?", (uid, pid))
+    if not r:
+        run("INSERT OR IGNORE INTO user_post_views(user_id, post_id, n, last) VALUES (?,?,1,?)", (uid, pid, now))
+        return False
+    if now - r["last"] < REWATCH_GAP:
+        run("UPDATE user_post_views SET last = ? WHERE user_id = ? AND post_id = ?", (now, uid, pid))
+        return False
+    run("UPDATE user_post_views SET n = n + 1, last = ? WHERE user_id = ? AND post_id = ?", (now, uid, pid))
+    return True
+
+
+def hidden_sql(alias=""):
+    """Условие «не из скрытых человеком» (и не репост скрытого) — для лент и рекомендаций"""
+    a = alias + "." if alias else ""
+    return ("AND {a}id NOT IN (SELECT post_id FROM hidden_posts WHERE user_id = ?) "
+            "AND ({a}repost_of IS NULL OR {a}repost_of NOT IN (SELECT post_id FROM hidden_posts WHERE user_id = ?)) ").format(a=a)
+
+
+def taste_search(uid, query):
+    """Поиск — тоже интерес: темы из запроса поднимаются (сильнее «сейчас», слабее «раньше»)"""
+    topics = post_topics(query or "")
+    if not topics:
+        return
+    now = time.time()
+    with TASTE_LOCK:
+        t = taste_load(uid)
+        if t["off"]:
+            return
+        for scope in ("long", "recent"):
+            for tp in topics:
+                taste_bump(t[scope], tp, TASTE_W["search"], TASTE_HALF[scope], now)
+        t["stats"]["searches"] = t["stats"].get("searches", 0) + 1
+        taste_save(uid, t)
 
 
 def taste_event(uid, post, kind, ms=0, ratio=None):
-    """Учесть действие человека с постом. kind: view | like | unlike | comment | share | save"""
+    """Учесть действие человека с постом. kind: view | like | unlike | comment | share | repost | save | unsave | dislike"""
     if not post or post["author"] == uid:
         return
     now = time.time()
+    if kind == "dislike":
+        # «Не интересует» — этот пост больше никогда не попадёт в ленту и шортсы (даже если рекомендации выключены)
+        run("INSERT OR IGNORE INTO hidden_posts(user_id, post_id, created_at) VALUES (?,?,?)", (uid, post["id"], now))
     with TASTE_LOCK:
         t = taste_load(uid)
         if t["off"]:
@@ -2291,6 +2354,8 @@ def taste_event(uid, post, kind, ms=0, ratio=None):
             w = reel_weight(ratio)
         else:
             w = dwell_weight(ms) if kind == "view" else TASTE_W.get(kind, 0.0)
+        if kind == "view" and view_repeat(uid, post["id"], now) and (ms >= 4000 or (ratio or 0) >= 0.5):
+            w += TASTE_W["rewatch"]                              # вернулся и снова смотрит — ему это правда интересно
         if not w:
             return
         topics = post_topics(dec(post["author"], "posts", COL["post_text"], post["id"], post["text_enc"]))
@@ -2309,7 +2374,7 @@ def taste_event(uid, post, kind, ms=0, ratio=None):
             st["likes"] += 1
         elif kind == "comment":
             st["comments"] += 1
-        elif kind == "share":
+        elif kind in ("share", "repost"):
             st["shares"] += 1
         elif kind == "save":
             st["saves"] += 1
@@ -2324,7 +2389,7 @@ def post_events(req, me):
         raise ApiError(400, "bad_value")
     done = 0
     for e in items[:50]:
-        if not isinstance(e, dict) or e.get("type") not in ("view", "save", "dislike"):
+        if not isinstance(e, dict) or e.get("type") not in ("view", "save", "dislike", "share"):
             continue
         p = q1("SELECT * FROM posts WHERE id = ?", (str(e.get("post_id", "")),))
         try:
@@ -2583,6 +2648,8 @@ def reel_search(req, me):
     page = [p for _, p in hits[offset:offset + limit]]
     if offset == 0 and hits:
         run("INSERT INTO reel_queries(q, user_id, created_at) VALUES (?,?,?)", (phrase[:60], uid, time.time()))
+    if offset == 0:
+        taste_search(uid, query)                 # что ищет — то и интересно
     out = []
     for p, j in zip(page, posts_json(page, uid)):
         j["author_state"] = "me" if p["author"] == uid else ("following" if is_following(uid, p["author"]) else "none")
@@ -2604,8 +2671,8 @@ def list_reels(req, me):
     sql = ("SELECT p.* FROM posts p JOIN post_media m ON m.post_id = p.id AND m.position = 0 "
            "WHERE p.reel = 1 AND m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?) "
            "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
-           "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) ")
-    args = [MAX_REEL_SECONDS, uid, uid]
+           "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) " + hidden_sql("p"))
+    args = [MAX_REEL_SECONDS, uid, uid, uid, uid]
     if params.get("feed") == "friends":
         sql += "AND (p.author = ? OR p.author IN (SELECT b FROM friends WHERE a = ?)) "
         args += [uid, uid]
@@ -2632,8 +2699,9 @@ def list_posts(req, me):
         raise ApiError(400, "bad_value")
     rows = q("SELECT * FROM posts WHERE created_at < ? AND reel = 0 AND wall_only = 0 "          # записи «только на стене» в ленту не идут
              "AND author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
-             "AND author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
-             "ORDER BY created_at DESC LIMIT ?", (before, me["id"], me["id"], 150 if params.get("sort") == "for_you" else limit))
+             "AND author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) " + hidden_sql() +
+             "ORDER BY created_at DESC LIMIT ?",
+             (before, me["id"], me["id"], me["id"], me["id"], 150 if params.get("sort") == "for_you" else limit))
     if params.get("sort") == "for_you":
         rows = ranked_feed(me, rows, limit)
     req.send_json(200, {"posts": posts_json(rows, me["id"])})
@@ -2809,7 +2877,10 @@ def report_post(req, me, pid):
 
 @route("DELETE", r"/v1/posts/([a-f0-9]+)/save")
 def unsave_post(req, me, pid):
+    had = q1("SELECT 1 FROM post_saves WHERE post_id = ? AND user_id = ?", (pid, me["id"])) is not None
     run("DELETE FROM post_saves WHERE post_id = ? AND user_id = ?", (pid, me["id"]))
+    if had:
+        taste_event(me["id"], q1("SELECT * FROM posts WHERE id = ?", (pid,)), "unsave")
     req.send_json(200, {"ok": True, "saves": q1("SELECT COUNT(*) c FROM post_saves WHERE post_id = ?", (pid,))["c"]})
 
 
@@ -2850,7 +2921,7 @@ def repost_post(req, me, pid):
         except Exception:
             run("ROLLBACK")
             raise
-    taste_event(uid, p, "save")
+    taste_event(uid, p, "repost")
     req.send_json(200, {"ok": True, "reposts": repost_state(orig), "reposted_by_me": True})
 
 

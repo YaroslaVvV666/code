@@ -65,6 +65,12 @@ final class TasteTracker {
         buffer.append(["post_id": postID, "type": "save", "ms": 0])
     }
 
+    /// Поделился ссылкой на пост (скопировал, отправил наружу) — такой же сильный плюс, как пересылка в чат
+    func shared(_ postID: String) {
+        buffer.append(["post_id": postID, "type": "share", "ms": 0])
+        flush()
+    }
+
     /// Приложение уходит в фон — всё, что сейчас на экране, засчитываем и отправляем
     func endAll() {
         for id in Array(shownSince.keys) { disappeared(id) }

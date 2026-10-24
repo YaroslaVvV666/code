@@ -402,6 +402,7 @@ struct PostCard: View {
         Button { sendSheet = true } label: { Label(s.sendToChat, systemImage: "paperplane") }
         Button {
             UIPasteboard.general.string = link
+            session.taste.shared(post.id)                     // поделился — учитывается в рекомендациях
             Haptics.notify(.success)
         } label: { Label(s.copyLink, systemImage: "link") }
     }
@@ -493,7 +494,7 @@ struct PostCard: View {
                         Button {
                             Haptics.impact(.medium)
                             session.taste.notInterested(post.id)
-                            withAnimation { hiddenNote = s.t("Скрыто. Похожее будем показывать реже", "Hidden. We'll show less like this") }
+                            withAnimation { hiddenNote = s.t("Скрыто. Эту запись больше не покажем, похожее — реже", "Hidden. We won't show this again, and less like it") }
                         } label: { Label(s.t("Не интересует", "Not interested"), systemImage: "hand.thumbsdown") }
                         Button(role: .destructive) { reportAsk = true } label: {
                             Label(s.t("Пожаловаться", "Report"), systemImage: "exclamationmark.bubble")
