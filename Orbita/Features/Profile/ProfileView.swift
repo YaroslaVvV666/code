@@ -367,11 +367,8 @@ struct ProfileView: View {
                 }
 
                 SettingsGroup {
-                    SettingsRow(icon: "sparkles", tint: .pink, title: s.t("Интересы", "Interests"),
-                                value: InterestsStore.load(session.userID).isEmpty ? s.t("Не выбраны", "None")
-                                    : "\(InterestsStore.load(session.userID).count)",
-                                showsChevron: true) { route = .interests }
-                    SettingsDivider()
+                    // «Интересы» выбираются один раз при регистрации и дальше не меняются;
+                    // учитывать ли действия — переключатель в «Конфиденциальности»
                     SettingsRow(icon: "envelope.fill", tint: .blue, title: s.loginEmail,
                                 value: flow.linkedEmail ?? s.t("Не привязана", "Not linked"),
                                 showsChevron: true) {

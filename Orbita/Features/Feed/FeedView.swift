@@ -192,11 +192,6 @@ struct FeedView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Button { session.profileRoute = .interests; session.tabRequest = .profile } label: {
-                Label(s.t("Интересы", "Interests"), systemImage: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .medium)).foregroundStyle(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }

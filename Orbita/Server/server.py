@@ -2472,14 +2472,15 @@ def ranked_feed(me, rows, limit):
     """Лента «Для вас»: совпадение тем с интересами, темы лайкнутых постов, свежесть, популярность, лёгкая случайность."""
     mine = set(interests_of(me["id"]) or [])
     implicit = {}
-    liked = q("SELECT p.id, p.author, p.text_enc FROM likes l JOIN posts p ON p.id = l.post_id "
-              "WHERE l.user_id = ? ORDER BY l.rowid DESC LIMIT 60", (me["id"],))
-    for p in liked:
-        for t in topics_cached(p):
-            implicit[t] = implicit.get(t, 0) + 1
     now = time.time()
     taste = taste_load(me["id"])
     use_taste = not taste["off"]
+    # «Учитывать мои действия» выключено — не смотрим и на лайки: только выбранные интересы, свежесть и популярность
+    liked = q("SELECT p.id, p.author, p.text_enc FROM likes l JOIN posts p ON p.id = l.post_id "
+              "WHERE l.user_id = ? ORDER BY l.rowid DESC LIMIT 60", (me["id"],)) if use_taste else []
+    for p in liked:
+        for t in topics_cached(p):
+            implicit[t] = implicit.get(t, 0) + 1
 
     def prep(bucket, half, floor):
         # значения с учётом затухания и знаменатель — один раз на запрос, а не на каждый пост

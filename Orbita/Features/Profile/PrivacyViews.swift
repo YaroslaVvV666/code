@@ -11,6 +11,8 @@ struct PrivacyScreen: View {
 
     @State private var blockedCount = 0
     @State private var errorText: String?
+    /// «Учитывать мои действия»: nil — ещё не узнали у сервера (по умолчанию включено)
+    @State private var learnFromActivity: Bool?
 
     private var s: Strings { Strings(lang: lang) }
     private var privacy: PrivacySettings { store.profile?.privacy ?? PrivacySettings() }
@@ -73,6 +75,55 @@ struct PrivacyScreen: View {
                     .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 30)
             }
+
+            // Рекомендации: учитывать ли действия человека
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.pink, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Учитывать мои действия", "Learn from my activity")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { learnFromActivity ?? true },
+                            set: { on in
+                                learnFromActivity = on
+                                Task {
+                                    if let info = await session.extras.setTaste(enabled: on) { learnFromActivity = info.enabled }
+                                    await session.feed.load()
+                                }
+                            }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                        .disabled(learnFromActivity == nil)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("""
+                    Когда включено (так по умолчанию), лента «Для вас» и шортсы подбираются по тому, что вы смотрите и сколько, \
+                    что лайкаете, комментируете, сохраняете, репостите, пересылаете и ищете, — чтобы чаще показывать похожее \
+                    и реже то, что вы пролистываете. Если выключить, ваши действия не запоминаются и не учитываются: \
+                    рекомендации строятся только по интересам, выбранным при регистрации, свежести и популярности. \
+                    Записи, на которые вы нажали «Не интересует», не показываются в любом случае. \
+                    Ваши действия видит только сервер Orbita — другим людям они не показываются.
+                    """, """
+                    When on (the default), your For You feed and shorts are picked based on what you watch and for how long, \
+                    what you like, comment on, save, repost, share and search for — to show more of what you enjoy and less of \
+                    what you skip. When off, your activity isn't remembered or used: recommendations are based only on the \
+                    interests you chose at sign-up, freshness and popularity. Posts you marked "Not interested" stay hidden either way. \
+                    Only the Orbita server sees your activity — it's never shown to other people.
+                    """))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .task { learnFromActivity = await session.extras.taste()?.enabled ?? true }
 
             // Лучшие друзья вокруг аватарки
             VStack(alignment: .leading, spacing: 8) {
