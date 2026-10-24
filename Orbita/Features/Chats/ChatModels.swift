@@ -295,6 +295,7 @@ final class ChatModel: ObservableObject {
             }
             if refreshedOnce, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count, fresh.count - messages.count <= 3 { Haptics.impact(.soft) }       // только на настоящее новое сообщение, не на подгрузку истории при входе
             if fresh != messages {
+                announceIncomingReaction(in: fresh)
                 if abs(fresh.count - messages.count) > 3 {
                     // длинная история разом (10 предзагруженных → 100): без анимации появления — иначе строки «въезжали» с нулевой прозрачностью
                     // и экран на миг оставался пустым, пока не пролистаешь
@@ -333,6 +334,26 @@ final class ChatModel: ObservableObject {
     }
 
     // MARK: Реакции и закреп
+
+    /// Собеседник поставил реакцию — над сообщением проигрывается тот же крупный эффект, что и у своей (как в Telegram).
+    /// Сравниваем с тем, что было: реакций «не моих» на сообщении стало больше
+    private func announceIncomingReaction(in fresh: [ChatMessage]) {
+        guard refreshedOnce, reactionFX == nil else { return }
+        let before = Dictionary(messages.map { ($0.id, $0.reactions) }, uniquingKeysWith: { a, _ in a })
+        for m in fresh.reversed() {
+            guard let old = before[m.id] else { continue }
+            for r in m.reactions {
+                let prev = old.first { $0.emoji == r.emoji }
+                let othersNow = r.count - (r.mine ? 1 : 0)
+                let othersBefore = (prev?.count ?? 0) - ((prev?.mine ?? false) ? 1 : 0)
+                if othersNow > othersBefore {
+                    reactionFX = ReactionFX(emoji: r.emoji, messageID: m.id, incoming: true)
+                    Haptics.impact(.light)
+                    return
+                }
+            }
+        }
+    }
 
     /// Одна реакция на человека: новая заменяет старую, такая же — снимает
     func react(_ message: ChatMessage, emoji: String) {

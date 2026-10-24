@@ -821,12 +821,21 @@ struct VoiceBlock: View {
                     Text(mmss(Int(shown.rounded(.down))))
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(mine ? Color.white.opacity(0.8) : theme.textTertiary)
-                    if isCurrent && player.rate != 1 {
-                        Text(player.rate == 1.5 ? "1.5×" : "2×")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(mine ? theme.accentColor : Color.white)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(mine ? Color.white : theme.accentColor, in: Capsule())
+                    if isCurrent {
+                        // скорость прямо в пузыре: 1× → 1.5× → 2×, запоминается для всех голосовых
+                        Button {
+                            Haptics.select()
+                            player.cycleRate()
+                        } label: {
+                            Text(player.rate == 1 ? "1×" : (player.rate == 1.5 ? "1.5×" : "2×"))
+                                .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                .foregroundStyle(mine ? theme.accentColor : Color.white)
+                                .padding(.horizontal, 6).frame(height: 16)
+                                .background(mine ? Color.white : theme.accentColor, in: Capsule())
+                                .padding(6).contentShape(Rectangle()).padding(-6)
+                        }
+                        .buttonStyle(.plain)
+                        .transition(.scale.combined(with: .opacity))
                     }
                     if !pending, let id = attachment.mediaID {
                         Button {

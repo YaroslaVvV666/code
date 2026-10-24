@@ -6,6 +6,8 @@ struct ReactionFX: Identifiable, Equatable {
     let id = UUID()
     let emoji: String
     var messageID: String = ""
+    /// Реакцию поставил собеседник (пришла с сервера): эффект — только если сообщение сейчас видно на экране
+    var incoming = false
 }
 
 /// Положение сообщений на экране (экранные координаты): эффект реакции вылетает прямо из нужного сообщения

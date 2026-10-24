@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(Translation)
+import Translation
+#endif
 
 /// Открыто ли меню зажатого сообщения. Обычный флаг без подписки: строки чата проверяют его только в обработчиках
 /// касаний, поэтому открытие меню не перерисовывает список
@@ -34,6 +37,8 @@ struct MessageActionOverlay: View {
     var onForward: () -> Void = {}
     var onSelect: () -> Void = {}
     var onInfo: () -> Void = {}
+    /// «Перевести» — системный переводчик iOS (17.4+), прямо на телефоне
+    var onTranslate: (() -> Void)? = nil
     /// Где сообщение стоит на экране (экранные координаты): копия встаёт ровно туда же, как в Telegram
     var sourceFrame: CGRect? = nil
 
@@ -41,12 +46,20 @@ struct MessageActionOverlay: View {
     @Environment(\.lang) private var lang
     @State private var appear = false
     @State private var confirming = false
+    @State private var reminding = false          // список «Напомнить: через час / вечером / завтра»
     @State private var closing = false           // меню уходит плавно, а не исчезает в один кадр
 
     private var s: Strings { Strings(lang: lang) }
     /// В реакциях — только эмодзи с анимацией
     static let emojis = AnimatedEmoji.all
     private var current: String? { model.messages.first { $0.id == message.id }?.reactions.first(where: \.mine)?.emoji }
+    /// Перевод есть для текста, если система умеет (iOS 17.4+)
+    private var canTranslate: Bool {
+        guard onTranslate != nil, !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !message.text.hasPrefix("\u{200B}call:") else { return false }
+        return TranslationSheet.available
+    }
+
     private var canEdit: Bool {
         message.mine && (!message.text.isEmpty || !message.attachments.isEmpty)
             && message.attachments.allSatisfy { $0.kind != .sticker }
@@ -80,12 +93,13 @@ struct MessageActionOverlay: View {
 
     /// Высота списка действий — считается заранее, чтобы сразу знать, сколько места нужно под сообщением
     private var actionCount: Int {
-        var n = 3                                                                   // ответить, выбрать, удалить
+        var n = 4                                                                   // ответить, напомнить, выбрать, удалить
         if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
         if !message.text.isEmpty && !noForward && message.poll == nil { n += 1 }
         if model.canPin { n += 1 }
         if showSender || message.mine { n += 1 }
         if canEdit && message.poll == nil { n += 1 }
+        if canTranslate { n += 1 }
         return n
     }
     private var listHeight: CGFloat { CGFloat(actionCount) * Self.rowHeight + CGFloat(actionCount - 1) * 0.5 }
@@ -116,8 +130,9 @@ struct MessageActionOverlay: View {
 
                 Group {
                     reactionBar
-                        .opacity(confirming ? 0 : 1).scaleEffect(confirming ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
-                        .allowsHitTesting(!confirming)
+                        .opacity(confirming || reminding ? 0 : 1)
+                        .scaleEffect(confirming || reminding ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
+                        .allowsHitTesting(!confirming && !reminding)
                         // ряд реакций «вырастает» из угла над сообщением
                         .scaleEffect(shown ? 1 : 0.4, anchor: message.mine ? .bottomTrailing : .bottomLeading)
                         .opacity(shown ? 1 : 0)
@@ -139,6 +154,9 @@ struct MessageActionOverlay: View {
                     Group {
                         if confirming {
                             confirmList
+                                .transition(.scale(scale: 0.6, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                        } else if reminding {
+                            reminderList
                                 .transition(.scale(scale: 0.6, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
                         } else {
                             actionList
@@ -212,6 +230,10 @@ struct MessageActionOverlay: View {
                 divider
                 row("doc.on.doc", s.copy) { UIPasteboard.general.string = message.text; dismiss() }
             }
+            if canTranslate {
+                divider
+                row("character.bubble", s.t("Перевести", "Translate")) { dismiss { onTranslate?() } }
+            }
             if model.canPin {
                 divider
                 let pinned = model.isPinned(message)
@@ -230,11 +252,36 @@ struct MessageActionOverlay: View {
                 row("pencil", s.editMessage) { dismiss(onEdit) }
             }
             divider
+            row("bell", s.t("Напомнить", "Remind me")) {
+                Haptics.select()
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { reminding = true }
+            }
+            divider
             row("checkmark.circle", s.t("Выбрать", "Select")) { dismiss(onSelect) }
             divider
             row("trash", s.delete, danger: true) {
                 Haptics.impact(.light)
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { confirming = true }
+            }
+        }
+        .frame(width: 250)
+        .menuSurface(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+    }
+
+    /// «Напомнить»: когда прислать уведомление об этом сообщении
+    private var reminderList: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(MessageReminder.options(lang).enumerated()), id: \.offset) { index, option in
+                if index > 0 { divider }
+                row("clock", option.title) {
+                    let peer = model.peer, text = message.summary, id = message.id, date = option.date, language = self.lang
+                    Task {
+                        let ok = await MessageReminder.schedule(peer: peer, text: text, messageID: id, at: date, lang: language)
+                        Haptics.notify(ok ? .success : .error)
+                    }
+                    dismiss()
+                }
             }
         }
         .frame(width: 250)
@@ -391,5 +438,33 @@ struct MessageMenuPresenter<Content: View>: View {
             .allowsHitTesting(false)
             .onAppear { MessageMenuWindow.show(content) }
             .onDisappear { MessageMenuWindow.hide() }
+    }
+}
+
+// MARK: - Перевод сообщения
+
+/// Системная шторка перевода (Translation, iOS 17.4+): перевод делается на телефоне, без сервера
+struct TranslationSheet: ViewModifier {
+    @Binding var text: String?
+
+    static var available: Bool {
+        #if canImport(Translation)
+        if #available(iOS 17.4, *) { return true }
+        #endif
+        return false
+    }
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if canImport(Translation)
+        if #available(iOS 17.4, *) {
+            content.translationPresentation(isPresented: Binding(get: { text != nil }, set: { if !$0 { text = nil } }),
+                                            text: text ?? "")
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }

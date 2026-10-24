@@ -191,6 +191,7 @@ struct ChatInputBar: View {
                 let snap = controller.snapshot()
                 if !snap.text.isEmpty { ChatDraftStore.save(chat: model.peer.id, text: snap.text, entities: snap.entities) }
             }
+            ChatDraftSignal.bump()                          // строка в списке чатов — с последним текстом черновика
         }
     }
 

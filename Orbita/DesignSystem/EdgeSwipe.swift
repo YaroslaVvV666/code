@@ -129,10 +129,15 @@ enum ChatDraftStore {
 
     static func save(chat: String, text: String, entities: [TextEntity]) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let had = UserDefaults.standard.data(forKey: key(chat)) != nil
         if trimmed.isEmpty {
             UserDefaults.standard.removeObject(forKey: key(chat))
+            if had { ChatDraftSignal.bump() }
         } else if let data = try? JSONEncoder().encode(Draft(text: text, entities: entities)) {
             UserDefaults.standard.set(data, forKey: key(chat))
+            // сигнал — только когда черновик появился: на каждую букву список чатов под открытым чатом не перерисовываем
+            // (сам текст обновится в строке при выходе из чата — там тоже сигнал)
+            if !had { ChatDraftSignal.bump() }
         }
     }
 
@@ -143,4 +148,15 @@ enum ChatDraftStore {
     }
 
     static func text(chat: String) -> String? { load(chat: chat)?.text }
+}
+
+/// Черновик появился, изменился или пропал — список чатов сразу перерисовывает строку «Черновик: …»
+/// (сами черновики лежат в UserDefaults, и без сигнала список узнавал о них только при следующем обновлении с сервера)
+final class ChatDraftSignal: ObservableObject {
+    static let shared = ChatDraftSignal()
+    @Published private(set) var version = 0
+
+    static func bump() {
+        if Thread.isMainThread { shared.version += 1 } else { DispatchQueue.main.async { shared.version += 1 } }
+    }
 }

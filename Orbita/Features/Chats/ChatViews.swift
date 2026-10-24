@@ -54,6 +54,7 @@ struct ChatsListView: View {
     @State private var query = ""
     @State private var folder: ChatFolder = .all
     @ObservedObject private var prefs = ChatListPrefs.shared
+    @ObservedObject private var drafts = ChatDraftSignal.shared          // «Черновик: …» в строках — сразу
     @ObservedObject private var net = NetworkState.shared
     @State private var openChat: ChatRoute?
     @ObservedObject private var push = PushManager.shared
@@ -624,6 +625,8 @@ struct ChatScreen: View {
     @State private var searchHits: [ChatMessage] = []      // от новых к старым
     @State private var searchPos = 0
     @State private var searchCurrent: String?
+    @State private var searchFilter: ChatSearchFilter = .all     // что ищем: всё / фото и видео / ссылки / голосовые
+    @State private var searchFrom: String?                        // от кого: "me" — мои, id — собеседник или участник группы
     @State private var showSearchList = false
     @FocusState private var searchFocused: Bool
     @State private var scheduled: [ScheduledItem] = []
@@ -657,6 +660,7 @@ struct ChatScreen: View {
     @State private var selecting = false
     @State private var selected: Set<String> = []
     @State private var infoMessage: ChatMessage?
+    @State private var translateText: String?               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
     @State private var showPollCreate = false
     @State private var postLinkID: String?
@@ -738,6 +742,7 @@ struct ChatScreen: View {
                     onForward: { forwardIDs = ForwardRoute(ids: [target.id]) },
                     onSelect: { selecting = true; selected = [target.id] },
                     onInfo: { infoMessage = target },
+                    onTranslate: { translateText = target.text },
                     sourceFrame: messageFrames.frames[target.id])
                     // в своём окне нет окружения экрана чата — передаём всё, что нужно пузырю сообщения
                     .environment(\.theme, theme)
@@ -754,13 +759,19 @@ struct ChatScreen: View {
         }
         .overlay {
             if let fx = model.reactionFX {
+                // чужая реакция на сообщение, которого сейчас не видно, — без эффекта (только чип под сообщением)
+                if !fx.incoming || messageVisible(fx.messageID) {
                 ReactionEffectLayer(fx: fx, origin: { reactionOrigin(fx) }) { if model.reactionFX?.id == fx.id { model.reactionFX = nil } }
                     .id(fx.id)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                } else {
+                    Color.clear.onAppear { if model.reactionFX?.id == fx.id { model.reactionFX = nil } }
+                }
             }
         }
         .onPreferenceChange(MessageFrameKey.self) { messageFrames.frames = $0 }
+        .modifier(TranslationSheet(text: $translateText))
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .preferredColorScheme(theme.dark ? .dark : .light)
@@ -773,6 +784,16 @@ struct ChatScreen: View {
         .onAppear {
             session.chats.chatScreenAppeared(route.peer.id)
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
+            // дослушали голосовое — сразу играет следующее голосовое этого чата
+            VoicePlayer.shared.nextProvider = { [weak model = self.model] id in
+                guard let model else { return nil }
+                let voices = model.messages.flatMap { m in
+                    m.attachments.filter { $0.kind == .voice && $0.mediaID != nil }
+                }
+                guard let i = voices.firstIndex(where: { ($0.mediaID ?? $0.id) == id }), i + 1 < voices.count else { return nil }
+                let next = voices[i + 1]
+                return (id: next.mediaID ?? next.id, mediaID: next.mediaID ?? "", duration: next.duration)
+            }
         }
         .onDisappear { session.chats.chatScreenDisappeared() }
         .task {
@@ -907,6 +928,8 @@ struct ChatScreen: View {
             .presentationDetents([.medium, .large])
         }
         .onChange(of: searchQuery) { _, _ in searchCurrent = nil; recomputeSearch() }
+        .onChange(of: searchFilter) { _, _ in searchCurrent = nil; recomputeSearch() }
+        .onChange(of: searchFrom) { _, _ in searchCurrent = nil; recomputeSearch() }
         .onChange(of: model.messages.count) { _, _ in if searching { recomputeSearch() } }
         .confirmationDialog(s.deleteMessage, isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible, presenting: deleting) { message in
@@ -935,14 +958,37 @@ struct ChatScreen: View {
         searchHits = []
         searchCurrent = nil
         searchPos = 0
+        searchFilter = .all
+        searchFrom = nil
         model.historyLimit = 100
+    }
+
+    /// Выбран фильтр — ищем и без слова (например, просто все голосовые)
+    private var searchFiltered: Bool { searchFilter != .all || searchFrom != nil }
+
+    private func matchesFilter(_ m: ChatMessage) -> Bool {
+        switch searchFilter {
+        case .all: break
+        case .media: guard m.attachments.contains(where: { $0.kind == .photo || $0.kind == .video }) else { return false }
+        case .links: guard m.text.range(of: "https?://|www\\.", options: [.regularExpression, .caseInsensitive]) != nil else { return false }
+        case .voice: guard m.attachments.contains(where: { $0.kind == .voice || $0.kind == .circle }) else { return false }
+        }
+        if let from = searchFrom {
+            if from == "me" { return m.mine }
+            return !m.mine && (m.sender?.id ?? model.peer.id) == from
+        }
+        return true
     }
 
     private func recomputeSearch() {
         let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { searchHits = []; searchPos = 0; searchCurrent = nil; return }
-        let hits = model.messages.filter { !$0.text.hasPrefix("\u{200B}call:") && $0.summary.lowercased().contains(q) }
-            .sorted { $0.createdAt > $1.createdAt }
+        guard !q.isEmpty || searchFiltered else { searchHits = []; searchPos = 0; searchCurrent = nil; return }
+        let hits = model.messages.filter { m in
+            guard !m.text.hasPrefix("\u{200B}call:"), m.system == nil else { return false }
+            if !q.isEmpty && !m.summary.lowercased().contains(q) { return false }
+            return matchesFilter(m)
+        }
+        .sorted { $0.createdAt > $1.createdAt }
         searchHits = hits
         if let keep = searchCurrent, let i = hits.firstIndex(where: { $0.id == keep }) {
             searchPos = i
@@ -961,6 +1007,7 @@ struct ChatScreen: View {
     }
 
     private var searchBar: some View {
+        VStack(spacing: 8) {
         HStack(spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
@@ -981,7 +1028,64 @@ struct ChatScreen: View {
                 .foregroundStyle(theme.accentColor)
         }
         .padding(.horizontal, 12)
+            searchFilters
+        }
         .transition(.opacity)
+    }
+
+    /// Фильтры поиска: что и от кого
+    private var searchFilters: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                filterChip(s.t("Всё", "All"), icon: nil, on: searchFilter == .all) { searchFilter = .all }
+                filterChip(s.t("Фото и видео", "Media"), icon: "photo", on: searchFilter == .media) { searchFilter = .media }
+                filterChip(s.t("Ссылки", "Links"), icon: "link", on: searchFilter == .links) { searchFilter = .links }
+                filterChip(s.t("Голосовые", "Voice"), icon: "waveform", on: searchFilter == .voice) { searchFilter = .voice }
+                Menu {
+                    Button(s.t("От всех", "From anyone")) { searchFrom = nil }
+                    Button(s.t("Мои", "Mine")) { searchFrom = "me" }
+                    ForEach(searchSenders, id: \.id) { p in
+                        Button(p.name) { searchFrom = p.id }
+                    }
+                } label: {
+                    chipLabel(searchFromTitle, icon: "person", on: searchFrom != nil)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .animation(.easeOut(duration: 0.18), value: searchFilter)
+    }
+
+    /// Собеседник или участники группы, которые писали в загруженной части переписки
+    private var searchSenders: [ChatPeer] {
+        guard model.peer.isGroup else { return [model.peer] }
+        var seen = Set<String>(), out: [ChatPeer] = []
+        for m in model.messages.reversed() where !m.mine {
+            if let p = m.sender, !seen.contains(p.id) { seen.insert(p.id); out.append(p) }
+        }
+        return out
+    }
+
+    private var searchFromTitle: String {
+        guard let from = searchFrom else { return s.t("От кого", "From") }
+        if from == "me" { return s.t("Мои", "Mine") }
+        return searchSenders.first { $0.id == from }?.name ?? s.t("От кого", "From")
+    }
+
+    private func filterChip(_ title: String, icon: String?, on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button { Haptics.select(); action() } label: { chipLabel(title, icon: icon, on: on) }
+            .buttonStyle(.plain)
+    }
+
+    private func chipLabel(_ title: String, icon: String?, on: Bool) -> some View {
+        HStack(spacing: 5) {
+            if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)) }
+            Text(title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+        }
+        .foregroundStyle(on ? Color.white : theme.text)
+        .padding(.horizontal, 12).frame(height: 32)
+        .background(on ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+        .overlay(Capsule().stroke(theme.stroke, lineWidth: on ? 0 : 0.5))
     }
 
     private var searchNavBar: some View {
@@ -993,7 +1097,7 @@ struct ChatScreen: View {
             }
             .buttonStyle(.plain).disabled(searchHits.isEmpty).opacity(searchHits.isEmpty ? 0.4 : 1)
             Spacer()
-            Text(!q ? s.t("Введите слово для поиска", "Type to search")
+            Text(!q && !searchFiltered ? s.t("Введите слово или выберите фильтр", "Type or pick a filter")
                  : searchHits.isEmpty ? s.t("Ничего не найдено", "Nothing found")
                  : s.t("\(searchPos + 1) из \(searchHits.count)", "\(searchPos + 1) of \(searchHits.count)"))
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
@@ -1580,6 +1684,12 @@ struct ChatScreen: View {
     }
 
     /// Где на экране сообщение, к которому поставили реакцию: эффект вылетает рядом с её значком (у нижнего края пузыря)
+    /// Сообщение сейчас на экране (по последнему замеру его рамки)
+    private func messageVisible(_ id: String) -> Bool {
+        guard let f = messageFrames.frames[id] else { return false }
+        return f.maxY > 80 && f.minY < UIScreen.main.bounds.height - 80
+    }
+
     private func reactionOrigin(_ fx: ReactionFX) -> CGPoint? {
         // сам значок реакции, если он уже нарисован; иначе нижний край сообщения
         if let chip = messageFrames.frames[fx.messageID + "|" + fx.emoji] {
@@ -2199,3 +2309,6 @@ struct ChatHeaderLayout: Layout {
 final class ScrollAnchorBox {
     var id: String?
 }
+
+/// Фильтр поиска по переписке
+enum ChatSearchFilter { case all, media, links, voice }

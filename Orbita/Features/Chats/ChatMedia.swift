@@ -142,6 +142,29 @@ final class VoicePlayer: ObservableObject {
     /// Музыкальный плеер гасится, когда начинается голосовое
     var onStart: (() -> Void)?
 
+    /// Открытый чат подсказывает, какое голосовое идёт следом: дослушали одно — сразу играет следующее (как в Telegram)
+    var nextProvider: ((String) -> (id: String, mediaID: String, duration: Double)?)?
+
+    /// Где остановились в каждом голосовом: переключились на другое и вернулись — продолжаем с того же места
+    private var positions: [String: Double] = {
+        (UserDefaults.standard.dictionary(forKey: "voice_positions") as? [String: Double]) ?? [:]
+    }()
+
+    private func remember(_ id: String, _ fraction: Double) {
+        if fraction > 0.02 && fraction < 0.97 { positions[id] = fraction } else { positions[id] = nil }
+        if positions.count > 200 { positions = Dictionary(uniqueKeysWithValues: positions.suffix(150).map { ($0.key, $0.value) }) }
+        UserDefaults.standard.set(positions, forKey: "voice_positions")
+    }
+
+    /// Дослушали до конца: следующее голосовое из чата, если оно есть
+    private func finished(_ id: String) {
+        positions[id] = nil
+        UserDefaults.standard.set(positions, forKey: "voice_positions")
+        let next = nextProvider?(id)
+        stop(save: false)
+        if let next { toggle(id: next.id, mediaID: next.mediaID, duration: next.duration) }
+    }
+
     func resume() { player?.rate = rate; isPlaying = player != nil }
     func pause() { player?.pause(); isPlaying = false }
     func seek(toFraction f: Double) {
@@ -170,6 +193,10 @@ final class VoicePlayer: ObservableObject {
         currentID = id
         total = max(duration, 0.1)
         progress = 0
+        if let saved = positions[id] {                          // продолжаем с места, где остановились
+            progress = saved
+            p.seek(to: CMTime(seconds: saved * total, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
@@ -178,7 +205,7 @@ final class VoicePlayer: ObservableObject {
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
                                                              queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stop() }
+            Task { @MainActor in self?.finished(id) }
         }
         p.rate = rate
         isPlaying = true
@@ -191,7 +218,10 @@ final class VoicePlayer: ObservableObject {
         if isPlaying { player?.rate = rate }
     }
 
-    func stop() {
+    func stop() { stop(save: true) }
+
+    private func stop(save: Bool) {
+        if save, let id = currentID { remember(id, progress) }
         if let observer, let player { player.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         observer = nil
