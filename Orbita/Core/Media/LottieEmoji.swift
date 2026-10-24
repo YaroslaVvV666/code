@@ -323,7 +323,7 @@ private struct EmojiFramePlayer: UIViewRepresentable {
 /// Свои анимированные эмодзи (Lottie JSON). Чужие скачанные анимации убраны: пока своих нет, везде показывается обычный эмодзи.
 /// Когда появятся свои — кладём файлы `<код>.json` в папку CustomEmoji внутри приложения (код — юникод эмодзи, как «1f525»),
 /// и они начнут играть сами, без правок экранов.
-/// Сейчас есть: 👍 (1f44d.json), ❤️ (2764_fe0f.json), 🔥 (1f525.json), 🖕 (1f595.json), 🤣 (1f923.json), 🤡 (1f921.json), 🍾 (1f37e.json), 🏆 (1f3c6.json), 🚀 (1f680.json), 🌹 (1f339.json), 💐 (1f490.json), 💩 (1f4a9.json), 🧑‍💻 (1f9d1_200d_1f4bb.json), 😔 (1f614.json), 😀 (1f600.json), 😃 (1f603.json), 😄 (1f604.json), 😁 (1f601.json), 😆 (1f606.json), 🥹 (1f979.json), 😅 (1f605.json), 😂 (1f602.json). Файл должен входить в Copy Bundle Resources цели Focus/Orbita.
+/// Сейчас есть: 👍 (1f44d.json), ❤️ (2764_fe0f.json), 🔥 (1f525.json), 🖕 (1f595.json), 🤣 (1f923.json), 🤡 (1f921.json), 🍾 (1f37e.json), 🏆 (1f3c6.json), 🚀 (1f680.json), 🌹 (1f339.json), 💐 (1f490.json), 💩 (1f4a9.json), 🧑‍💻 (1f9d1_200d_1f4bb.json), 😔 (1f614.json), 😀 (1f600.json), 😃 (1f603.json), 😄 (1f604.json), 😁 (1f601.json), 😆 (1f606.json), 🥹 (1f979.json), 😅 (1f605.json), 😂 (1f602.json), 🥲 (1f972.json). Файл должен входить в Copy Bundle Resources цели Focus/Orbita.
 actor LottieEmojiStore {
     static let shared = LottieEmojiStore()
 
@@ -614,5 +614,5 @@ enum AnimatedEmoji {
     static let all = ["\u{2764}\u{FE0F}", "\u{1F44D}", "\u{1F525}", "\u{1F923}", "\u{1F4A9}", "\u{1F921}", "\u{1F37E}",
                       "\u{1F3C6}", "\u{1F680}", "\u{1F339}", "\u{1F490}", "\u{1F595}", "\u{1F9D1}\u{200D}\u{1F4BB}",
                       "\u{1F614}", "\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F606}",
-                      "\u{1F979}", "\u{1F605}", "\u{1F602}"]
+                      "\u{1F979}", "\u{1F605}", "\u{1F602}", "\u{1F972}"]
 }
