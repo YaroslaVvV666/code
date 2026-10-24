@@ -64,11 +64,13 @@ struct MessageActionOverlay: View {
                 }
             }
             .padding(.horizontal, 12)
-            .scaleEffect(appear ? 1 : 0.9, anchor: message.mine ? .bottomTrailing : .bottomLeading)
-            .opacity(appear ? 1 : 0)
+            // меню видно с первого же кадра, как в Telegram: без проявления из прозрачности (если главный поток
+            // в первые кадры чем-то занят, проявление «застревало» и полсекунды был виден только размытый экран);
+            // анимируется лишь лёгкий масштаб
+            .scaleEffect(appear ? 1 : 0.94, anchor: message.mine ? .bottomTrailing : .bottomLeading)
         }
         .onAppear {
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { appear = true }
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) { appear = true }
         }
     }
 
@@ -179,27 +181,21 @@ struct MessageActionOverlay: View {
     }
 }
 
-/// Эмодзи в ряду реакций: анимация стартует сразу при открытии меню. Первое эмодзи играет с первого кадра,
-/// остальные — с разницей в один кадр (~16 мс), это глазом не видно, но Lottie-сцены создаются не все
-/// в одном кадре вместе с меню, а по одной. Вью не пересоздаётся — тот же LottieEmojiView переключается playing false → true
+/// Эмодзи в ряду реакций: анимация стартует сразу при открытии меню. Первый кадр меню рисуется только
+/// с готовыми картинками (без Lottie), чтобы меню появилось мгновенно; дальше эмодзи запускаются по одному
+/// на кадр (~16 мс) — глазом это не видно, а Lottie-сцены не строятся все разом.
+/// Вью не пересоздаётся — тот же LottieEmojiView переключается playing false → true
 private struct ReactionBarEmoji: View {
     let emoji: String
     let index: Int
-    @State private var live: Bool
+    @State private var live = false
 
     private static let step: Double = 0.016
-
-    init(emoji: String, index: Int) {
-        self.emoji = emoji
-        self.index = index
-        _live = State(initialValue: index == 0)
-    }
 
     var body: some View {
         LottieEmojiView(emoji: emoji, size: 34, playing: live, idleAtStart: true)      // один круг при появлении и стоп
             .task {
-                guard !live else { return }
-                try? await Task.sleep(nanoseconds: UInt64(Double(index) * Self.step * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(Double(index + 1) * Self.step * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 live = true
             }
