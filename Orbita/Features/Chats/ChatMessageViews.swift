@@ -85,6 +85,7 @@ struct MessageRow: View {
     var onPollChanged: ((PollInfo) -> Void)? = nil
     var onOpenComments: (() -> Void)? = nil          // канал с обсуждением: «Комментарии»
     var onCallBack: ((Bool) -> Void)? = nil          // нажали на запись о звонке — перезвонить (true — видео)
+    var onOpenStickerPack: ((String) -> Void)? = nil  // нажали на свой стикер — шторка набора «Добавить»
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -281,8 +282,15 @@ struct MessageRow: View {
     private var core: some View {
         if let sticker = stickerOnly {
             ZStack(alignment: .bottomTrailing) {
-                StickerImage(sticker: Sticker(id: sticker.sticker ?? "", emoji: ""), size: 168)
+                StickerImage(sticker: sticker.asSticker, size: 168)
                 MessageMeta(message: message, color: .white, onMedia: true).padding(6)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // свой стикер — показать набор и дать добавить его себе
+                guard interactive, !blocked, let pack = sticker.stickerPack else { return }
+                Haptics.impact(.light)
+                onOpenStickerPack?(pack)
             }
         } else if let circle = circleOnly {
             CircleVideoBubble(attachment: circle, message: message)
@@ -447,7 +455,7 @@ struct MessageRow: View {
                             FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onOpenFile(a) } }
                         }
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
-                    default: StickerImage(sticker: Sticker(id: a.sticker ?? "", emoji: ""), size: 120)
+                    default: StickerImage(sticker: a.asSticker, size: 120)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -685,11 +693,19 @@ struct MediaBlock: View {
             } else {
                 Color.gray.opacity(0.3)
             }
-            // автовоспроизведение без звука, как в Telegram (настройка «Автовоспроизведение видео»)
-            if a.kind == .video, autoplay, !pending, a.size <= 40 * 1024 * 1024, let video = a.mediaItem {
+            // автовоспроизведение без звука, как в Telegram (настройка «Автовоспроизведение видео»); GIF крутится всегда
+            if a.kind == .video, autoplay || a.gif, !pending, a.gif || a.size <= 40 * 1024 * 1024, let video = a.mediaItem {
                 InlineVideo(item: video).allowsHitTesting(false)
             }
-            if a.kind == .video {
+            if a.kind == .video && a.gif {
+                Text("GIF")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.black.opacity(0.45), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(6)
+            } else if a.kind == .video {
                 if !(autoplay && !pending) {
                     Image(systemName: "play.fill")
                         .font(.system(size: 18, weight: .bold))
@@ -1290,6 +1306,92 @@ struct MediaCacheBadge: View {
                 .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Color.black.opacity(0.45)))
+        }
+    }
+}
+
+extension ChatAttachment {
+    /// Стикер из вложения: встроенный — по id, свой — с файлом (картинка или анимированное видео)
+    var asSticker: Sticker {
+        Sticker(id: sticker ?? "", emoji: "", mediaID: mediaID, animated: (mime ?? "").hasPrefix("video"), packID: stickerPack)
+    }
+}
+
+/// Свой стикерпак: что внутри, «Добавить набор» / «Убрать набор»
+struct StickerPackSheet: View {
+    let packID: String
+    let repo: MessengerRepository
+    var onChanged: () -> Void = {}
+    var onSend: ((Sticker) -> Void)? = nil
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var pack: CustomStickerPack?
+    @State private var failed = false
+    @State private var busy = false
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            if let pack {
+                Text(pack.pack.title).font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text).padding(.top, 20)
+                Text(s.t("\(pack.pack.stickers.count) стикеров", "\(pack.pack.stickers.count) stickers"))
+                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                        ForEach(pack.pack.stickers) { st in
+                            Button {
+                                guard let onSend else { return }
+                                Haptics.impact(.light); onSend(st); dismiss()
+                            } label: {
+                                StickerImage(sticker: st, size: 74).frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                }
+                Button { toggle() } label: {
+                    Group {
+                        if busy { ProgressView().tint(.white) }
+                        else {
+                            Text(pack.installed ? s.t("Убрать набор", "Remove pack") : s.t("Добавить набор", "Add pack"))
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(pack.installed ? theme.danger : Color.white)
+                    .frame(maxWidth: .infinity).frame(height: 50)
+                    .background(pack.installed ? AnyShapeStyle(theme.danger.opacity(0.12)) : AnyShapeStyle(theme.accent), in: Capsule())
+                }
+                .buttonStyle(PressStyle()).disabled(busy)
+                .padding(.horizontal, 16).padding(.bottom, 12)
+                .animation(.easeOut(duration: 0.2), value: pack.installed)
+            } else if failed {
+                Text(s.t("Не удалось загрузить набор", "Couldn't load the pack"))
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary).frame(maxHeight: .infinity)
+            } else {
+                ProgressView().frame(maxHeight: .infinity)
+            }
+        }
+        .task {
+            do { pack = try await repo.stickerPack(id: packID) } catch { failed = true }
+        }
+    }
+
+    private func toggle() {
+        guard let current = pack else { return }
+        busy = true
+        Task {
+            if let updated = try? await repo.setStickerPack(id: packID, installed: !current.installed) {
+                pack = updated
+                Haptics.notify(.success)
+                onChanged()
+            } else {
+                Haptics.notify(.error)
+            }
+            busy = false
         }
     }
 }

@@ -330,6 +330,14 @@ ensure_column("posts", "wall_only", "wall_only INTEGER NOT NULL DEFAULT 0")     
 # «Не интересует»: такой пост человеку больше никогда не рекомендуется (открыть можно, только если пришлют или найдёт сам)
 DB.execute("CREATE TABLE IF NOT EXISTS hidden_posts(user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(user_id, post_id))")
+# Свои стикеры (как в Telegram): наборы создаются через бота @stickers, стикер — картинка или короткое видео (анимированный)
+DB.execute("CREATE TABLE IF NOT EXISTS user_sticker_packs(id TEXT PRIMARY KEY, owner TEXT NOT NULL, title TEXT NOT NULL, "
+           "created_at REAL NOT NULL)")
+DB.execute("CREATE TABLE IF NOT EXISTS user_stickers(id TEXT PRIMARY KEY, pack_id TEXT NOT NULL, media_id TEXT NOT NULL, "
+           "emoji TEXT NOT NULL, position INTEGER NOT NULL, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_user_stickers_pack ON user_stickers(pack_id, position)")
+DB.execute("CREATE TABLE IF NOT EXISTS sticker_installs(user_id TEXT NOT NULL, pack_id TEXT NOT NULL, created_at REAL NOT NULL, "
+           "PRIMARY KEY(user_id, pack_id))")
 # сколько раз человек возвращался к посту (в разные заходы) — пересмотр — сильный плюс
 DB.execute("CREATE TABLE IF NOT EXISTS user_post_views(user_id TEXT NOT NULL, post_id TEXT NOT NULL, n INTEGER NOT NULL, "
            "last REAL NOT NULL, PRIMARY KEY(user_id, post_id))")
@@ -3327,7 +3335,237 @@ load_stickers()
 
 @route("GET", r"/v1/stickers")
 def list_stickers(req, me):
-    req.send_json(200, {"packs": STICKER_PACKS})
+    """Встроенные наборы + свои и добавленные (в порядке добавления)"""
+    rows = q("SELECT p.* FROM sticker_installs i JOIN user_sticker_packs p ON p.id = i.pack_id "
+             "WHERE i.user_id = ? ORDER BY i.created_at DESC", (me["id"],))
+    mine = [j for j in (user_pack_json(r, me["id"]) for r in rows) if j["stickers"]]
+    req.send_json(200, {"packs": mine + STICKER_PACKS})
+
+
+# ---------- свои стикеры ----------
+
+STICKER_BOT_ID = "5717c4e5-0000-4000-8000-00000000057c"      # бот @stickers — обычный пользователь, отвечает сервер
+STICKER_BOT_NAME = "stickers"
+MAX_PACK_STICKERS = 120
+MAX_USER_PACKS = 50
+MAX_ANIMATED_SECONDS = 10
+
+
+def user_sticker_attachment(sid):
+    """Свой стикер во вложении: id, набор, файл (картинка или видео) и эмодзи"""
+    st = q1("SELECT * FROM user_stickers WHERE id = ?", (sid,))
+    if not st:
+        return None
+    m = q1("SELECT * FROM media WHERE id = ?", (st["media_id"],))
+    if not m:
+        return None
+    return {"type": "sticker", "sticker": "u:" + st["id"], "pack": "u:" + st["pack_id"], "emoji": st["emoji"],
+            "media_id": m["id"], "mime": m["mime"], "width": m["width"] or 0, "height": m["height"] or 0,
+            "duration": m["duration"] or 0}
+
+
+def user_pack_json(p, viewer):
+    items = []
+    for st in q("SELECT s.*, m.mime, m.width, m.height FROM user_stickers s JOIN media m ON m.id = s.media_id "
+                "WHERE s.pack_id = ? ORDER BY s.position", (p["id"],)):
+        items.append({"id": "u:" + st["id"], "emoji": st["emoji"], "media_id": st["media_id"], "mime": st["mime"],
+                      "animated": (st["mime"] or "").startswith("video"), "width": st["width"] or 0, "height": st["height"] or 0})
+    return {"id": "u:" + p["id"], "title": p["title"], "icon": items[0]["id"] if items else "", "stickers": items,
+            "mine": p["owner"] == viewer, "custom": True,
+            "installed": q1("SELECT 1 FROM sticker_installs WHERE user_id = ? AND pack_id = ?", (viewer, p["id"])) is not None}
+
+
+@route("GET", r"/v1/stickers/packs/u:([a-f0-9]+)")
+def sticker_pack(req, me, pid):
+    p = q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,))
+    if not p:
+        raise ApiError(404, "not_found")
+    req.send_json(200, user_pack_json(p, me["id"]))
+
+
+@route("PUT", r"/v1/stickers/packs/u:([a-f0-9]+)/install")
+def sticker_pack_install(req, me, pid):
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ?", (pid,)):
+        raise ApiError(404, "not_found")
+    run("INSERT OR IGNORE INTO sticker_installs(user_id, pack_id, created_at) VALUES (?,?,?)", (me["id"], pid, time.time()))
+    req.send_json(200, user_pack_json(q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,)), me["id"]))
+
+
+@route("DELETE", r"/v1/stickers/packs/u:([a-f0-9]+)/install")
+def sticker_pack_uninstall(req, me, pid):
+    run("DELETE FROM sticker_installs WHERE user_id = ? AND pack_id = ?", (me["id"], pid))
+    p = q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,))
+    req.send_json(200, user_pack_json(p, me["id"]) if p else {"ok": True})
+
+
+def ensure_sticker_bot():
+    """Бот @stickers: создаётся один раз при запуске сервера"""
+    if q1("SELECT 1 FROM users WHERE id = ?", (STICKER_BOT_ID,)):
+        return
+    idx = KR.blind_index(STICKER_BOT_NAME, "username")
+    taken = q1("SELECT 1 FROM users WHERE username_idx = ?", (idx,))
+    run("INSERT INTO users(id, token_hash, name_enc, username_idx, username_enc, created_at) VALUES (?,?,?,?,?,?)",
+        (STICKER_BOT_ID, secrets.token_hex(32), enc(STICKER_BOT_ID, "profile", COL["name"], STICKER_BOT_ID, "Стикеры"),
+         None if taken else idx,
+         None if taken else enc(STICKER_BOT_ID, "profile", COL["username"], STICKER_BOT_ID, STICKER_BOT_NAME), time.time()))
+    if not taken:
+        reindex_username(STICKER_BOT_ID, STICKER_BOT_NAME)
+
+
+BOT_STATE = {}          # кто что сейчас делает с ботом: {"step": ..., "pack": id, "media": id, "choices": [...]}
+
+BOT_HELP = ("Привет! Я помогу сделать свои стикеры — обычные и анимированные.\n\n"
+            "/newpack — создать новый набор\n"
+            "/addsticker — добавить стикеры в набор\n"
+            "/mypacks — мои наборы\n"
+            "/delpack — удалить набор\n"
+            "/cancel — отменить\n\n"
+            "Стикер — это картинка (лучше PNG с прозрачным фоном — пришлите его как файл, чтобы фон не пропал) "
+            "или короткое видео до %d секунд: оно станет анимированным стикером, без звука." % MAX_ANIMATED_SECONDS)
+
+
+def bot_say(uid, text, attachments=None):
+    deliver_dm(STICKER_BOT_ID, uid, text, [], attachments or [], None, silent=True)
+
+
+def bot_sticker_media(atts):
+    """Из вложений сообщения — подходящий файл для стикера: (media_id, ошибка)"""
+    for a in atts:
+        t, mime = a.get("type"), str(a.get("mime") or "")
+        if t == "photo" or (t == "file" and mime.startswith("image/")):
+            return a.get("media_id"), None
+        if t == "video":
+            if (a.get("duration") or 0) > MAX_ANIMATED_SECONDS + 0.5:
+                return None, "Видео длиннее %d секунд — пришлите покороче." % MAX_ANIMATED_SECONDS
+            return a.get("media_id"), None
+        if t == "sticker" and a.get("media_id"):
+            return a.get("media_id"), None
+    return None, None
+
+
+def bot_pack_list(uid):
+    return q("SELECT p.*, (SELECT COUNT(*) FROM user_stickers s WHERE s.pack_id = p.id) n FROM user_sticker_packs p "
+             "WHERE p.owner = ? ORDER BY p.created_at", (uid,))
+
+
+def first_emoji(text):
+    """Первый эмодзи из текста (с модификаторами и склейками) — или None, если это не эмодзи"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    out, i = "", 0
+    while i < len(text):
+        ch = text[i]
+        cp = ord(ch)
+        is_join = cp in (0x200D, 0xFE0F) or 0x1F3FB <= cp <= 0x1F3FF or 0xE0020 <= cp <= 0xE007F
+        if out and not is_join and text[i - 1] != "\u200d":
+            break
+        if not out and (ch.isalnum() or ch.isspace()):
+            return None
+        out += ch
+        i += 1
+    return out[:16] or None
+
+
+def sticker_bot_handle(uid, text, atts):
+    """Ответ бота @stickers на сообщение человека"""
+    text = (text or "").strip()
+    cmd = text.split()[0].lower() if text.startswith("/") else ""
+    st = BOT_STATE.get(uid, {})
+    step = st.get("step")
+
+    if cmd in ("/start", "/help"):
+        BOT_STATE.pop(uid, None)
+        return bot_say(uid, BOT_HELP)
+    if cmd == "/cancel":
+        BOT_STATE.pop(uid, None)
+        return bot_say(uid, "Отменено. Что дальше? /newpack — новый набор, /addsticker — добавить в набор.")
+    if cmd == "/newpack":
+        if q1("SELECT COUNT(*) c FROM user_sticker_packs WHERE owner = ?", (uid,))["c"] >= MAX_USER_PACKS:
+            return bot_say(uid, "У вас уже %d наборов — это максимум. Удалите ненужный: /delpack." % MAX_USER_PACKS)
+        BOT_STATE[uid] = {"step": "title"}
+        return bot_say(uid, "Как назовём новый набор? Пришлите название.")
+    if cmd in ("/addsticker", "/delpack", "/mypacks"):
+        packs = bot_pack_list(uid)
+        if not packs:
+            return bot_say(uid, "У вас пока нет наборов. Создайте первый: /newpack")
+        lines = "\n".join("%d. %s — %d шт." % (i + 1, p["title"], p["n"]) for i, p in enumerate(packs))
+        if cmd == "/mypacks":
+            BOT_STATE.pop(uid, None)
+            return bot_say(uid, "Ваши наборы:\n" + lines + "\n\nОни уже есть у вас в панели стикеров. "
+                                "Поделиться набором — просто отправьте другу стикер из него: он сможет добавить набор себе.")
+        BOT_STATE[uid] = {"step": "choose_add" if cmd == "/addsticker" else "choose_del", "choices": [p["id"] for p in packs]}
+        return bot_say(uid, ("В какой набор добавить? Пришлите номер:\n" if cmd == "/addsticker"
+                             else "Какой набор удалить? Пришлите номер:\n") + lines)
+    if cmd == "/done":
+        pid = st.get("pack")
+        BOT_STATE.pop(uid, None)
+        if not pid:
+            return bot_say(uid, BOT_HELP)
+        p = q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,))
+        n = q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (pid,))["c"]
+        return bot_say(uid, "Набор «%s» готов: %d шт. Он уже в вашей панели стикеров. "
+                            "Отправьте другу любой стикер из него — друг сможет добавить весь набор себе." % (p["title"] if p else "", n))
+    if cmd:
+        return bot_say(uid, "Не знаю такой команды.\n\n" + BOT_HELP)
+
+    if step == "title":
+        title = " ".join(text.split())[:64]
+        if not title:
+            return bot_say(uid, "Пришлите название набора текстом.")
+        pid = uuid.uuid4().hex
+        now = time.time()
+        run("INSERT INTO user_sticker_packs(id, owner, title, created_at) VALUES (?,?,?,?)", (pid, uid, title, now))
+        run("INSERT OR IGNORE INTO sticker_installs(user_id, pack_id, created_at) VALUES (?,?,?)", (uid, pid, now))
+        BOT_STATE[uid] = {"step": "sticker", "pack": pid}
+        return bot_say(uid, "Набор «%s» создан! Теперь пришлите первый стикер: картинку или видео до %d секунд."
+                       % (title, MAX_ANIMATED_SECONDS))
+    if step in ("choose_add", "choose_del"):
+        try:
+            pid = st["choices"][int(text) - 1]
+        except (ValueError, IndexError):
+            return bot_say(uid, "Пришлите номер набора из списка или /cancel.")
+        p = q1("SELECT * FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, uid))
+        if not p:
+            BOT_STATE.pop(uid, None)
+            return bot_say(uid, "Этого набора больше нет.")
+        if step == "choose_del":
+            run("DELETE FROM user_stickers WHERE pack_id = ?", (pid,))
+            run("DELETE FROM sticker_installs WHERE pack_id = ?", (pid,))
+            run("DELETE FROM user_sticker_packs WHERE id = ?", (pid,))
+            BOT_STATE.pop(uid, None)
+            return bot_say(uid, "Набор «%s» удалён." % p["title"])
+        BOT_STATE[uid] = {"step": "sticker", "pack": pid}
+        return bot_say(uid, "Присылайте стикеры для «%s»: картинку или видео до %d секунд. Закончить — /done."
+                       % (p["title"], MAX_ANIMATED_SECONDS))
+    if step == "sticker":
+        media, error = bot_sticker_media(atts)
+        if error:
+            return bot_say(uid, error)
+        if not media:
+            return bot_say(uid, "Пришлите картинку или видео до %d секунд. Закончить — /done." % MAX_ANIMATED_SECONDS)
+        if q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (st["pack"],))["c"] >= MAX_PACK_STICKERS:
+            return bot_say(uid, "В наборе уже %d стикеров — это максимум. /done — закончить." % MAX_PACK_STICKERS)
+        BOT_STATE[uid] = {"step": "emoji", "pack": st["pack"], "media": media}
+        return bot_say(uid, "Отлично! Какой эмодзи подходит этому стикеру? Пришлите один эмодзи.")
+    if step == "emoji":
+        emoji = first_emoji(text)
+        if not emoji:
+            return bot_say(uid, "Пришлите один эмодзи — например 😂 или ❤️.")
+        pid = st["pack"]
+        pos = q1("SELECT COALESCE(MAX(position), -1) + 1 p FROM user_stickers WHERE pack_id = ?", (pid,))["p"]
+        sid = uuid.uuid4().hex
+        run("INSERT INTO user_stickers(id, pack_id, media_id, emoji, position, created_at) VALUES (?,?,?,?,?,?)",
+            (sid, pid, st["media"], emoji, pos, time.time()))
+        BOT_STATE[uid] = {"step": "sticker", "pack": pid}
+        att = user_sticker_attachment(sid)
+        if att:
+            bot_say(uid, "", [att])
+        return bot_say(uid, "Стикер добавлен (%d шт. в наборе). Присылайте следующий или /done, чтобы закончить." % (pos + 1))
+    return bot_say(uid, BOT_HELP)
+
+
+ensure_sticker_bot()
 
 
 @route("GET", r"/stickers/([a-z0-9_]+)/([a-z0-9_]+)\.png", auth=False)
@@ -3360,6 +3598,10 @@ def clean_attachments(raw, uid):
             sid = str(a.get("sticker", ""))
             if sid in STICKER_IDS:
                 out.append({"type": "sticker", "sticker": sid})
+            elif sid.startswith("u:"):
+                item = user_sticker_attachment(sid[2:])
+                if item:
+                    out.append(item)
             continue
         kind = ATT_KINDS.get(t)
         if not kind:
@@ -3379,6 +3621,8 @@ def clean_attachments(raw, uid):
             cover = str(a.get("thumb") or "")
             if cover and q1("SELECT 1 FROM media WHERE id = ? AND owner = ? AND kind = 'image'", (cover, uid)):
                 item["thumb"] = cover
+        if t == "video" and a.get("gif") is True:
+            item["gif"] = True                       # видео без звука, отправлено как GIF — у получателя крутится по кругу
         if t == "voice" and isinstance(a.get("waveform"), list):
             item["waveform"] = [max(0, min(31, int(v))) for v in a["waveform"][:64] if isinstance(v, (int, float))]
         out.append(item)
@@ -3398,7 +3642,7 @@ def attachment_label(att):
     if t == "photo":
         return "Фото"
     if t == "video":
-        return "Видео"
+        return "GIF" if att.get("gif") else "Видео"
     if t == "circle":
         return "Видеосообщение"
     if t == "voice":
@@ -3406,7 +3650,7 @@ def attachment_label(att):
     if t == "audio":
         return att.get("title") or att.get("name") or "Музыка"
     if t == "sticker":
-        return "%s Стикер" % STICKER_IDS.get(att.get("sticker"), "")
+        return "%s Стикер" % (att.get("emoji") or STICKER_IDS.get(att.get("sticker"), ""))
     return att.get("name") or "Файл"
 
 
@@ -4092,6 +4336,8 @@ def send_message(req, me, peer):
         if st:
             story = {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"]}
     row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")))
+    if peer == STICKER_BOT_ID:
+        sticker_bot_handle(uid, text, attachments)              # бот @stickers отвечает сразу
     req.send_json(201, message_json(row, uid))
 
 

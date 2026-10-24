@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 // MARK: - Данные эмодзи
 
@@ -72,6 +73,19 @@ struct StickerImage: View {
     var size: CGFloat = 80
 
     var body: some View {
+        if let media = sticker.mediaID {
+            // свой стикер (через бота @stickers): картинка или анимированный — беззвучное видео по кругу
+            if sticker.animated {
+                StickerVideo(mediaID: media).frame(width: size, height: size)
+            } else {
+                RemoteImage(id: media, fill: false, maxPixel: max(256, size * 3), backdrop: .clear).frame(width: size, height: size)
+            }
+        } else {
+            builtIn
+        }
+    }
+
+    private var builtIn: some View {
         CachedImage(url: sticker.url, maxPixel: max(256, size * 3)) { image, failed in
             if let image {
                 Image(uiImage: image).resizable().scaledToFit()
@@ -83,6 +97,43 @@ struct StickerImage: View {
         }
         .frame(width: size, height: size)
     }
+}
+
+/// Анимированный стикер: короткое видео без звука, крутится по кругу, пока на экране
+struct StickerVideo: View {
+    let mediaID: String
+    @StateObject private var box = LoopPlayerBox()
+
+    var body: some View {
+        PlayerLayerView(player: box.player, gravity: .resizeAspect)
+            .allowsHitTesting(false)
+            .onAppear { box.start(mediaID) }
+            .onDisappear { box.stop() }
+    }
+}
+
+/// Плеер «по кругу» без звука — для анимированных стикеров и GIF
+@MainActor
+final class LoopPlayerBox: ObservableObject {
+    let player = AVQueuePlayer()
+    private var looper: AVPlayerLooper?
+    private var current: String?
+
+    init() {
+        player.isMuted = true
+        player.preventsDisplaySleepDuringVideoPlayback = false
+    }
+
+    func start(_ mediaID: String) {
+        if current != mediaID, let url = MediaFileCache.shared.playableURL(mediaID) {
+            current = mediaID
+            player.removeAllItems()
+            looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
+        }
+        player.play()
+    }
+
+    func stop() { player.pause() }
 }
 
 // MARK: - Панель вместо клавиатуры: эмодзи и стикеры
@@ -153,6 +204,21 @@ struct EmojiStickerPanel: View {
 
     // MARK: Стикеры
 
+    /// Свои стикеры делаются в боте @stickers (как в Telegram)
+    private var createStickersButton: some View {
+        Button {
+            Haptics.impact(.light)
+            PushManager.shared.openChat = ChatRoute(peer: StickerBot.peer)
+        } label: {
+            Label(s.t("Создать свои стикеры", "Create your stickers"), systemImage: "plus.circle.fill")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
+                .frame(maxWidth: .infinity).frame(height: 40)
+                .background(theme.accentColor.opacity(0.1), in: Capsule())
+        }
+        .buttonStyle(PressStyle())
+        .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
     private var stickerTab: some View {
         VStack(spacing: 0) {
             if packs.isEmpty {
@@ -195,7 +261,8 @@ struct EmojiStickerPanel: View {
                         }
                     }
                     .padding(.horizontal, 10)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 4)
+                    createStickersButton
                 }
             }
         }

@@ -195,6 +195,8 @@ struct ChatAttachment: Identifiable, Equatable {
     var title: String? = nil                // музыка: название и исполнитель из тегов
     var artist: String? = nil
     var localPreview: Data? = nil           // миниатюра, пока вложение загружается
+    var stickerPack: String? = nil          // свой стикер: из какого набора (нажатие — «Добавить набор»)
+    var gif = false                         // видео без звука, отправленное как GIF: крутится по кругу
 
     var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? name ?? "local") }
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
@@ -317,9 +319,26 @@ struct ChatThread {
 }
 
 struct Sticker: Identifiable, Equatable, Hashable {
-    let id: String                  // "пак/имя"
+    let id: String                  // "пак/имя" — встроенный, "u:<id>" — свой (созданный через бота @stickers)
     let emoji: String
+    var mediaID: String? = nil      // свой стикер: файл на сервере (картинка или видео)
+    var animated = false            // свой анимированный: видео без звука по кругу
+    var packID: String? = nil
     var url: URL? { ServerConfig.baseURL.flatMap { URL(string: $0.absoluteString + "/stickers/" + id + ".png") } }
+}
+
+/// Бот @stickers: создание своих стикерпаков (как в Telegram)
+enum StickerBot {
+    static let id = "5717c4e5-0000-4000-8000-00000000057c"
+    static var peer: ChatPeer { ChatPeer(id: id, name: "Стикеры", username: "stickers", avatarID: nil) }
+}
+
+/// Свой набор стикеров: что в нём и добавлен ли он у меня
+struct CustomStickerPack: Identifiable, Equatable {
+    let pack: StickerPack
+    var installed: Bool
+    let mine: Bool
+    var id: String { pack.id }
 }
 
 struct StickerPack: Identifiable, Equatable {
@@ -349,6 +368,7 @@ struct OutgoingAttachment {
     var title: String? = nil
     var artist: String? = nil
     var thumb: String? = nil
+    var gif = false
 
     var json: [String: Any] {
         var d: [String: Any] = ["type": type]
@@ -359,6 +379,7 @@ struct OutgoingAttachment {
         if let title { d["title"] = title }
         if let artist { d["artist"] = artist }
         if let thumb { d["thumb"] = thumb }
+        if gif { d["gif"] = true }
         return d
     }
 }
@@ -379,6 +400,8 @@ protocol MessengerRepository: Sendable {
     func typing(peerID: String, action: String) async
     func clear(peerID: String) async throws
     func stickers() async throws -> [StickerPack]
+    func stickerPack(id: String) async throws -> CustomStickerPack
+    func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack
 
     // контакты
     func contacts() async throws -> [Contact]
@@ -503,12 +526,15 @@ private struct AttachmentDTO: Decodable {
     let sticker: String?
     let title: String?
     let artist: String?
+    let pack: String?
+    let gif: Bool?
 
     var model: ChatAttachment? {
         guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
         return ChatAttachment(kind: kind, mediaID: mediaId, thumbID: thumb, width: width ?? 0, height: height ?? 0,
                               duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
-                              waveform: waveform ?? [], sticker: sticker, title: title, artist: artist)
+                              waveform: waveform ?? [], sticker: sticker, title: title, artist: artist,
+                              stickerPack: pack, gif: gif ?? false)
     }
 }
 
@@ -715,8 +741,17 @@ private struct ThreadDTO: Decodable {
 
 private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
 
-private struct StickerDTO: Decodable { let id: String; let emoji: String }
-private struct PackDTO: Decodable { let id: String; let title: String; let icon: String; let stickers: [StickerDTO] }
+private struct StickerDTO: Decodable {
+    let id: String; let emoji: String; let mediaId: String?; let animated: Bool?
+}
+private struct PackDTO: Decodable {
+    let id: String; let title: String; let icon: String; let stickers: [StickerDTO]
+    let mine: Bool?; let installed: Bool?
+    var model: StickerPack {
+        StickerPack(id: id, title: title, icon: icon,
+                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false, packID: id) })
+    }
+}
 private struct PackListDTO: Decodable { let packs: [PackDTO] }
 private struct UploadedDTO: Decodable { let id: String }
 
@@ -804,7 +839,7 @@ struct RemoteMessengerRepository: MessengerRepository {
         switch media {
         case .prepared(let prepared):
             let item = try await RemoteFeedRepository(api: api).uploadMedia(prepared)
-            return OutgoingAttachment(type: prepared.isVideo ? "video" : "photo", mediaID: item.id)
+            return OutgoingAttachment(type: prepared.isVideo ? "video" : "photo", mediaID: item.id, gif: prepared.gif && prepared.isVideo)
 
         case .circle(let url, let thumb, let duration):
             let thumbData = try await api.upload("/v1/media", query: ["kind": "image", "w": "480", "h": "480"],
@@ -865,10 +900,17 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func stickers() async throws -> [StickerPack] {
         let data = try await api.request("GET", "/v1/stickers")
-        return try decodeAPI(PackListDTO.self, from: data).packs.map { pack in
-            StickerPack(id: pack.id, title: pack.title, icon: pack.icon,
-                        stickers: pack.stickers.map { Sticker(id: $0.id, emoji: $0.emoji) })
-        }
+        return try decodeAPI(PackListDTO.self, from: data).packs.map(\.model)
+    }
+
+    func stickerPack(id: String) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request("GET", "/v1/stickers/packs/\(id)"))
+        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? false, mine: dto.mine ?? false)
+    }
+
+    func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request(installed ? "PUT" : "DELETE", "/v1/stickers/packs/\(id)/install"))
+        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? installed, mine: dto.mine ?? false)
     }
 
     // MARK: Контакты

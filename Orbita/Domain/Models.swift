@@ -451,6 +451,7 @@ struct PreparedMedia: Identifiable {
     let height: Int
     let duration: Double?
     let thumbnail: Data             // JPEG-миниатюра для предпросмотра и обложки
+    var gif = false                 // видео без звука, отправляется как GIF: у получателя крутится по кругу
 
     var isVideo: Bool { if case .video = source { return true }; return false }
 }

@@ -4,6 +4,7 @@ import PhotosUI
 import Photos
 import UniformTypeIdentifiers
 import UIKit
+import AVFoundation
 
 /// Строка ввода как в Telegram:
 /// [скрепка] [поле с форматированием и смайлом] [отправить | микрофон ↔ камера]
@@ -445,6 +446,12 @@ struct ChatInputBar: View {
                 .buttonStyle(PressStyle())
                 .disabled(busy)
                 .contextMenu {
+                    if model.editing == nil && drafts.contains(where: \.isVideo) {
+                        // как в Telegram: видео без звука уходит как GIF и у получателя крутится по кругу
+                        Button { sendAsGIF() } label: {
+                            Label(s.t("Отправить как GIF (без звука)", "Send as GIF (no sound)"), systemImage: "speaker.slash")
+                        }
+                    }
                     if model.editing == nil && model.peer.id != session.serverID {
                         Button { send(silent: true) } label: {
                             Label(s.t("Отправить без звука", "Send silently"), systemImage: "bell.slash")
@@ -798,6 +805,29 @@ struct ChatInputBar: View {
                 drafts = items
                 flash(s.t("Не удалось запланировать", "Couldn't schedule"))
             }
+        }
+    }
+
+    /// Видео из вложений — без звуковой дорожки и с пометкой GIF, остальное как есть; затем обычная отправка
+    private func sendAsGIF() {
+        let items = drafts
+        guard items.contains(where: \.isVideo) else { return }
+        preparing += 1
+        Task {
+            var converted: [DraftAttachment] = []
+            for item in items {
+                if case .media(let m) = item.source, case .video(let url) = m.source, let silent = await VideoSilencer.stripAudio(url) {
+                    var gif = PreparedMedia(source: .video(silent), width: m.width, height: m.height,
+                                            duration: m.duration, thumbnail: m.thumbnail)
+                    gif.gif = true
+                    converted.append(DraftAttachment(source: .media(gif)))
+                } else {
+                    converted.append(item)
+                }
+            }
+            drafts = converted
+            preparing -= 1
+            send()
         }
     }
 
@@ -1199,5 +1229,24 @@ private struct TrashBinShape: View {
             .frame(height: 12)
             .rotationEffect(.degrees(lid), anchor: UnitPoint(x: 0.05, y: 0.6))
         }
+    }
+}
+
+/// Убирает звуковую дорожку из видео (без перекодирования): так отправляется «GIF»
+enum VideoSilencer {
+    static func stripAudio(_ url: URL) async -> URL? {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let duration = try? await asset.load(.duration) else { return nil }
+        let composition = AVMutableComposition()
+        guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        do { try video.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero) } catch { return nil }
+        video.preferredTransform = (try? await track.load(.preferredTransform)) ?? .identity
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else { return nil }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("gif-\(UUID().uuidString).mp4")
+        export.outputURL = out
+        export.outputFileType = .mp4
+        await export.export()
+        return export.status == .completed ? out : nil
     }
 }

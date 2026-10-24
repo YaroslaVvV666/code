@@ -203,7 +203,7 @@ struct DraftAttachment: Identifiable {
         switch source {
         case .media(let m):
             return ChatAttachment(kind: m.isVideo ? .video : .photo, width: m.width, height: m.height,
-                                  duration: m.duration ?? 0, localPreview: m.thumbnail)
+                                  duration: m.duration ?? 0, localPreview: m.thumbnail, gif: m.gif)
         case .file(_, let name, let mime, let size):
             return ChatAttachment(kind: .file, size: size, name: name, mime: mime)
         case .audio(_, let name, let title, let artist, let duration, let cover, let size):
@@ -413,6 +413,11 @@ final class ChatModel: ObservableObject {
         packs = (try? await repo.stickers()) ?? []
     }
 
+    /// Добавили или убрали набор — панель стикеров обновляется
+    func reloadStickers() async {
+        if let fresh = try? await repo.stickers() { packs = fresh }
+    }
+
     /// Сообщаем собеседнику, что мы печатаем / записываем (раз в 3 секунды)
     func ping(_ action: String = "typing") {
         guard Date().timeIntervalSince(lastTypingPing) > 3 else { return }
@@ -513,7 +518,9 @@ final class ChatModel: ObservableObject {
     func sendSticker(_ sticker: Sticker) {
         Task {
             await deliver(text: "", entities: [], media: [.sticker(sticker.id)],
-                          placeholders: [ChatAttachment(kind: .sticker, sticker: sticker.id)])
+                          placeholders: [ChatAttachment(kind: .sticker, mediaID: sticker.mediaID,
+                                                        mime: sticker.animated ? "video/mp4" : nil, sticker: sticker.id,
+                                                        stickerPack: sticker.packID)])
         }
     }
 

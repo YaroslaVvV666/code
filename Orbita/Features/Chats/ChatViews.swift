@@ -660,7 +660,8 @@ struct ChatScreen: View {
     @State private var selecting = false
     @State private var selected: Set<String> = []
     @State private var infoMessage: ChatMessage?
-    @State private var translateText: String?               // «Перевести» из меню сообщения — системная шторка перевода
+    @State private var translateText: String?
+    @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
     @State private var showPollCreate = false
     @State private var postLinkID: String?
@@ -772,6 +773,14 @@ struct ChatScreen: View {
         }
         .onPreferenceChange(MessageFrameKey.self) { messageFrames.frames = $0 }
         .modifier(TranslationSheet(text: $translateText))
+        .sheet(item: $stickerPack) { route in
+            StickerPackSheet(packID: route.id, repo: session.messengerRepo,
+                             onChanged: { Task { await model.reloadStickers() } },
+                             onSend: model.canWrite ? { model.sendSticker($0) } : nil)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.medium, .large])
+                .presentationBackground(theme.sheet)
+        }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .preferredColorScheme(theme.dark ? .dark : .light)
@@ -1612,7 +1621,8 @@ struct ChatScreen: View {
                 onOpenPost: { openSharedPost($0) },
                 onOpenStory: openStory,
                 onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil,
-                onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) })
+                onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) },
+                onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) })
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
             .dustDissolve(active: model.dissolving.contains(m.id), color: m.mine ? theme.accentColor : Color.white.opacity(0.85))
             .background(GeometryReader { g in
@@ -2312,3 +2322,6 @@ final class ScrollAnchorBox {
 
 /// Фильтр поиска по переписке
 enum ChatSearchFilter { case all, media, links, voice }
+
+/// Какой свой стикерпак показать в шторке
+struct StickerPackRoute: Identifiable { let id: String }
