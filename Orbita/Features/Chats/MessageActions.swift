@@ -53,6 +53,7 @@ struct MessageActionOverlay: View {
     @State private var modDeleteAll = false
     @State private var modRestrict = false
     @State private var modBan = false
+    @State private var expanded = false           // ряд реакций раскрыт в панель со всеми эмодзи (кнопка справа, как в Telegram)
     @State private var reminding = false          // список «Напомнить: через час / вечером / завтра»
     @State private var closing = false           // меню уходит плавно, а не исчезает в один кадр
 
@@ -143,9 +144,9 @@ struct MessageActionOverlay: View {
 
                 Group {
                     reactionBar
-                        .opacity(confirming || reminding ? 0 : 1)
+                        .opacity(confirming || reminding || expanded ? 0 : 1)
                         .scaleEffect(confirming || reminding ? 0.9 : 1, anchor: message.mine ? .bottomTrailing : .bottomLeading)
-                        .allowsHitTesting(!confirming && !reminding)
+                        .allowsHitTesting(!confirming && !reminding && !expanded)
                         // ряд реакций «вырастает» из угла над сообщением
                         .scaleEffect(shown ? 1 : 0.4, anchor: message.mine ? .bottomTrailing : .bottomLeading)
                         .opacity(shown ? 1 : 0)
@@ -178,10 +179,23 @@ struct MessageActionOverlay: View {
                     }
                     // список действий раскрывается из угла под сообщением
                     .scaleEffect(shown ? 1 : 0.5, anchor: message.mine ? .topTrailing : .topLeading)
-                    .opacity(shown ? 1 : 0)
+                    .opacity(shown && !expanded ? 1 : 0)
+                    .allowsHitTesting(!expanded)
                     .animation(motion(0.05), value: shown)
                     .frame(width: screen.width - 24, alignment: side)
                     .offset(x: 12, y: y + messageH + Self.gap)
+
+                    // все реакции: панель раскрывается из ряда вниз, поверх сообщения и кнопок
+                    if expanded {
+                        let panelW = screen.width - 24
+                        let panelH = Self.panelHeight(width: panelW, limit: min(380, bottom - top))
+                        let panelTop = max(top, min(y - Self.gap - Self.barHeight, bottom - panelH))
+                        expandedPanel(width: panelW, height: panelH)
+                            .opacity(shown ? 1 : 0)
+                            .offset(x: 12, y: panelTop)
+                            .transition(.scale(scale: 0.3, anchor: message.mine ? .topTrailing : .topLeading).combined(with: .opacity))
+                            .zIndex(5)
+                    }
                 }
                 // сообщение (и всё вокруг) плавно встаёт на место, если пришлось сдвинуть
                 .animation(closing ? .easeOut(duration: Self.closeDuration) : .spring(response: 0.36, dampingFraction: 0.86), value: shown)
@@ -199,21 +213,80 @@ struct MessageActionOverlay: View {
         .onDisappear { MessageMenu.isOpen = false }
     }
 
+    /// Сколько эмодзи помещается в ряд вместе с кнопкой «раскрыть» справа
+    private static var visibleCount: Int { max(4, Int((UIScreen.main.bounds.width - 32 - 20 - 40) / 40)) }
+    private static var hasMore: Bool { emojis.count > visibleCount }
+
+    private func emojiButton(_ e: String, index: Int, size: CGFloat = 38) -> some View {
+        Button {
+            model.react(message, emoji: e)
+            dismiss()
+        } label: {
+            ReactionBarEmoji(emoji: e, index: index)
+                .frame(width: size, height: size + 2)
+                .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
     private var reactionBar: some View {
+        if Self.hasMore { compactBar } else { scrollingBar }
+    }
+
+    /// Как в Telegram: первые эмодзи и кнопка-стрелка, по ней — панель со всеми
+    private var compactBar: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(Self.emojis.prefix(Self.visibleCount).enumerated()), id: \.element) { index, e in
+                emojiButton(e, index: index)
+            }
+            Button {
+                Haptics.impact(.light)
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) { expanded = true }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 14, weight: .bold)).foregroundStyle(theme.textSecondary)
+                    .frame(width: 30, height: 30)
+                    .background(theme.textTertiary.opacity(0.2), in: Circle())
+                    .frame(width: 38, height: 40).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(height: 52)
+        .menuSurface(Capsule())
+    }
+
+    private static func panelColumns(_ width: CGFloat) -> Int { max(6, Int((width - 16) / 46)) }
+
+    static func panelHeight(width: CGFloat, limit: CGFloat) -> CGFloat {
+        let rows = (emojis.count + panelColumns(width) - 1) / panelColumns(width)
+        return min(limit, CGFloat(rows) * 52 + 20)
+    }
+
+    /// Все реакции сеткой; если их много — листается
+    private func expandedPanel(width: CGFloat, height: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        return ScrollView {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: Self.panelColumns(width)), spacing: 6) {
+                ForEach(Array(Self.emojis.enumerated()), id: \.element) { index, e in
+                    emojiButton(e, index: index, size: 44)
+                }
+            }
+            .padding(10)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: width, height: height)
+        .clipShape(shape)
+        .menuSurface(shape)
+    }
+
+    private var scrollingBar: some View {
         // эмодзи больше, чем влезает в ширину экрана, — полоска листается вбок
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 2) {
-                let selected = current
                 ForEach(Array(Self.emojis.enumerated()), id: \.element) { index, e in
-                    Button {
-                        model.react(message, emoji: e)
-                        dismiss()
-                    } label: {
-                        ReactionBarEmoji(emoji: e, index: index)
-                            .frame(width: 38, height: 40)
-                            .background(selected == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
-                    }
-                    .buttonStyle(.plain)
+                    emojiButton(e, index: index)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -446,7 +519,7 @@ private struct ReactionBarEmoji: View {
     private static let start: Double = 0.05
     private static let step: Double = 0.025
 
-    private var delay: Double { Self.start + Double(index) * Self.step }
+    private var delay: Double { Self.start + Double(min(index, 16)) * Self.step }      // в большой панели волна не затягивается
 
     var body: some View {
         LottieEmojiView(emoji: emoji, size: 34, playing: live, idleAtStart: true)      // один круг при появлении и стоп
