@@ -24,6 +24,15 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// Эмодзи-статус: рядом с ником появляется сразу, сервер — следом. Не получилось — возвращаем прежний
+    func setStatusEmoji(_ emoji: String) {
+        let old = profile?.statusEmoji
+        profile?.statusEmoji = emoji.isEmpty ? nil : emoji
+        Task {
+            if await update(ProfilePatch(statusEmoji: emoji)) != nil { profile?.statusEmoji = old }
+        }
+    }
+
     /// Без интернета фото профиля не меняются: показываем то, что сохранено, а правки — когда связь вернётся
     private var offline: Bool { NetworkState.shared.offline }
 

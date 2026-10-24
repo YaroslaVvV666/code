@@ -489,7 +489,7 @@ struct ProfileView: View {
         }
         .sheet(isPresented: $showStatus) {
             EmojiStatusSheet(current: store.profile?.statusEmoji) { emoji in
-                Task { _ = await store.update(ProfilePatch(statusEmoji: emoji)) }
+                store.setStatusEmoji(emoji)                       // рядом с ником — сразу, не дожидаясь сервера
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium])

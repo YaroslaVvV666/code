@@ -355,8 +355,9 @@ struct EmojiStatusSheet: View {
                                 .frame(maxWidth: .infinity, minHeight: 44)
                                 .background(e == current ? theme.accentColor.opacity(0.22) : Color.clear,
                                             in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .contentShape(Rectangle())          // нажимается вся клетка, а не только нарисованная часть эмодзи
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressStyle())
                     }
                 }
                 .padding(.horizontal, 8)
@@ -645,8 +646,11 @@ struct StatusEmoji: View {
     var body: some View {
         Group {
             if let animated {
-                // играет по кругу, пока профиль на экране; мелкий размер — готовыми кадрами, почти без нагрузки
+                // играет по кругу, пока профиль на экране; мелкий размер — готовыми кадрами, почти без нагрузки.
+                // Сменили статус — новое эмодзи сразу, без остатков старой анимации
                 LottieEmojiView(emoji: animated, size: size, loop: true)
+                    .id(animated)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
             } else {
                 Text(emoji).font(.system(size: size * 0.8))
             }
@@ -658,6 +662,7 @@ struct StatusEmoji: View {
             onTap()
         }
         .allowsHitTesting(onTap != nil)
+        .animation(.spring(response: 0.34, dampingFraction: 0.6), value: emoji)
     }
 }
 

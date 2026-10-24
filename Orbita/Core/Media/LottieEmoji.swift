@@ -266,6 +266,12 @@ final class EmojiFramePlayerView: UIView {
         link = nil
     }
 
+    /// Вью переиспользуется с другими кадрами (сменилось эмодзи) — сразу играем новые, а не старые
+    func update(_ clip: EmojiFrames.Clip, loop: Bool) {
+        guard clip !== self.clip || loop != self.loop else { return }
+        play(clip, loop: loop)
+    }
+
     fileprivate func tick() {
         guard let clip else { stop(); return }
         let raw = Int((CACurrentMediaTime() - start) * EmojiFrames.fps)
@@ -308,7 +314,7 @@ private struct EmojiFramePlayer: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: EmojiFramePlayerView, context: Context) {}
+    func updateUIView(_ uiView: EmojiFramePlayerView, context: Context) { uiView.update(clip, loop: loop) }
 
     static func dismantleUIView(_ uiView: EmojiFramePlayerView, coordinator: ()) { uiView.stop() }
 }
