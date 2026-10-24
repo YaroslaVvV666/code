@@ -552,7 +552,7 @@ struct StoryViewerScreen: View {
                         if isMine { glassButton("trash") { confirmDelete = true } }
                         glassButton("xmark") { dismiss() }
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.leading, 12).padding(.trailing, 6)          // у кнопок своя увеличенная зона нажатия
                 }
                 Spacer()
                 if let item, !item.caption.isEmpty {
@@ -604,6 +604,9 @@ struct StoryViewerScreen: View {
         Button(action: action) {
             Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 .frame(width: 38, height: 38).glassCircle()
+                // нажимается квадрат 50×50, а не только значок: стеклянный круг на iOS 26 не считается областью нажатия
+                .frame(width: 50, height: 50)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

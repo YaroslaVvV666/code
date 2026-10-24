@@ -244,6 +244,8 @@ struct ReelEditorView: View {
                 stage
                 if let tool { panel(tool).transition(.move(edge: .bottom).combined(with: .opacity)) }
             }
+            // верх считаем сами от выреза экрана: кнопки всегда ниже статус-бара и Dynamic Island, где касания перехватывает система
+            .ignoresSafeArea(edges: .top)
             .animation(.spring(response: 0.34, dampingFraction: 0.86), value: tool)
 
             if editing != nil {
@@ -329,13 +331,13 @@ struct ReelEditorView: View {
                 .background(LinearGradient(colors: [Color(red: 1.0, green: 0.25, blue: 0.42), Color(red: 0.90, green: 0.12, blue: 0.30)],
                                            startPoint: .topLeading, endPoint: .bottomTrailing), in: Capsule())
                 .shadow(color: Color(red: 0.99, green: 0.17, blue: 0.33).opacity(0.45), radius: 8, y: 3)
-                .contentShape(Capsule())
+                .padding(8).contentShape(Rectangle()).padding(-8)       // зона нажатия шире самой кнопки
             }
             .buttonStyle(.plain)
             .disabled(!model.ready || model.exporting)
             .opacity(model.ready ? 1 : 0.5)
         }
-        .padding(.horizontal, 16).padding(.top, 36).padding(.bottom, 12)
+        .padding(.horizontal, 16).padding(.top, TopInset.value + 26).padding(.bottom, 12)
     }
 
     // MARK: Сцена
