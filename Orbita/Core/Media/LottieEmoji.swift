@@ -236,6 +236,7 @@ final class EmojiFramePlayerView: UIView {
     private var start: CFTimeInterval = 0
     private var shown = -1
     private var decoding = false
+    private var loop = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -247,9 +248,10 @@ final class EmojiFramePlayerView: UIView {
 
     deinit { link?.invalidate() }
 
-    func play(_ clip: EmojiFrames.Clip) {
+    func play(_ clip: EmojiFrames.Clip, loop: Bool = false) {
         stop()
         self.clip = clip
+        self.loop = loop
         layer.contents = clip.image(at: 0)                 // первый кадр — сразу, совпадает с картинкой покоя
         shown = 0
         start = CACurrentMediaTime()
@@ -266,8 +268,9 @@ final class EmojiFramePlayerView: UIView {
 
     fileprivate func tick() {
         guard let clip else { stop(); return }
-        let index = Int((CACurrentMediaTime() - start) * EmojiFrames.fps)
-        if index >= clip.count - 1 {
+        let raw = Int((CACurrentMediaTime() - start) * EmojiFrames.fps)
+        let index = loop ? raw % max(clip.count, 1) : raw              // по кругу — снова с первого кадра
+        if !loop && index >= clip.count - 1 {
             // последний кадр и стоп
             if shown != clip.count - 1 { layer.contents = clip.image(at: clip.count - 1); shown = clip.count - 1 }
             stop()
@@ -297,10 +300,11 @@ private final class DisplayLinkProxy: NSObject {
 
 private struct EmojiFramePlayer: UIViewRepresentable {
     let clip: EmojiFrames.Clip
+    var loop = false
 
     func makeUIView(context: Context) -> EmojiFramePlayerView {
         let view = EmojiFramePlayerView(frame: .zero)
-        view.play(clip)
+        view.play(clip, loop: loop)
         return view
     }
 
@@ -439,9 +443,9 @@ struct LottieEmojiView: View {
     #if canImport(Lottie)
     @State private var animation: LottieAnimation?
     private var shown: LottieAnimation? { animation ?? LottieSyncCache.shared.get(emoji) }
-    /// Готовые кадры с диска — для мелких эмодзи, которые играют один круг
+    /// Готовые кадры с диска — для мелких эмодзи (один круг или по кругу, как эмодзи-статус)
     private var frameClip: EmojiFrames.Clip? {
-        loop || size > EmojiFrames.maxSize ? nil : EmojiFrames.shared.clip(emoji)
+        size > EmojiFrames.maxSize ? nil : EmojiFrames.shared.clip(emoji)
     }
     #endif
     @State private var loaded = false
@@ -482,7 +486,7 @@ struct LottieEmojiView: View {
         ZStack {
             #if canImport(Lottie)
             if run && !finished, let clip = frameClip {
-                EmojiFramePlayer(clip: clip)                             // готовые кадры, без Lottie
+                EmojiFramePlayer(clip: clip, loop: loop)                 // готовые кадры, без Lottie
             } else if run && !finished, let animation = shown {
                 let duration = max(0.1, animation.duration)
                 TimelineView(.animation(minimumInterval: Self.frameInterval)) { ctx in

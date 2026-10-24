@@ -630,40 +630,49 @@ struct ScreenSpace<Content: View>: View {
     }
 }
 
-// MARK: - Эмодзи-статус рядом с ником: по нажатию делает один круг анимации
+// MARK: - Эмодзи-статус рядом с ником: всегда анимирован (у всех, кто смотрит профиль)
 
 struct StatusEmoji: View {
     let emoji: String
     let size: CGFloat
-    @State private var run = 0
-    @State private var playing = false
+    /// Свой профиль: нажатие открывает выбор статуса. Чужой — нажатие ничего не делает
+    var onTap: (() -> Void)? = nil
 
     private var animated: String? {
         AnimatedEmoji.all.first { $0 == emoji || LottieEmojiStore.code($0, keepVariation: false) == LottieEmojiStore.code(emoji, keepVariation: false) }
     }
 
     var body: some View {
-        if let animated {
-            LottieEmojiView(emoji: animated, size: size, playing: playing, onFinish: { playing = false })
-                .id(run)                                              // новый запуск — анимация с начала
-                .contentShape(Rectangle())
-                .onTapGesture { Haptics.impact(.light); run += 1; playing = true }
-        } else {
-            Text(emoji).font(.system(size: size * 0.8))
+        Group {
+            if let animated {
+                // играет по кругу, пока профиль на экране; мелкий размер — готовыми кадрами, почти без нагрузки
+                LottieEmojiView(emoji: animated, size: size, loop: true)
+            } else {
+                Text(emoji).font(.system(size: size * 0.8))
+            }
         }
+        .contentShape(Rectangle().inset(by: -8))
+        .onTapGesture {
+            guard let onTap else { return }
+            Haptics.impact(.light)
+            onTap()
+        }
+        .allowsHitTesting(onTap != nil)
     }
 }
 
-/// Ник и эмодзи-статус: статус анимированный и отзывается на нажатие
+/// Ник и эмодзи-статус: статус всегда анимирован; на своём профиле по нажатию — смена статуса
 struct NameWithStatus: View {
     let name: String
     let emoji: String?
     let fontSize: CGFloat
+    /// Нажатие на эмодзи-статус (свой профиль — смена статуса)
+    var onEmojiTap: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 6) {
             Text(name)
-            if let emoji, !emoji.isEmpty { StatusEmoji(emoji: emoji, size: fontSize * 1.15) }
+            if let emoji, !emoji.isEmpty { StatusEmoji(emoji: emoji, size: fontSize * 1.15, onTap: onEmojiTap) }
         }
     }
 }

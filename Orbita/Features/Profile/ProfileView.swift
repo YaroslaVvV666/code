@@ -585,7 +585,8 @@ struct ProfileView: View {
 
             if pullStage == 0 {
                 // само имя рисует floatingName (поверх плашки); здесь — место под него
-                NameWithStatus(name: name.isEmpty ? s.you : name, emoji: store.profile?.statusEmoji, fontSize: 26)
+                NameWithStatus(name: name.isEmpty ? s.you : name, emoji: store.profile?.statusEmoji, fontSize: 26,
+                               onEmojiTap: { showStatus = true })                // свой профиль: нажатие — смена статуса
                     .font(.system(size: 26, weight: .bold))
                     .foregroundStyle(ProfilePalette.ink(store.profile?.styleColor, fallback: theme.text))
                     .lineLimit(1).minimumScaleFactor(0.6)
