@@ -147,10 +147,33 @@ final class MediaFileCache: @unchecked Sendable {
         return result
     }
 
-    /// Начать скачивание в фоне, если файла ещё нет
+    /// Очередь фоновых загрузок: не больше двух одновременно, чтобы открытый чат с кучей видео не забирал весь канал
+    private var pending: [(id: String, fallback: String)] = []
+    private var workers = 0
+    private static let maxWorkers = 2
+
+    /// Начать скачивание в фоне, если файла ещё нет. Последнее попросившее качается первым (самые свежие сообщения внизу чата)
     func prefetch(_ id: String, fallback: String = "mp4") {
         guard cached(id) == nil else { return }
-        Task.detached(priority: .utility) { [self] in _ = await download(id, fallback: fallback) }
+        let spawn: Bool = lock.withLock {
+            if inflight[id] != nil || pending.contains(where: { $0.id == id }) { return false }
+            pending.append((id: id, fallback: fallback))
+            guard workers < Self.maxWorkers else { return false }
+            workers += 1
+            return true
+        }
+        if spawn { Task.detached(priority: .utility) { [self] in await drain() } }
+    }
+
+    private func drain() async {
+        while true {
+            let next: (id: String, fallback: String)? = lock.withLock {
+                if pending.isEmpty { workers -= 1; return nil }
+                return pending.removeLast()
+            }
+            guard let next else { return }
+            _ = await download(next.id, fallback: next.fallback)
+        }
     }
 
     private static func fetch(_ id: String, fallback: String) async -> URL? {

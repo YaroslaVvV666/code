@@ -230,6 +230,7 @@ final class CallManager: ObservableObject {
     private func setPhase(_ new: Phase) {
         phase = new
         CallGate.busy = (new != .idle && new != .ended)
+        CallActivity.shared.set(CallGate.busy)
         if new == .idle || new == .incoming || new == .ended { minimized = false }
         updateRinging()
         if new == .idle {
@@ -295,9 +296,89 @@ final class CallManager: ObservableObject {
 }
 
 /// Пока идёт разговор, видео в приложении не воспроизводится
+/// Во время звонка нельзя смотреть видео и шортсы, включать музыку и записывать голосовые и кружки:
+/// действие не выполняется, сверху на пару секунд всплывает подсказка
 enum CallGate {
     static var busy = false
-    static func message(_ lang: AppLanguage) -> String {
-        Strings(lang: lang).t("Сначала завершите разговор, чтобы посмотреть видео", "End the call first to watch videos")
+
+    enum Action { case video, shorts, music, voice, circle }
+
+    static func message(_ lang: AppLanguage, _ action: Action = .video) -> String {
+        let s = Strings(lang: lang)
+        switch action {
+        case .video:  return s.t("Сначала завершите разговор, чтобы посмотреть видео", "End the call first to watch videos")
+        case .shorts: return s.t("Сначала завершите разговор, чтобы смотреть шортсы", "End the call first to watch shorts")
+        case .music:  return s.t("Сначала завершите разговор, чтобы включить музыку", "End the call first to play music")
+        case .voice:  return s.t("Сначала завершите разговор, чтобы записать голосовое", "End the call first to record a voice message")
+        case .circle: return s.t("Сначала завершите разговор, чтобы записать кружок", "End the call first to record a video message")
+        }
+    }
+
+    /// true — идёт звонок: действие не выполняем и показываем подсказку
+    @discardableResult
+    static func blocks(_ action: Action) -> Bool {
+        guard busy else { return false }
+        Task { @MainActor in CallGateToast.show(action) }
+        return true
+    }
+}
+
+/// Идёт ли звонок — для экранов, которым нужно перерисоваться, когда звонок начался или закончился (шортсы)
+@MainActor
+final class CallActivity: ObservableObject {
+    static let shared = CallActivity()
+    @Published private(set) var active = false
+    func set(_ value: Bool) { if active != value { active = value } }
+}
+
+/// Подсказка «Сначала завершите разговор…» поверх всего приложения; касания проходят сквозь неё
+@MainActor
+enum CallGateToast {
+    private static var window: UIWindow?
+    private static var hideTask: Task<Void, Never>?
+
+    static func show(_ action: CallGate.Action) {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+        Haptics.notify(.warning)
+        let lang = AppLanguage(rawValue: UserDefaults.standard.string(forKey: "lang") ?? "") ?? .ru
+        let host = UIHostingController(rootView: CallGateToastView(text: CallGate.message(lang, action)))
+        host.view.backgroundColor = .clear
+        let w = window ?? UIWindow(windowScene: scene)
+        w.windowLevel = .alert + 2
+        w.backgroundColor = .clear
+        w.isUserInteractionEnabled = false
+        w.rootViewController = host
+        w.isHidden = false
+        window = w
+        hideTask?.cancel()
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            guard !Task.isCancelled else { return }
+            window?.isHidden = true
+            window = nil
+        }
+    }
+}
+
+private struct CallGateToastView: View {
+    let text: String
+    @State private var shown = false
+
+    var body: some View {
+        VStack {
+            HStack(spacing: 10) {
+                Image(systemName: "phone.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.green)
+                Text(text).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(Color.black.opacity(0.82), in: Capsule())
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            .offset(y: shown ? 0 : -90)
+            .opacity(shown ? 1 : 0)
+            Spacer()
+        }
+        .onAppear { withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { shown = true } }
     }
 }

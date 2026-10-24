@@ -652,6 +652,7 @@ struct ChatInputBar: View {
 
     private func beginHold() {
         guard model.canWrite, !recording else { return }
+        guard !CallGate.blocks(cameraMode ? .circle : .voice) else { return }      // во время звонка не записываем
         holding = true
         slide = 0
         slideY = 0

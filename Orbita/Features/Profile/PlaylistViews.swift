@@ -94,6 +94,7 @@ final class AudioPlayer: ObservableObject {
     }
 
     func start(_ track: Track, queue: [Track]) {
+        guard !CallGate.blocks(.music) else { return }            // во время звонка музыка не включается
         VoicePlayer.shared.stop()
         CircleFocus.shared.stop()
         guard let url = ServerConfig.mediaURL(track.mediaID) else { return }
@@ -155,7 +156,10 @@ final class AudioPlayer: ObservableObject {
     }
 
     func pause() { player?.pause(); isPlaying = false; updateNowPlaying() }
-    func resume() { player?.play(); isPlaying = true; updateNowPlaying() }
+    func resume() {
+        guard !CallGate.blocks(.music) else { return }
+        player?.play(); isPlaying = true; updateNowPlaying()
+    }
 
     func seek(toFraction fraction: Double) {
         let seconds = max(0, min(1, fraction)) * total
@@ -185,6 +189,7 @@ final class AudioPlayer: ObservableObject {
     }
 
     private func playNext(auto: Bool) {
+        if auto && CallGate.busy { pause(); return }                 // песня кончилась во время звонка — следующую не включаем
         guard let current, let i = queue.firstIndex(where: { $0.id == current.id }) else { return }
         if shuffle, queue.count > 1, let other = queue.filter({ $0.id != current.id }).randomElement() {
             start(other, queue: queue)

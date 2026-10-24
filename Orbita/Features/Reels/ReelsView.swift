@@ -176,6 +176,7 @@ struct ReelsView: View {
     var pinned: Post? = nil        // открыто по ссылке: этот шортс первым, затем обычная лента
     var onClose: (() -> Void)? = nil
 
+    @ObservedObject private var callActivity = CallActivity.shared      // во время звонка шортсы не играют
     @EnvironmentObject private var session: AppSession
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.theme) private var theme
@@ -428,7 +429,7 @@ struct ReelsView: View {
                                     ReelPage(reel: reel,
                                              active: reel.id == current,
                                              near: abs(index - currentIndex) <= 1,
-                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen,       // пока открыто «выложить видео», текущий ролик стоит
+                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active,       // пока открыто «выложить видео», текущий ролик стоит
                                              topInset: topInset,
                                              bottomClear: bottomClear,
                                              onLike: { model.toggleLike(reel.id, session: session) },
@@ -470,6 +471,23 @@ struct ReelsView: View {
             .ignoresSafeArea()                                   // видео на весь экран, до самых краёв (как в TikTok)
         }
         .overlay { if let id = peekID { profilePanel(id) } }
+        .overlay {
+            // идёт звонок — ролики стоят, по центру подсказка; кнопки шортсов (закрыть, профиль) по-прежнему нажимаются
+            if callActivity.active {
+                ZStack {
+                    Color.black.opacity(0.55).ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        Image(systemName: "phone.fill").font(.system(size: 28, weight: .semibold)).foregroundStyle(.green)
+                        Text(CallGate.message(lang, .shorts))
+                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                            .multilineTextAlignment(.center).padding(.horizontal, 40)
+                    }
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: callActivity.active)
         .onChange(of: peekID) { _, id in session.tabBarHidden = id != nil || commentsFor != nil }
         .preferredColorScheme(.dark)
         .task {

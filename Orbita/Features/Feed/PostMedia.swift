@@ -256,21 +256,51 @@ struct InlineVideo: View {
     @State private var player: AVPlayer?
     @State private var endObserver: NSObjectProtocol?
     @State private var statusObserver: NSKeyValueObservation?
+    @State private var visible = false
+    @State private var ready = false                // первый кадр готов — видео плавно проявляется поверх превью
+    @State private var startTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
+            MediaCell(item: item)
             if let player {
-                VideoPlayer(player: player).allowsHitTesting(false)
-            } else {
-                MediaCell(item: item)
+                // лёгкий слой AVPlayerLayer вместо VideoPlayer из AVKit: тот строит целый контроллер с элементами управления
+                PlayerLayerView(player: player, gravity: .resizeAspectFill)
+                    .allowsHitTesting(false)
+                    .opacity(ready ? 1 : 0)
+                    .animation(.easeOut(duration: 0.25), value: ready)
             }
         }
-        .onAppear(perform: start)
-        .onDisappear(perform: stop)
+        // играет только то, что сейчас на экране: в переписке все строки построены сразу, и раньше
+        // одновременно декодировались все видео чата — отсюда рывки при прокрутке
+        .background(GeometryReader { g in
+            let f = g.frame(in: .global)
+            let on = f.maxY > -60 && f.minY < UIScreen.main.bounds.height + 60 && f.height > 0
+            Color.clear
+                .onAppear { setVisible(on) }
+                .onChange(of: on) { _, now in setVisible(now) }
+        })
+        .onDisappear { setVisible(false) }
+    }
+
+    private func setVisible(_ now: Bool) {
+        guard now != visible else { return }
+        visible = now
+        startTask?.cancel()
+        if now {
+            // стартуем, только если видео задержалось на экране: при быстрой прокрутке плееры не создаются зря
+            startTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled, visible else { return }
+                start()
+            }
+        } else {
+            stop()
+        }
     }
 
     private func start() {
-        guard player == nil, let url = MediaFileCache.shared.playableURL(item.id) else { return }
+        guard player == nil, !CallGate.busy, let url = MediaFileCache.shared.playableURL(item.id) else { return }
         let newPlayer = AVPlayer(url: url)
         newPlayer.isMuted = true
         newPlayer.volume = 0
@@ -280,6 +310,7 @@ struct InlineVideo: View {
             statusObserver = item.observe(\.status, options: [.initial, .new]) { item, _ in
                 guard item.status == .readyToPlay else { return }
                 for track in item.tracks where track.assetTrack?.mediaType == .audio { track.isEnabled = false }
+                DispatchQueue.main.async { ready = true }
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -295,6 +326,7 @@ struct InlineVideo: View {
     private func stop() {
         player?.pause()
         player = nil
+        ready = false
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         statusObserver?.invalidate()
@@ -503,7 +535,9 @@ private struct ViewerVideo: View {
         if NetworkState.shared.offline { needsDownload = true; return }
         guard let url = ServerConfig.mediaURL(item.id) else { return }
         begin(url)
-        MediaFileCache.shared.prefetch(item.id)              // пока смотришь — сохраняется на телефон
+        // пока смотришь — сохраняется на телефон (сразу, без очереди фоновых загрузок)
+        let id = item.id
+        Task.detached(priority: .utility) { await MediaFileCache.shared.download(id) }
     }
 
     private func begin(_ url: URL) {

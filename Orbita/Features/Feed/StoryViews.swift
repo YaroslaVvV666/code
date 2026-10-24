@@ -707,7 +707,7 @@ struct StoryViewerScreen: View {
             groups[gi].allViewed = groups[gi].items.allSatisfy(\.viewed)
             Task { await session.extras.markViewed(storyID: item.id) }
         }
-        if item.isVideo, let url = ServerConfig.mediaURL(item.mediaId) {
+        if item.isVideo, !CallGate.blocks(.video), let url = ServerConfig.mediaURL(item.mediaId) {
             // без этого сразу после запуска приложения звук идёт по «беззвучному» режиму и пропадает
             let av = AVAudioSession.sharedInstance()
             try? av.setCategory(.playback, mode: .moviePlayback)
