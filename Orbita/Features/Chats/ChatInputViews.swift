@@ -63,6 +63,7 @@ struct ChatInputBar: View {
         VStack(spacing: 0) {
             banner
             tray
+                .animation(.spring(response: 0.3, dampingFraction: 0.82), value: stickerSuggestions()?.map(\.id))
             if model.isPreview {
                 joinBar
             } else if model.canWrite {
@@ -285,6 +286,26 @@ struct ChatInputBar: View {
                 }
                 .padding(.horizontal, 14).padding(.top, 8)
             }
+        } else if let suggested = stickerSuggestions(), !suggested.isEmpty {
+            // в поле один эмодзи — стикеры с ним из своих наборов, нажатие отправляет стикер вместо эмодзи
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(suggested) { st in
+                        Button {
+                            Haptics.impact(.light)
+                            controller.clear()
+                            model.sendSticker(st)
+                            onSent()
+                        } label: {
+                            StickerImage(sticker: st, size: 62)
+                        }
+                        .buttonStyle(PressStyle())
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
+                }
+                .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         } else if !drafts.isEmpty || preparing > 0 {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -299,6 +320,18 @@ struct ChatInputBar: View {
                 .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
             }
         }
+    }
+
+    /// Стикеры под эмодзи, если в поле только он (как в Telegram). Без вариантных селекторов: ❤ и ❤️ — одно и то же
+    private func stickerSuggestions() -> [Sticker]? {
+        guard controller.length > 0, controller.length <= 12, model.editing == nil, drafts.isEmpty, model.canWrite else { return nil }
+        let typed = controller.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed.count == 1, let ch = typed.first, ch.unicodeScalars.contains(where: { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }) else { return nil }
+        func norm(_ v: String) -> String { v.replacingOccurrences(of: "\u{FE0F}", with: "") }
+        let key = norm(typed)
+        var seen = Set<String>()
+        let found = model.packs.flatMap(\.stickers).filter { norm($0.emoji) == key && seen.insert($0.id).inserted }
+        return found.isEmpty ? nil : Array(found.prefix(20))
     }
 
     /// Участники группы с юзернеймом, подходящие под набранное после «@»

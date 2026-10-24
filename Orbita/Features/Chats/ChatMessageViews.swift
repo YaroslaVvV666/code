@@ -86,9 +86,11 @@ struct MessageRow: View {
     var onOpenComments: (() -> Void)? = nil          // канал с обсуждением: «Комментарии»
     var onCallBack: ((Bool) -> Void)? = nil          // нажали на запись о звонке — перезвонить (true — видео)
     var onOpenStickerPack: ((String) -> Void)? = nil  // нажали на свой стикер — шторка набора «Добавить»
+    var onOpenEntity: ((ChatEntity) -> Void)? = nil   // нажали на номер / карту / криптоадрес / @юзернейм в тексте
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @Environment(\.openURL) private var parentOpenURL
     @State private var dragX: CGFloat = 0
     @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
 
@@ -172,6 +174,16 @@ struct MessageRow: View {
             if !mine { Spacer(minLength: 44) }
         }
         .contentShape(Rectangle())
+        // ссылки в тексте: пока открыто меню реакций (зажали сообщение), отпускание пальца на ссылке её не открывает
+        .environment(\.openURL, OpenURLAction { url in
+            if blocked { return .handled }
+            if let entity = ChatEntity(url: url) {
+                if let onOpenEntity { Haptics.impact(.light); onOpenEntity(entity) }
+                return .handled
+            }
+            parentOpenURL(url)
+            return .handled
+        })
         .simultaneousGesture(TapGesture(count: 2).onEnded {
             if interactive, !message.isPending, !blocked { onReact?("\u{2764}\u{FE0F}") }
         })
@@ -472,7 +484,8 @@ struct MessageRow: View {
 
             if hasText && message.poll == nil {
                 RichInlineText(text: message.text, entities: message.entities, size: 16,
-                               color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler)
+                               color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler,
+                               detect: interactive)
                     .padding(.horizontal, 11)
                     .padding(.top, mediaItems.isEmpty && message.attachments.isEmpty && message.reply == nil ? 7 : 6)
                     .padding(.bottom, 7)
@@ -1393,5 +1406,157 @@ struct StickerPackSheet: View {
             }
             busy = false
         }
+    }
+}
+
+
+/// Карточка того, что нажали в тексте: номер (страна и аккаунт, если человек разрешил находить себя по номеру),
+/// карта (платёжная система и банк), криптоадрес (сеть) или @юзернейм
+struct EntityInfoSheet: View {
+    let entity: ChatEntity
+    var onOpenProfile: (String) -> Void = { _ in }
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @State private var account: UserProfile?
+    @State private var searching = false
+    @State private var copied = false
+
+    private var s: Strings { Strings(lang: lang) }
+
+    private var title: String {
+        switch entity.kind {
+        case .phone: return "+" + ChatEntityInfo.international(entity.value)
+        case .card: return ChatEntityInfo.grouped(entity.value)
+        case .crypto, .username: return entity.value
+        }
+    }
+
+    private var subtitle: String {
+        switch entity.kind {
+        case .phone: return ChatEntityInfo.phone(entity.value, lang: lang)
+        case .card: return ChatEntityInfo.card(entity.value, lang: lang)
+        case .crypto: return s.t("Криптоадрес · ", "Crypto address · ") + ChatEntityInfo.crypto(entity.value).network
+        case .username: return s.t("Имя пользователя", "Username")
+        }
+    }
+
+    private var icon: String {
+        switch entity.kind {
+        case .phone: return "phone.fill"
+        case .card: return "creditcard.fill"
+        case .crypto: return "bitcoinsign.circle.fill"
+        case .username: return "at"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 54, height: 54).background(theme.accent, in: Circle())
+                .padding(.top, 22)
+            VStack(spacing: 4) {
+                Text(title).font(.system(size: entity.kind == .crypto ? 15 : 20, weight: .bold, design: entity.kind == .crypto ? .monospaced : .default))
+                    .foregroundStyle(theme.text).multilineTextAlignment(.center).textSelection(.enabled)
+                Text(subtitle).font(.system(size: 14)).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 20)
+
+            if entity.kind == .phone || entity.kind == .username { accountCard }
+
+            VStack(spacing: 0) {
+                switch entity.kind {
+                case .phone:
+                    if let tel = URL(string: "tel:+" + ChatEntityInfo.international(entity.value)) {
+                        action("phone", s.t("Позвонить", "Call")) { dismiss(); openURL(tel) }
+                    }
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать номер", "Copy number")) { copy(title) }
+                case .card:
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать номер карты", "Copy card number")) { copy(entity.value) }
+                case .crypto:
+                    if let explorer = ChatEntityInfo.crypto(entity.value).explorer {
+                        action("safari", s.t("Открыть в обозревателе", "Open in explorer")) { dismiss(); openURL(explorer) }
+                    }
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать адрес", "Copy address")) { copy(entity.value) }
+                case .username:
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать", "Copy")) { copy(entity.value) }
+                }
+            }
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 16)
+            Spacer(minLength: 0)
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: account?.id)
+        .task { await find() }
+    }
+
+    @ViewBuilder private var accountCard: some View {
+        if let account {
+            HStack(spacing: 12) {
+                AvatarView(name: account.name, size: 46, avatarID: account.avatarID)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.name).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(account.username.map { "@" + $0 } ?? s.t("в Orbita", "on Orbita"))
+                        .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    Haptics.impact(.light)
+                    let peer = ChatPeer(id: account.id, name: account.name, username: account.username, avatarID: account.avatarID)
+                    dismiss()
+                    PushManager.shared.openChat = ChatRoute(peer: peer)
+                } label: {
+                    Text(s.t("Написать", "Message")).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 14).frame(height: 34).background(theme.accent, in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+            .padding(12)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture { let id = account.id; dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onOpenProfile(id) } }
+            .padding(.horizontal, 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        } else if searching {
+            ProgressView().frame(height: 70)
+        } else if entity.kind == .username {
+            Text(s.t("Такого пользователя нет", "No such user")).font(.system(size: 13)).foregroundStyle(theme.textTertiary)
+        }
+    }
+
+    private func action(_ systemImage: String, _ title: String, _ run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage).font(.system(size: 17)).foregroundStyle(theme.accentColor).frame(width: 24)
+                Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
+                Spacer()
+            }
+            .padding(.horizontal, 14).frame(height: 48).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func copy(_ text: String) {
+        UIPasteboard.general.string = text
+        Haptics.notify(.success)
+        withAnimation(.easeOut(duration: 0.15)) { copied = true }
+    }
+
+    /// Аккаунт по номеру ищется только у тех, кто не запретил находить себя по номеру (проверяет сервер)
+    private func find() async {
+        guard entity.kind == .phone || entity.kind == .username else { return }
+        searching = true
+        defer { searching = false }
+        let found: UserProfile?
+        if entity.kind == .phone {
+            found = try? await session.profileRepo.lookup(phone: "+" + ChatEntityInfo.international(entity.value))
+        } else {
+            found = try? await session.profileRepo.lookup(username: String(entity.value.drop(while: { $0 == "@" })))
+        }
+        account = found
     }
 }

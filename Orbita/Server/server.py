@@ -3417,6 +3417,7 @@ BOT_STATE = {}          # кто что сейчас делает с ботом:
 BOT_HELP = ("Привет! Я помогу сделать свои стикеры — обычные и анимированные.\n\n"
             "/newpack — создать новый набор\n"
             "/addsticker — добавить стикеры в набор\n"
+            "/delsticker — удалить стикер из набора\n"
             "/mypacks — мои наборы\n"
             "/delpack — удалить набор\n"
             "/cancel — отменить\n\n"
@@ -3497,6 +3498,11 @@ def sticker_bot_handle(uid, text, atts):
         BOT_STATE[uid] = {"step": "choose_add" if cmd == "/addsticker" else "choose_del", "choices": [p["id"] for p in packs]}
         return bot_say(uid, ("В какой набор добавить? Пришлите номер:\n" if cmd == "/addsticker"
                              else "Какой набор удалить? Пришлите номер:\n") + lines)
+    if cmd == "/delsticker":
+        if not bot_pack_list(uid):
+            return bot_say(uid, "У вас пока нет наборов. Создайте первый: /newpack")
+        BOT_STATE[uid] = {"step": "del_sticker"}
+        return bot_say(uid, "Пришлите стикер из своего набора, который нужно удалить (из панели стикеров).")
     if cmd == "/done":
         pid = st.get("pack")
         BOT_STATE.pop(uid, None)
@@ -3538,6 +3544,19 @@ def sticker_bot_handle(uid, text, atts):
         BOT_STATE[uid] = {"step": "sticker", "pack": pid}
         return bot_say(uid, "Присылайте стикеры для «%s»: картинку или видео до %d секунд. Закончить — /done."
                        % (p["title"], MAX_ANIMATED_SECONDS))
+    if step == "del_sticker":
+        sid = next((str(a.get("sticker"))[2:] for a in atts
+                    if a.get("type") == "sticker" and str(a.get("sticker", "")).startswith("u:")), None)
+        if not sid:
+            return bot_say(uid, "Пришлите сам стикер из своего набора или /cancel.")
+        st_row = q1("SELECT s.*, p.title, p.owner FROM user_stickers s JOIN user_sticker_packs p ON p.id = s.pack_id "
+                    "WHERE s.id = ?", (sid,))
+        if not st_row or st_row["owner"] != uid:
+            return bot_say(uid, "Этот стикер не из вашего набора — удалить можно только свои.")
+        run("DELETE FROM user_stickers WHERE id = ?", (sid,))
+        left = q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (st_row["pack_id"],))["c"]
+        BOT_STATE.pop(uid, None)
+        return bot_say(uid, "Стикер удалён из «%s» (осталось %d шт.). Ещё один — /delsticker." % (st_row["title"], left))
     if step == "sticker":
         media, error = bot_sticker_media(atts)
         if error:

@@ -284,6 +284,8 @@ struct RichInlineText: View {
     var color: Color
     var linkColor: Color
     var filler = ""                        // невидимые пробелы под время сообщения
+    /// Выделять номера телефонов, карт, криптоадреса, @юзернеймы и ссылки (нажатие — карточка с подробностями)
+    var detect = false
 
     var body: some View {
         let segments = RichTextCodec.segments(text: text, entities: entities)
@@ -291,8 +293,9 @@ struct RichInlineText: View {
             ForEach(Array(segments.enumerated()), id: \.offset) { item in
                 let segment = item.element
                 let isLast = item.offset == segments.count - 1
-                let ns = RichTextCodec.attributed(text: segment.text + (isLast ? filler : ""), entities: segment.entities,
-                                                  size: size, color: UIColor(color), linkColor: UIColor(linkColor))
+                let base = RichTextCodec.attributed(text: segment.text + (isLast ? filler : ""), entities: segment.entities,
+                                                    size: size, color: UIColor(color), linkColor: UIColor(linkColor))
+                let ns = detect ? ChatEntityDetector.annotate(base) : base
                 let attributed = (try? AttributedString(ns, including: \.uiKit)) ?? AttributedString(segment.text)
                 let label = Text(attributed).tint(linkColor).fixedSize(horizontal: false, vertical: true)
                 if segment.isQuote {
@@ -835,5 +838,184 @@ struct NewContactView: UIViewControllerRepresentable {
         func contactViewController(_ vc: CNContactViewController, didCompleteWith contact: CNContact?) {
             vc.presentingViewController?.dismiss(animated: true) ?? vc.navigationController?.presentingViewController?.dismiss(animated: true)
         }
+    }
+}
+
+// MARK: - Номера, карты, криптоадреса, @юзернеймы и ссылки в тексте сообщения
+
+/// Что нашли в тексте сообщения. Выделяется ссылкой со своей схемой — нажатие открывает карточку, а не меню сообщения
+struct ChatEntity: Identifiable, Equatable {
+    enum Kind: String { case phone, card, crypto, username }
+    let kind: Kind
+    let value: String               // телефон и карта — только цифры; адрес и юзернейм — как есть
+    var id: String { kind.rawValue + ":" + value }
+
+    static let scheme = "orbita-entity"
+
+    var url: URL? {
+        var c = URLComponents()
+        c.scheme = Self.scheme
+        c.host = kind.rawValue
+        c.path = "/" + value
+        return c.url
+    }
+
+    init(kind: Kind, value: String) { self.kind = kind; self.value = value }
+
+    init?(url: URL) {
+        guard url.scheme == Self.scheme, let host = url.host, let kind = Kind(rawValue: host) else { return nil }
+        let value = String(url.path.dropFirst())
+        guard !value.isEmpty else { return nil }
+        self.kind = kind
+        self.value = value
+    }
+}
+
+enum ChatEntityDetector {
+    private static let card = try? NSRegularExpression(pattern: "(?<![0-9])(?:[0-9][ -]?){15,18}[0-9](?![0-9])")
+    private static let username = try? NSRegularExpression(pattern: "(?<![A-Za-z0-9_@])@([A-Za-z][A-Za-z0-9_]{4,31})")
+    private static let crypto = try? NSRegularExpression(pattern:
+        "(?<![A-Za-z0-9])(0x[a-fA-F0-9]{40}|bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33}|(?:EQ|UQ)[A-Za-z0-9_-]{46})(?![A-Za-z0-9])")
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue
+                                                       | NSTextCheckingResult.CheckingType.phoneNumber.rawValue)
+
+    /// Карта — 16–19 цифр, проходящих проверку Луна (так отличаем её от длинных чисел и телефонов)
+    static func luhn(_ digits: String) -> Bool {
+        var sum = 0
+        for (i, ch) in digits.reversed().enumerated() {
+            guard var d = ch.wholeNumberValue else { return false }
+            if i % 2 == 1 { d *= 2; if d > 9 { d -= 9 } }
+            sum += d
+        }
+        return sum % 10 == 0
+    }
+
+    static func annotate(_ source: NSAttributedString) -> NSAttributedString {
+        let text = source.string
+        let ns = text as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        guard full.length > 0 else { return source }
+        let out = NSMutableAttributedString(attributedString: source)
+        var taken: [NSRange] = []
+        out.enumerateAttribute(.link, in: full) { value, r, _ in if value != nil { taken.append(r) } }      // ссылки из форматирования
+        func free(_ r: NSRange) -> Bool { !taken.contains { NSIntersectionRange($0, r).length > 0 } }
+        func mark(_ r: NSRange, _ url: URL?) {
+            guard let url, free(r) else { return }
+            taken.append(r)
+            out.addAttributes([.link: url, .underlineStyle: NSUnderlineStyle.single.rawValue], range: r)
+        }
+
+        // сначала то, что NSDataDetector принял бы за телефон: карты и криптоадреса
+        for m in card?.matches(in: text, range: full) ?? [] {
+            let digits = ns.substring(with: m.range).filter(\.isNumber)
+            if (16...19).contains(digits.count), luhn(digits) { mark(m.range, ChatEntity(kind: .card, value: digits).url) }
+        }
+        for m in crypto?.matches(in: text, range: full) ?? [] {
+            mark(m.range, ChatEntity(kind: .crypto, value: ns.substring(with: m.range)).url)
+        }
+        for m in username?.matches(in: text, range: full) ?? [] where m.numberOfRanges > 1 {
+            mark(m.range, ChatEntity(kind: .username, value: ns.substring(with: m.range(at: 1))).url)
+        }
+        for m in detector?.matches(in: text, range: full) ?? [] {
+            if m.resultType == .phoneNumber, let phone = m.phoneNumber {
+                let digits = phone.filter(\.isNumber)
+                if digits.count >= 10 { mark(m.range, ChatEntity(kind: .phone, value: digits).url) }
+            } else if m.resultType == .link, let url = m.url, url.scheme?.hasPrefix("http") == true {
+                mark(m.range, url)                                  // обычная ссылка: нажатие — открыть
+            }
+        }
+        return out
+    }
+}
+
+/// Подробности о найденном: страна номера, платёжная система и банк карты, сеть криптоадреса
+enum ChatEntityInfo {
+    /// Цифры номера в международном виде (8XXXXXXXXXX → 7XXXXXXXXXX)
+    static func international(_ digits: String) -> String {
+        if digits.count == 11 && digits.hasPrefix("8") { return "7" + digits.dropFirst() }
+        if digits.count == 10 && digits.hasPrefix("9") { return "7" + digits }
+        return digits
+    }
+
+    private static let countries: [(String, String, String)] = [
+        ("375", "Беларусь", "Belarus"), ("380", "Украина", "Ukraine"), ("998", "Узбекистан", "Uzbekistan"),
+        ("996", "Киргизия", "Kyrgyzstan"), ("992", "Таджикистан", "Tajikistan"), ("993", "Туркменистан", "Turkmenistan"),
+        ("994", "Азербайджан", "Azerbaijan"), ("995", "Грузия", "Georgia"), ("374", "Армения", "Armenia"),
+        ("373", "Молдова", "Moldova"), ("371", "Латвия", "Latvia"), ("370", "Литва", "Lithuania"), ("372", "Эстония", "Estonia"),
+        ("971", "ОАЭ", "UAE"), ("972", "Израиль", "Israel"), ("90", "Турция", "Turkey"), ("86", "Китай", "China"),
+        ("49", "Германия", "Germany"), ("44", "Великобритания", "United Kingdom"), ("33", "Франция", "France"),
+        ("39", "Италия", "Italy"), ("34", "Испания", "Spain"), ("48", "Польша", "Poland"), ("81", "Япония", "Japan"),
+        ("82", "Южная Корея", "South Korea"), ("91", "Индия", "India"), ("1", "США или Канада", "USA or Canada"),
+    ]
+
+    static func phone(_ digits: String, lang: AppLanguage) -> String {
+        let s = Strings(lang: lang)
+        let d = international(digits)
+        if d.hasPrefix("7") && d.count == 11 {
+            let second = d.dropFirst().first
+            if second == "6" || second == "7" { return s.t("Номер Казахстана", "Kazakhstan number") }
+            return second == "9" ? s.t("Мобильный номер Российской Федерации", "Russian mobile number")
+                                 : s.t("Номер Российской Федерации", "Russian Federation number")
+        }
+        if let c = countries.first(where: { d.hasPrefix($0.0) }) { return s.t("Страна номера: ", "Country: ") + (lang == .ru ? c.1 : c.2) }
+        return s.t("Номер телефона", "Phone number")
+    }
+
+    /// Платёжная система по первым цифрам
+    static func cardSystem(_ digits: String) -> String {
+        let p2 = Int(digits.prefix(2)) ?? 0, p4 = Int(digits.prefix(4)) ?? 0
+        if (2200...2204).contains(p4) { return "Мир" }
+        if digits.hasPrefix("4") { return "Visa" }
+        if (51...55).contains(p2) || (2221...2720).contains(p4) { return "Mastercard" }
+        if p2 == 62 { return "UnionPay" }
+        if p2 == 34 || p2 == 37 { return "American Express" }
+        if p2 == 35 { return "JCB" }
+        if digits.hasPrefix("6011") || p2 == 65 { return "Discover" }
+        if p2 == 50 || (56...69).contains(p2) { return "Maestro" }
+        return ""
+    }
+
+    /// Банк по первым цифрам (BIN) — самые распространённые российские банки
+    private static let banks: [(String, String, String)] = [
+        ("220220", "Сбербанк", "Sberbank"), ("4276", "Сбербанк", "Sberbank"), ("4279", "Сбербанк", "Sberbank"),
+        ("5469", "Сбербанк", "Sberbank"), ("4274", "Сбербанк", "Sberbank"),
+        ("220070", "Т-Банк", "T-Bank"), ("437772", "Т-Банк", "T-Bank"), ("553691", "Т-Банк", "T-Bank"), ("521324", "Т-Банк", "T-Bank"),
+        ("220015", "Альфа-Банк", "Alfa-Bank"), ("415428", "Альфа-Банк", "Alfa-Bank"), ("477964", "Альфа-Банк", "Alfa-Bank"),
+        ("548673", "Альфа-Банк", "Alfa-Bank"),
+        ("220024", "ВТБ", "VTB"), ("418868", "ВТБ", "VTB"), ("527883", "ВТБ", "VTB"),
+        ("220001", "Газпромбанк", "Gazprombank"), ("487415", "Газпромбанк", "Gazprombank"),
+        ("220030", "Райффайзенбанк", "Raiffeisenbank"), ("462729", "Райффайзенбанк", "Raiffeisenbank"),
+        ("220029", "Банк Открытие", "Otkritie Bank"), ("220100", "Совкомбанк", "Sovcombank"), ("220077", "Почта Банк", "Pochta Bank"),
+    ]
+
+    static func card(_ digits: String, lang: AppLanguage) -> String {
+        let s = Strings(lang: lang)
+        let system = cardSystem(digits)
+        let bank = banks.first { digits.hasPrefix($0.0) }.map { lang == .ru ? $0.1 : $0.2 }
+        let head = system.isEmpty ? s.t("Банковская карта", "Bank card") : s.t("Карта ", "") + system + s.t("", " card")
+        return bank.map { head + " · " + $0 } ?? head
+    }
+
+    /// Сеть криптоадреса и ссылка на обозреватель
+    static func crypto(_ address: String) -> (network: String, explorer: URL?) {
+        if address.hasPrefix("0x") {
+            return ("Ethereum / EVM (ERC-20, BEP-20)", URL(string: "https://etherscan.io/address/" + address))
+        }
+        if address.hasPrefix("T") && address.count == 34 {
+            return ("TRON (TRC-20)", URL(string: "https://tronscan.org/#/address/" + address))
+        }
+        if address.hasPrefix("EQ") || address.hasPrefix("UQ") {
+            return ("TON", URL(string: "https://tonviewer.com/" + address))
+        }
+        return ("Bitcoin", URL(string: "https://mempool.space/address/" + address))
+    }
+
+    /// Номер карты группами по 4 цифры
+    static func grouped(_ digits: String) -> String {
+        stride(from: 0, to: digits.count, by: 4).map { i -> String in
+            let start = digits.index(digits.startIndex, offsetBy: i)
+            let end = digits.index(start, offsetBy: min(4, digits.count - i))
+            return String(digits[start..<end])
+        }.joined(separator: " ")
     }
 }

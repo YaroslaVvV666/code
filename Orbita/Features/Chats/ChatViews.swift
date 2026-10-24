@@ -663,6 +663,7 @@ struct ChatScreen: View {
     @State private var translateText: String?
     @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
+    @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
     @State private var showPollCreate = false
     @State private var postLinkID: String?
     @State private var storyRoute: ChatStoryRoute?
@@ -906,6 +907,13 @@ struct ChatScreen: View {
                 .presentationBackground(theme.sheet)
         }
         .profileSheet(id: $profileID)
+        .sheet(item: $entitySheet) { e in
+            EntityInfoSheet(entity: e, onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.medium])
+                .presentationBackground(theme.sheet)
+        }
         .sheet(item: $commentsRoute) { r in
             ChannelCommentsSheet(route: r)
                 .environmentObject(session)
@@ -1622,7 +1630,8 @@ struct ChatScreen: View {
                 onOpenStory: openStory,
                 onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil,
                 onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) },
-                onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) })
+                onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) },
+                onOpenEntity: { entitySheet = $0 })
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
             .dustDissolve(active: model.dissolving.contains(m.id), color: m.mine ? theme.accentColor : Color.white.opacity(0.85))
             .background(GeometryReader { g in

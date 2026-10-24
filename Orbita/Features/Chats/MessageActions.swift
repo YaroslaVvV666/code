@@ -102,7 +102,10 @@ struct MessageActionOverlay: View {
         if canTranslate { n += 1 }
         return n
     }
-    private var listHeight: CGFloat { CGFloat(actionCount) * Self.rowHeight + CGFloat(actionCount - 1) * 0.5 }
+    private var listHeight: CGFloat {
+        Self.headerHeight + 0.5 + CGFloat(actionCount) * Self.rowHeight + CGFloat(actionCount - 1) * 0.5
+    }
+    private static let headerHeight: CGFloat = 34
 
     var body: some View {
         GeometryReader { g in
@@ -221,6 +224,8 @@ struct MessageActionOverlay: View {
 
     private var actionList: some View {
         VStack(spacing: 0) {
+            sentHeader
+            divider
             row("arrowshape.turn.up.left", s.reply) { dismiss(onReply) }
             if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") {
                 divider
@@ -267,6 +272,22 @@ struct MessageActionOverlay: View {
         .frame(width: 250)
         .menuSurface(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+    }
+
+    /// Когда отправлено (точная дата и время), изменено ли, прочитано ли — вместо отдельного свайпа «показать время»
+    private var sentHeader: some View {
+        var parts = [ChatTime.day(message.createdAt, s: s, lang: lang) + ", " + ChatTime.clock(message.createdAt)]
+        if message.editedAt != nil { parts.append(s.t("изменено", "edited")) }
+        if message.mine && !message.isPending { parts.append(message.read ? s.t("прочитано", "read") : s.t("доставлено", "delivered")) }
+        return HStack(spacing: 6) {
+            Image(systemName: message.mine && message.read ? "checkmark.circle.fill" : "clock")
+                .font(.system(size: 12, weight: .semibold))
+            Text(parts.joined(separator: " · ")).font(.system(size: 13)).lineLimit(1).minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(theme.textSecondary)
+        .padding(.horizontal, 16)
+        .frame(height: Self.headerHeight)
     }
 
     /// «Напомнить»: когда прислать уведомление об этом сообщении
