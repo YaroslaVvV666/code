@@ -270,7 +270,7 @@ struct InlineVideo: View {
     }
 
     private func start() {
-        guard player == nil, let url = ServerConfig.mediaURL(item.id) else { return }
+        guard player == nil, let url = MediaFileCache.shared.playableURL(item.id) else { return }
         let newPlayer = AVPlayer(url: url)
         newPlayer.isMuted = true
         newPlayer.volume = 0
@@ -350,6 +350,11 @@ private struct ViewerVideo: View {
     @State private var rate: Float = 1
     @State private var observer: Any?
     @State private var endObserver: NSObjectProtocol?
+    @State private var statusObserver: NSKeyValueObservation?
+    /// Видео нет на телефоне и не загрузить с сервера (нет сети / кэш очищен) — кнопка «скачать», как в Telegram
+    @State private var needsDownload = false
+    @State private var downloadFailed = false
+    @ObservedObject private var downloads = DownloadCenter.shared
     @Environment(\.lang) private var lang
 
     private func glass(_ size: CGFloat) -> some View {
@@ -378,6 +383,8 @@ private struct ViewerVideo: View {
             if CallGate.busy {
                 Text(CallGate.message(lang)).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                     .multilineTextAlignment(.center).padding(30)
+            } else if needsDownload {
+                downloadPlaceholder
             } else if let player {
                 // целиком по центру, чёрные поля вокруг — как фото
                 PlayerLayerView(player: player, gravity: .resizeAspect)
@@ -457,8 +464,50 @@ private struct ViewerVideo: View {
         }
     }
 
+    /// Превью и кнопка «скачать» / кольцо загрузки
+    private var downloadPlaceholder: some View {
+        let progress = downloads.progress[item.id]
+        return ZStack {
+            if let thumb = item.thumbID { RemoteImage(id: thumb, fill: false, backdrop: .black).opacity(0.6) }
+            VStack(spacing: 12) {
+                Button { download() } label: {
+                    TransferRing(progress: progress, icon: progress == nil ? "arrow.down" : "xmark", size: 64)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                }
+                .buttonStyle(.plain)
+                .disabled(progress != nil)
+                if downloadFailed && progress == nil {
+                    Text(lang == .en ? "No connection. Tap to try again" : "Нет сети. Нажмите, чтобы повторить")
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.85))
+                }
+            }
+        }
+    }
+
+    private func download() {
+        downloadFailed = false
+        Task {
+            if let local = await MediaFileCache.shared.download(item.id) {
+                needsDownload = false
+                begin(local)
+            } else {
+                downloadFailed = true
+            }
+        }
+    }
+
     private func start() {
-        guard player == nil, !CallGate.busy, let url = ServerConfig.mediaURL(item.id) else { return }
+        guard player == nil, !CallGate.busy else { return }
+        // уже на телефоне — играем с него (и без сети)
+        if let local = MediaFileCache.shared.cached(item.id) { begin(local); return }
+        if NetworkState.shared.offline { needsDownload = true; return }
+        guard let url = ServerConfig.mediaURL(item.id) else { return }
+        begin(url)
+        MediaFileCache.shared.prefetch(item.id)              // пока смотришь — сохраняется на телефон
+    }
+
+    private func begin(_ url: URL) {
+        guard player == nil else { return }
         let av = AVAudioSession.sharedInstance()
         try? av.setCategory(.playback, mode: .moviePlayback)
         AudioSessionGate.willActivate()
@@ -471,6 +520,17 @@ private struct ViewerVideo: View {
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: newPlayer.currentItem, queue: .main) { _ in
             if isCurrent { playing = false }
         }
+        // с сервера не грузится (сеть пропала) — вместо чёрного экрана кнопка «скачать»
+        if !url.isFileURL {
+            statusObserver = newPlayer.currentItem?.observe(\.status, options: [.new]) { item, _ in
+                guard item.status == .failed else { return }
+                DispatchQueue.main.async {
+                    guard MediaFileCache.shared.cached(self.item.id) == nil else { return }
+                    stop()
+                    needsDownload = true
+                }
+            }
+        }
         if isCurrent { newPlayer.play(); playing = true }
         player = newPlayer
     }
@@ -478,7 +538,8 @@ private struct ViewerVideo: View {
     private func stop() {
         if let observer { player?.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        observer = nil; endObserver = nil
+        statusObserver?.invalidate()
+        observer = nil; endObserver = nil; statusObserver = nil
         player?.pause()
         player = nil
     }

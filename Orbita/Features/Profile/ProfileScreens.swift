@@ -408,7 +408,7 @@ struct DataScreen: View {
     @AppStorage("autoplay") private var autoplay = true
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    @State private var cacheBytes = URLCache.shared.currentDiskUsage
+    @State private var cacheBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
     @State private var clearing = false
     @State private var freedBytes = 0
 
@@ -442,9 +442,11 @@ struct DataScreen: View {
                             value: ByteCountFormatter.string(fromByteCount: Int64(cacheBytes), countStyle: .file))
                 SettingsDivider()
                 Button {
-                    freedBytes = URLCache.shared.currentDiskUsage
+                    // вместе с картинками удаляются и скачанные видео, голосовые и кружки из переписок
+                    freedBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
                     URLCache.shared.removeAllCachedResponses()
-                    cacheBytes = URLCache.shared.currentDiskUsage
+                    MediaFileCache.shared.clear()
+                    cacheBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
                     Haptics.impact(.soft)
                     clearing = true
                 } label: {

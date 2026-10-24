@@ -718,8 +718,20 @@ struct MediaBlock: View {
                 }
             }
             if pending { Color.black.opacity(0.25); TransferRing(progress: nil, icon: "arrow.up", size: 40) }
+            if a.kind == .video, !pending, let id = a.mediaID {
+                MediaCacheBadge(mediaID: id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(6)
+            }
         }
         .clipped()
+        .onAppear {
+            // видео сразу сохраняется на телефон — потом смотрится и без сети (как в Telegram)
+            // очень большие (больше 100 МБ) сами не качаются — сохранятся, когда их откроют
+            if a.kind == .video, !pending, let id = a.mediaID, a.size <= 100 * 1024 * 1024, !NetworkState.shared.offline {
+                MediaFileCache.shared.prefetch(id)
+            }
+        }
         .background(FrameProbe(box: frames.box(index)))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -759,6 +771,10 @@ struct VoiceBlock: View {
             transcript(tint: tint)
         }
         .frame(width: 218, alignment: .leading)
+        .onAppear {
+            // голосовое сохраняется на телефон — слушается и без сети
+            if let id = attachment.mediaID, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id, fallback: "m4a") }
+        }
     }
 
     @ViewBuilder
@@ -975,7 +991,7 @@ final class CirclePlayback: ObservableObject {
 
     func toggle(mediaID: String, duration: Double) {
         if player == nil {
-            guard let url = ServerConfig.mediaURL(mediaID) else { return }
+            guard let url = MediaFileCache.shared.playableURL(mediaID) else { return }      // скачан — с телефона, без сети тоже
             // одновременно звучит что-то одно
             CircleFocus.shared.current?.stop()
             VoicePlayer.shared.stop()
@@ -1058,6 +1074,10 @@ struct CircleVideoBubble: View {
                 RemoteImage(id: id)
             } else {
                 theme.surface
+            }
+            Color.clear.onAppear {
+                // кружок сохраняется на телефон — смотрится и без сети
+                if let id = attachment.mediaID, !message.isPending, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id) }
             }
 
             if playback.started, let player = playback.player {
@@ -1250,6 +1270,25 @@ private struct DustDissolve: ViewModifier {
             }
         } else {
             content
+        }
+    }
+}
+
+/// Уголок превью видео: идёт скачивание на телефон — кольцо прогресса; нет сети и видео не скачано — значок «скачать»
+struct MediaCacheBadge: View {
+    let mediaID: String
+    @ObservedObject private var downloads = DownloadCenter.shared
+    @ObservedObject private var network = NetworkState.shared
+
+    var body: some View {
+        if let p = downloads.progress[mediaID] {
+            TransferRing(progress: p, icon: "arrow.down", size: 26)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+        } else if network.offline, MediaFileCache.shared.cached(mediaID) == nil {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.black.opacity(0.45)))
         }
     }
 }

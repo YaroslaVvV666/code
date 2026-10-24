@@ -159,7 +159,8 @@ final class VoicePlayer: ObservableObject {
         stop()
         CircleFocus.shared.stop()
         onStart?()
-        guard let url = ServerConfig.mediaURL(mediaID) else { return }
+        guard let url = MediaFileCache.shared.playableURL(mediaID) else { return }      // скачано — с телефона, без сети тоже
+        if !url.isFileURL { MediaFileCache.shared.prefetch(mediaID, fallback: "m4a") }
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         AudioSessionGate.willActivate()
         try? AVAudioSession.sharedInstance().setActive(true)
