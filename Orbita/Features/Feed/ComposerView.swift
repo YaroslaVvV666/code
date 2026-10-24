@@ -117,7 +117,7 @@ struct ComposerView: View {
             }
             Button(s.cancel, role: .cancel) { linkDraft = "" }
         }
-        .holdsMedia()
+        .holdsMedia(stopsMusic: false)                  // музыка играет дальше, пока пишешь пост
         .onAppear {
             controller.onLinkRequest = { askLink = true }
             guard let post = editing, !didLoadEditing else { return }

@@ -131,17 +131,22 @@ final class AppSession: ObservableObject {
 }
 
 
-/// Экран съёмки или публикации: шортс под ним ставится на паузу и не играет, пока экран открыт
+/// Экран съёмки или публикации: шортс под ним ставится на паузу и не играет, пока экран открыт.
+/// Музыка останавливается только там, где идёт запись (съёмка шортса) — при создании поста или записи на стену она играет дальше
 private struct HoldsMedia: ViewModifier {
+    var stopsMusic: Bool
     @EnvironmentObject private var session: AppSession
     @State private var token = UUID()
     func body(content: Content) -> some View {
         content
-            .onAppear { session.mediaHolds.insert(token); session.player.stop() }
+            .onAppear {
+                session.mediaHolds.insert(token)
+                if stopsMusic { session.player.stop() }
+            }
             .onDisappear { session.mediaHolds.remove(token) }
     }
 }
 
 extension View {
-    func holdsMedia() -> some View { modifier(HoldsMedia()) }
+    func holdsMedia(stopsMusic: Bool = true) -> some View { modifier(HoldsMedia(stopsMusic: stopsMusic)) }
 }
