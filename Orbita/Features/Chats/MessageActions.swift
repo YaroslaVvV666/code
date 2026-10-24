@@ -142,9 +142,19 @@ struct MessageActionOverlay: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 8).padding(.vertical, 6)
+            .padding(.horizontal, 10).padding(.vertical, 6)
         }
-        .frame(width: min(CGFloat(Self.emojis.count) * 40 + 16, UIScreen.main.bounds.width - 32), height: 52)
+        .frame(width: min(CGFloat(Self.emojis.count) * 40 + 20, UIScreen.main.bounds.width - 32), height: 52)
+        // при прокрутке эмодзи мягко гаснут у краёв, а не обрезаются резко
+        .mask {
+            HStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 10)
+                Color.black
+                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 10)
+            }
+        }
+        // эмодзи не выходят за скруглённые края: прокрутка сама режет только по прямоугольнику
+        .clipShape(Capsule())
         .menuSurface(Capsule())
     }
 
