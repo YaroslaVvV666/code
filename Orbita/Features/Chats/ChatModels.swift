@@ -575,6 +575,22 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// Админ удаляет чужое сообщение и заодно: все сообщения автора, запрет писать, блокировка
+    func moderate(_ message: ChatMessage, options: ModerationOptions) async {
+        guard let author = message.sender?.id else { return await delete(message, forEveryone: true) }
+        let gone = Set(messages.filter { $0.id == message.id || (options.deleteAll && $0.sender?.id == author && $0.system == nil) }.map(\.id))
+        dissolving.formUnion(gone)
+        Haptics.impact(.soft)
+        try? await Task.sleep(nanoseconds: 950_000_000)
+        withAnimation(.easeOut(duration: 0.25)) {
+            messages.removeAll { gone.contains($0.id) }
+            dissolving.subtract(gone)
+        }
+        do { try await repo.moderate(groupID: peerID, userID: author, messageID: message.id, options: options) }
+        catch let e as APIError { error = e } catch {}
+        await refresh()
+    }
+
     func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
         if animated {
             dissolving.insert(message.id)

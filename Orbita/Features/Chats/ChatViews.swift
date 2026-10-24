@@ -741,6 +741,10 @@ struct ChatScreen: View {
                         actionTarget = nil
                         Task { try? await Task.sleep(nanoseconds: 120_000_000); await model.delete(target, forEveryone: everyone) }
                     },
+                    onModerate: { options in
+                        actionTarget = nil
+                        Task { try? await Task.sleep(nanoseconds: 120_000_000); await model.moderate(target, options: options) }
+                    },
                     isSaved: isSaved,
                     onForward: { forwardIDs = ForwardRoute(ids: [target.id]) },
                     onSelect: { selecting = true; selected = [target.id] },

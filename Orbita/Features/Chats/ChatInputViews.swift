@@ -78,7 +78,11 @@ struct ChatInputBar: View {
                 }
                 .buttonStyle(.plain)
             } else if model.peer.isGroup {
-                Text(s.t("Писать могут только администраторы", "Only admins can write here"))
+                Text(model.group?.restrictedUntil.map { until in
+                        until == .distantFuture ? s.t("Администраторы запретили вам писать", "Admins restricted you from writing")
+                            : s.t("Вы сможете писать после ", "You can write after ") + until.formatted(date: .abbreviated, time: .shortened)
+                    } ?? (model.group?.whoWrites == "selected" ? s.t("Писать могут только выбранные участники", "Only selected members can write")
+                                                                : s.t("Писать могут только администраторы", "Only admins can write here")))
                     .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
                     .frame(maxWidth: .infinity).padding(.vertical, 16)
             } else {

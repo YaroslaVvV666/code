@@ -102,8 +102,12 @@ actor ServerAPI {
         req.httpMethod = method
         let token = try await ensureToken()
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(Self.deviceLanguage, forHTTPHeaderField: "X-Orbita-Lang")     // для статистики «Языки» в каналах
         return req
     }
+
+    /// Язык телефона: "ru", "en", "uk"…
+    static let deviceLanguage: String = Locale.preferredLanguages.first.map { String($0.prefix(2)).lowercased() } ?? "ru"
 
     static func tokenAccount(for userID: String) -> String { "orbita.token.\(userID)@\(ServerConfig.urlString)" }
     private var tokenAccount: String { Self.tokenAccount(for: userID) }

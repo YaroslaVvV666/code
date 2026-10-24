@@ -37,8 +37,11 @@ struct GroupInfo: Equatable {
     var approve = false                 // вступление по заявкам
     var noForward = false               // запретить копирование
     var slow = 0                        // медленный режим, секунд
-    var whoWrites = "all"               // "all" | "admins"
+    var whoWrites = "all"               // "all" | "admins" | "selected"
     var history = true                  // новые участники видят историю
+    var perms = GroupPerms()            // что участники могут без админки
+    var writers: [String] = []          // «писать могут выбранные» (видят только админы)
+    var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var count = 0
     var muted = false
     var canWrite = true
@@ -51,6 +54,63 @@ struct GroupInfo: Equatable {
     var isChannel: Bool { type == "channel" }
     /// Публичная ссылка: @имя, иначе код приглашения
     var linkRef: String? { handle ?? code }
+}
+
+/// Каналы, открытые по ссылке: просмотры их постов попадают в статистику как «URL»
+enum ChannelViewSource {
+    static var openedByLink: Set<String> = []
+}
+
+/// Что участники группы могут без админки (как «Разрешения» в Telegram)
+struct GroupPerms: Equatable {
+    var media = true            // фото, видео, файлы, музыка
+    var voice = true            // голосовые и кружки
+    var stickers = true         // стикеры и GIF
+    var links = true
+    var polls = true
+    var invite = true           // добавлять участников
+    var pin = true              // закреплять сообщения
+
+    var json: [String: Bool] {
+        ["media": media, "voice": voice, "stickers": stickers, "links": links, "polls": polls, "invite": invite, "pin": pin]
+    }
+}
+
+/// Кому в группе запретили писать
+struct RestrictedMember: Identifiable, Equatable {
+    var id: String { member.id }
+    let member: GroupMember
+    let until: Date?            // nil — навсегда
+}
+
+/// Админ удаляет чужое сообщение: что сделать заодно
+struct ModerationOptions {
+    var deleteAll = false
+    var restrict: Int? = nil    // запретить писать: секунд, 0 — навсегда, nil — нет
+    var ban = false
+}
+
+/// Статистика канала или группы (как в Telegram)
+struct GroupStats {
+    struct DayViews { let day: Date; let sources: [String: Int] }
+    struct GrowthPoint { let day: Date; let count: Int }
+    struct FollowerPoint { let day: Date; let joined: Int; let left: Int }
+    struct LangShare { let index: Int; let code: String; let count: Int }
+    struct Post: Identifiable { let id: String; let text: String; let createdAt: Date; let views: Int; let reactions: Int; let shares: Int }
+    let count: Int
+    let countWeekAgo: Int
+    let notifyPercent: Double
+    let viewsPerPost: Double
+    let sharesPerPost: Double
+    let reactionsPerPost: Double
+    let periodStart: Date
+    let periodEnd: Date
+    let growth: [GrowthPoint]
+    let followers: [FollowerPoint]
+    let views: [DayViews]
+    let hours: [Int]
+    let languages: [LangShare]
+    let posts: [Post]
 }
 
 /// Чат, привязанный к каналу для комментариев
@@ -77,6 +137,8 @@ struct GroupDraft: Equatable {
     var slow = 0
     var whoWrites = "all"
     var history = true
+    var perms = GroupPerms()
+    var writers: [String] = []
 }
 
 /// Что изменить в группе (nil — не трогать)
@@ -91,6 +153,8 @@ struct GroupPatch {
     var whoWrites: String?
     var history: Bool?
     var discussion: String?         // id чата для комментариев; "" — отвязать
+    var perms: GroupPerms?
+    var writers: [String]?
 }
 
 /// Заявка на вступление
@@ -421,6 +485,10 @@ protocol MessengerRepository: Sendable {
     func answerRequest(groupID: String, userID: String, approve: Bool) async throws -> GroupInfo
     func bannedUsers(groupID: String) async throws -> [GroupMember]
     func unban(groupID: String, userID: String) async throws
+    func moderate(groupID: String, userID: String, messageID: String?, options: ModerationOptions) async throws
+    func restricted(groupID: String) async throws -> [RestrictedMember]
+    func unrestrict(groupID: String, userID: String) async throws
+    func stats(groupID: String, days: Int) async throws -> GroupStats
     func setMuted(groupID: String, muted: Bool) async throws
     func deleteGroup(id: String) async throws
     func comments(channelID: String, messageID: String) async throws -> CommentThread
@@ -663,12 +731,100 @@ private struct GroupDTO: Decodable {
     let requests: Int?
     let pending: Bool?
     let discussion: DiscussionDTO?
+    let perms: [String: Bool]?
+    let writers: [String]?
+    let restrictedUntil: Double?
     var model: GroupInfo {
         GroupInfo(id: id, name: name, about: about, kind: kind, members: members.map(\.model), myRole: myRole, code: code,
                   type: type ?? "group", handle: handle, approve: approve ?? false, noForward: noForward ?? false,
                   slow: slow ?? 0, whoWrites: whoWrites ?? "all", history: history ?? true, count: count ?? members.count,
                   muted: muted ?? false, canWrite: canWrite ?? true, requests: requests ?? 0, pending: pending ?? false,
+                  perms: perms.map { p in GroupPerms(media: p["media"] ?? true, voice: p["voice"] ?? true, stickers: p["stickers"] ?? true,
+                                                     links: p["links"] ?? true, polls: p["polls"] ?? true, invite: p["invite"] ?? true,
+                                                     pin: p["pin"] ?? true) } ?? GroupPerms(),
+                  writers: writers ?? [],
+                  restrictedUntil: restrictedUntil.map { $0 > 0 ? Date(timeIntervalSince1970: $0) : .distantFuture },
                   discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) })
+    }
+}
+
+private struct RestrictedListDTO: Decodable {
+    struct Item: Decodable { let user: MemberDTOLite; let until: Double }
+    let restricted: [Item]
+}
+
+private struct GroupStatsDTO: Decodable {
+    struct PostDTO: Decodable { let id: String; let text: String; let createdAt: Double; let views: Int; let reactions: Int; let shares: Int }
+    struct DayViewsDTO: Decodable {
+        let day: Double
+        let sources: [String: Int]
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            day = try c.decode(Double.self)
+            sources = try c.decode([String: Int].self)
+        }
+    }
+    let period: [Double]
+    let count: Int
+    let countWeekAgo: Int
+    let notifyPct: Double
+    let viewsPerPost: Double
+    let sharesPerPost: Double
+    let reactionsPerPost: Double
+    let growth: [[Double]]
+    let followers: [[Double]]
+    let views: [DayViewsDTO]
+    let hours: [Int]
+    let languagesRaw: [LangDTO]?
+    let posts: [PostDTO]
+
+    struct LangDTO: Decodable {
+        let code: String
+        let count: Int
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            code = try c.decode(String.self)
+            count = try c.decode(Int.self)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case period, count, countWeekAgo, notifyPct, viewsPerPost, sharesPerPost, reactionsPerPost, growth, followers, views, hours, posts
+        case languagesRaw = "languages"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        period = try c.decode([Double].self, forKey: .period)
+        count = try c.decode(Int.self, forKey: .count)
+        countWeekAgo = try c.decode(Int.self, forKey: .countWeekAgo)
+        notifyPct = try c.decode(Double.self, forKey: .notifyPct)
+        viewsPerPost = try c.decode(Double.self, forKey: .viewsPerPost)
+        sharesPerPost = try c.decode(Double.self, forKey: .sharesPerPost)
+        reactionsPerPost = try c.decode(Double.self, forKey: .reactionsPerPost)
+        growth = try c.decode([[Double]].self, forKey: .growth)
+        followers = try c.decode([[Double]].self, forKey: .followers)
+        views = try c.decode([DayViewsDTO].self, forKey: .views)
+        hours = try c.decode([Int].self, forKey: .hours)
+        languagesRaw = try c.decodeIfPresent([LangDTO].self, forKey: .languagesRaw)
+        posts = try c.decode([PostDTO].self, forKey: .posts)
+    }
+
+    var model: GroupStats {
+        let date = { (t: Double) in Date(timeIntervalSince1970: t) }
+        return GroupStats(count: count, countWeekAgo: countWeekAgo, notifyPercent: notifyPct, viewsPerPost: viewsPerPost,
+                          sharesPerPost: sharesPerPost, reactionsPerPost: reactionsPerPost,
+                          periodStart: date(period.first ?? 0), periodEnd: date(period.last ?? 0),
+                          growth: growth.compactMap { $0.count >= 2 ? GroupStats.GrowthPoint(day: date($0[0]), count: Int($0[1])) : nil },
+                          followers: followers.compactMap {
+                              $0.count >= 3 ? GroupStats.FollowerPoint(day: date($0[0]), joined: Int($0[1]), left: Int($0[2])) : nil
+                          },
+                          views: views.map { GroupStats.DayViews(day: date($0.day), sources: $0.sources) },
+                          hours: hours.count == 24 ? hours : Array(repeating: 0, count: 24),
+                          languages: (languagesRaw ?? []).enumerated().map { GroupStats.LangShare(index: $0.offset, code: $0.element.code,
+                                                                                                count: $0.element.count) },
+                          posts: posts.map { GroupStats.Post(id: $0.id, text: $0.text, createdAt: date($0.createdAt), views: $0.views,
+                                                             reactions: $0.reactions, shares: $0.shares) })
     }
 }
 
@@ -806,6 +962,7 @@ struct RemoteMessengerRepository: MessengerRepository {
     func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
+        if ChannelViewSource.openedByLink.contains(peerID) { query["src"] = "link" }      // статистика: «URL»
         // быстрый просмотр (предзагрузка) и полная загрузка хранятся отдельно: короткая копия не затирает длинную
         let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
                                                slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
@@ -942,7 +1099,7 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     private static func draftBody(_ d: GroupDraft) -> [String: Any] {
         ["title": d.title, "about": d.about, "type": d.type, "kind": d.kind, "handle": d.handle, "approve": d.approve,
-         "no_forward": d.noForward, "slow": d.slow, "who_writes": d.whoWrites, "history": d.history]
+         "no_forward": d.noForward, "slow": d.slow, "who_writes": d.whoWrites, "history": d.history, "perms": d.perms.json]
     }
 
     func createGroup(_ draft: GroupDraft, members: [String]) async throws -> GroupInfo {
@@ -967,6 +1124,8 @@ struct RemoteMessengerRepository: MessengerRepository {
         if let v = patch.whoWrites { body["who_writes"] = v }
         if let v = patch.history { body["history"] = v }
         if let v = patch.discussion { body["discussion"] = v }
+        if let v = patch.perms { body["perms"] = v.json }
+        if let v = patch.writers { body["writers"] = v }
         return try decodeAPI(GroupDTO.self, from: try await api.request("PUT", "/v1/groups/\(id)", body: ServerAPI.json(body))).model
     }
 
@@ -1014,6 +1173,28 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func unban(groupID: String, userID: String) async throws {
         _ = try await api.request("DELETE", "/v1/groups/\(groupID)/bans/\(userID)")
+    }
+
+    func moderate(groupID: String, userID: String, messageID: String?, options: ModerationOptions) async throws {
+        var body: [String: Any] = ["delete_all": options.deleteAll, "ban": options.ban]
+        if let messageID { body["message_id"] = messageID }
+        if let r = options.restrict { body["restrict"] = r }
+        _ = try await api.request("POST", "/v1/groups/\(groupID)/moderate/\(userID)", body: ServerAPI.json(body))
+    }
+
+    func restricted(groupID: String) async throws -> [RestrictedMember] {
+        try decodeAPI(RestrictedListDTO.self, from: try await api.request("GET", "/v1/groups/\(groupID)/restricted")).restricted.map {
+            RestrictedMember(member: $0.user.model, until: $0.until > 0 ? Date(timeIntervalSince1970: $0.until) : nil)
+        }
+    }
+
+    func unrestrict(groupID: String, userID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/restricted/\(userID)")
+    }
+
+    func stats(groupID: String, days: Int) async throws -> GroupStats {
+        let data = try await api.request("GET", "/v1/groups/\(groupID)/stats", query: ["days": String(days)])
+        return try decodeAPI(GroupStatsDTO.self, from: data).model
     }
 
     func setMuted(groupID: String, muted: Bool) async throws {

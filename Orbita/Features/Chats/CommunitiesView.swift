@@ -318,6 +318,7 @@ struct GroupLinkSheet: View {
                     .padding(.horizontal, 24).padding(.top, 8)
                 if preview.kind == "open" && !preview.joined {
                     Button {
+                        ChannelViewSource.openedByLink.insert(preview.id)
                         PushManager.shared.openChat = ChatRoute(peer: ChatPeer(preview: preview))
                         dismiss()
                     } label: {

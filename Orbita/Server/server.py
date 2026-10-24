@@ -330,6 +330,24 @@ ensure_column("posts", "wall_only", "wall_only INTEGER NOT NULL DEFAULT 0")     
 # «Не интересует»: такой пост человеку больше никогда не рекомендуется (открыть можно, только если пришлют или найдёт сам)
 DB.execute("CREATE TABLE IF NOT EXISTS hidden_posts(user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(user_id, post_id))")
+# Права участников группы (как в Telegram): что можно без админки; «писать могут выбранные»; кому запретили писать
+ensure_column("groups", "perms", "perms TEXT")
+DB.execute("CREATE TABLE IF NOT EXISTS group_writers(group_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(group_id, user_id))")
+DB.execute("CREATE TABLE IF NOT EXISTS group_restricted(group_id TEXT NOT NULL, user_id TEXT NOT NULL, until REAL NOT NULL, "
+           "by_user TEXT, created_at REAL NOT NULL, PRIMARY KEY(group_id, user_id))")
+# Статистика каналов и групп: вступили / вышли, просмотры постов (откуда пришли, язык), пересылки
+DB.execute("CREATE TABLE IF NOT EXISTS group_events(group_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_gevents ON group_events(group_id, at)")
+DB.execute("CREATE TABLE IF NOT EXISTS channel_views(group_id TEXT NOT NULL, message_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+           "source TEXT NOT NULL, lang TEXT, at REAL NOT NULL, PRIMARY KEY(message_id, user_id))")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_cviews ON channel_views(group_id, at)")
+DB.execute("CREATE TABLE IF NOT EXISTS channel_shares(group_id TEXT NOT NULL, message_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+           "target TEXT NOT NULL, at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_cshares ON channel_shares(group_id, at)")
+DB.execute("CREATE TABLE IF NOT EXISTS user_langs(user_id TEXT PRIMARY KEY, lang TEXT NOT NULL)")
+# у старых групп истории вступлений нет — берём даты вступления нынешних участников
+DB.execute("INSERT INTO group_events(group_id, user_id, kind, at) SELECT group_id, user_id, 'join', joined_at FROM group_members "
+           "WHERE group_id NOT IN (SELECT DISTINCT group_id FROM group_events)")
 # Заметки к сообщениям: видны только тому, кто их оставил (зашифрованы его ключом)
 DB.execute("CREATE TABLE IF NOT EXISTS message_notes(user_id TEXT NOT NULL, message_id TEXT NOT NULL, text_enc BLOB NOT NULL, "
            "updated_at REAL NOT NULL, PRIMARY KEY(user_id, message_id))")
@@ -1061,6 +1079,8 @@ class Handler(BaseHTTPRequestHandler):
                     if needs_auth and not me:
                         self.drain()
                         raise ApiError(401, "unauthorized")
+                    if me:
+                        remember_lang(me["id"], self.headers.get("X-Orbita-Lang"))
                     if me and method != "GET":
                         UVER[me["id"]] = UVER.get(me["id"], 0) + 1       # свои изменения сразу сбрасывают кэш
                     elif me and method == "GET":
@@ -3769,16 +3789,41 @@ def message_json(m, me_id):
         "reactions": reactions_of(mid, me_id),
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
-        **fwd_fields(m),
+        **fwd_fields(m, me_id),
     }
 
 
-def fwd_fields(m):
+SEEN_VIEWS = set()
+
+
+def record_views(gid, mids, uid, source):
+    """Просмотр поста канала: один на человека, с источником (подписчики, по ссылке, из личных чатов, из групп)"""
+    fresh = [mid for mid in mids if (mid, uid) not in SEEN_VIEWS]
+    if not fresh:
+        return
+    now, lang = time.time(), lang_of(uid)
+    for mid in fresh:
+        SEEN_VIEWS.add((mid, uid))
+        run("INSERT OR IGNORE INTO channel_views(group_id, message_id, user_id, source, lang, at) VALUES (?,?,?,?,?,?)",
+            (gid, mid, uid, source, lang, now))
+    if len(SEEN_VIEWS) > 200000:
+        SEEN_VIEWS.clear()
+
+
+def fwd_view(f, me_id, source):
+    """Пересланный пост канала открыли в личке или группе — просмотр с этим источником"""
+    if f and f.get("ch") and f.get("cm"):
+        record_views(f["ch"], [f["cm"]], me_id, source)
+
+
+def fwd_fields(m, me_id=None):
     if not m["fwd_enc"]:
         return {}
     f = fwd_of(m)
     if not f:
         return {}
+    if me_id and m["sender"] != me_id:
+        fwd_view(f, me_id, "dm")
     if "story" in f:
         return {"story_reply": f["story"]}
     return {"forwarded": f}
@@ -3915,6 +3960,11 @@ def forward_messages(req, me, peer):
         shown = sender_row is not None and (m["sender"] == uid or can_see(sender_row, uid, "forwards"))
         fwd = {"id": m["sender"] if shown else None,
                "name": user_brief(m["sender"], uid)["name"] if shown else "Скрытый автор"}
+        src_group = group_row(m["group_id"]) if "group_id" in m.keys() else None
+        if src_group and src_group["type"] == "channel":
+            fwd["ch"], fwd["cm"] = src_group["id"], m["id"]
+            run("INSERT INTO channel_shares(group_id, message_id, user_id, target, at) VALUES (?,?,?,?,?)",
+                (src_group["id"], m["id"], uid, "groups" if group else "dm", now))
         insert_fwd(uid, peer, group, text, entities, atts, None if hide_sender else fwd, now + i * 0.001)
         count += 1
     if count:
@@ -4958,8 +5008,12 @@ def set_note(req, me, mid):
 @route("PUT", r"/v1/messages/([a-f0-9]+)/pin")
 def set_pin(req, me, mid):
     m, grp, key = find_message(mid, me["id"])
-    if grp and not is_admin(member_row(m["group_id"], me["id"])):
-        raise ApiError(403, "forbidden")
+    if grp:
+        pg = group_row(m["group_id"])
+        pmem = member_row(m["group_id"], me["id"])
+        if not is_admin(pmem) and not (pg["type"] == "group" and group_perms(pg)["pin"]
+                                       and restricted_until(pg["id"], me["id"]) is None):
+            raise ApiError(403, "forbidden")
     if req.body_json().get("pinned", True):
         run("INSERT OR REPLACE INTO pins(chat_key, message_id, pinned_by, created_at) VALUES (?,?,?,?)",
             (key, mid, me["id"], time.time()))
@@ -5153,12 +5207,82 @@ def is_admin(mem):
     return bool(mem) and mem["role"] in ("owner", "admin")
 
 
+LANGS = {}
+
+
+def remember_lang(uid, value):
+    """Язык телефона (заголовок X-Orbita-Lang) — для статистики «Языки» в каналах"""
+    lang = re.sub(r"[^a-z]", "", str(value or "").lower())[:3]
+    if not lang or LANGS.get(uid) == lang:
+        return
+    LANGS[uid] = lang
+    run("INSERT OR REPLACE INTO user_langs(user_id, lang) VALUES (?,?)", (uid, lang))
+
+
+def lang_of(uid):
+    if uid not in LANGS:
+        r = q1("SELECT lang FROM user_langs WHERE user_id = ?", (uid,))
+        LANGS[uid] = r["lang"] if r else ""
+    return LANGS[uid] or None
+
+
+# что участник может без админки; по умолчанию — всё
+PERM_KEYS = ("media", "voice", "stickers", "links", "polls", "invite", "pin")
+
+
+def group_perms(g):
+    try:
+        saved = json.loads(g["perms"]) if g["perms"] else {}
+    except ValueError:
+        saved = {}
+    return {k: bool(saved.get(k, True)) for k in PERM_KEYS}
+
+
+def restricted_until(gid, uid):
+    """Запрет писать: None — нет, 0 — навсегда, иначе до какого времени"""
+    r = q1("SELECT until FROM group_restricted WHERE group_id = ? AND user_id = ?", (gid, uid))
+    if not r:
+        return None
+    if r["until"] and r["until"] <= time.time():
+        run("DELETE FROM group_restricted WHERE group_id = ? AND user_id = ?", (gid, uid))
+        return None
+    return r["until"]
+
+
 def can_post(g, mem):
     if not mem:
         return False
-    if g["type"] == "channel" or g["who_writes"] == "admins":
+    if g["type"] == "channel":
         return is_admin(mem)
+    if is_admin(mem):
+        return True
+    if restricted_until(g["id"], mem["user_id"]) is not None:
+        return False
+    if g["who_writes"] == "admins":
+        return False
+    if g["who_writes"] == "selected":
+        return q1("SELECT 1 FROM group_writers WHERE group_id = ? AND user_id = ?", (g["id"], mem["user_id"])) is not None
     return True
+
+
+LINK_RE = re.compile(r"(https?://|www\.|\bt\.me/)", re.I)
+MEDIA_PERM = {"photo": "media", "video": "media", "file": "media", "audio": "media",
+              "voice": "voice", "circle": "voice", "sticker": "stickers"}
+
+
+def check_perms(g, mem, text, entities, attachments, poll):
+    """Участник без админки отправляет то, что ему разрешили настройки группы"""
+    if g["type"] == "channel" or is_admin(mem):
+        return
+    perms = group_perms(g)
+    if poll and not perms["polls"]:
+        raise ApiError(403, "not_allowed", what="polls")
+    for a in attachments:
+        key = "stickers" if a.get("gif") else MEDIA_PERM.get(a.get("type"))
+        if key and not perms[key]:
+            raise ApiError(403, "not_allowed", what=key)
+    if not perms["links"] and (LINK_RE.search(text or "") or any(e.get("type") in ("url", "link", "text_link") for e in entities or [])):
+        raise ApiError(403, "not_allowed", what="links")
 
 
 def group_title(g):
@@ -5197,6 +5321,9 @@ def group_info(g, me_id):
     return {"id": gid, "name": group_title(g), "about": group_about(g), "kind": g["kind"], "type": g["type"],
             "handle": g["handle"], "approve": bool(g["approve"]), "no_forward": bool(g["no_forward"]),
             "slow": g["slow"], "who_writes": g["who_writes"], "history": bool(g["history"]),
+            "perms": group_perms(g),
+            "writers": [r["user_id"] for r in q("SELECT user_id FROM group_writers WHERE group_id = ?", (gid,))] if admin else [],
+            "restricted_until": restricted_until(gid, me_id) if mem and not admin else None,
             "members": members, "count": group_count(gid),
             "my_role": mem["role"] if mem else None, "code": g["code"] if (mem and link_ok) else None,
             "muted": bool(mem and mem["muted"]), "can_write": can_post(g, mem),
@@ -5300,6 +5427,8 @@ def gmsg_json(m, me_id, channel=None):
     }
     if m["fwd_enc"]:
         out["forwarded"] = fwd_of(m)
+        if m["sender"] != me_id:
+            fwd_view(out["forwarded"], me_id, "groups")
     if "kind" in m.keys() and m["kind"] in SYS_LABELS:
         out["system"] = m["kind"]
     if "kind" in m.keys() and m["kind"] == "poll":
@@ -5345,6 +5474,9 @@ def group_messages(req, me, gid):
                  (gid, 0 if preview else history_since(g, mem), uid, limit))
     rows.reverse()
     channel = g["type"] == "channel"
+    if channel and req.query().get("peek") != "1":
+        source = "subscribers" if mem else ("url" if req.query().get("src") == "link" else "other")
+        record_views(g["id"], [m["id"] for m in rows if not m["kind"]], uid, source)
     req.send_json(200, {"messages": [gmsg_json(m, uid, channel) for m in rows], "peer": group_peer(g),
                         "typing": None if preview else group_typing(gid, uid),
                         "can_write": can_post(g, mem), "group": group_info(g, uid), "preview": preview,
@@ -5421,6 +5553,7 @@ def group_send(req, me, gid):
         if wait > 0:
             raise ApiError(429, "slow_mode", wait=int(wait) + 1)
     entities = [] if poll else clean_entities(d.get("entities", []), text)
+    check_perms(g, mem, text, entities, attachments, poll)
     reply_to = None
     if d.get("reply_to"):
         r = q1("SELECT id FROM group_messages WHERE id = ? AND group_id = ?", (str(d["reply_to"]), gid))
@@ -5496,7 +5629,10 @@ def purge_group(gid):
 
 
 def leave_group(gid, uid):
+    if member_row(gid, uid):
+        run("INSERT INTO group_events(group_id, user_id, kind, at) VALUES (?,?,?,?)", (gid, uid, "leave", time.time()))
     run("DELETE FROM group_members WHERE group_id = ? AND user_id = ?", (gid, uid))
+    run("DELETE FROM group_writers WHERE group_id = ? AND user_id = ?", (gid, uid))
     left = q("SELECT * FROM group_members WHERE group_id = ? ORDER BY joined_at", (gid,))
     if not left:
         purge_group(gid)
@@ -5521,6 +5657,7 @@ def add_members(g, by, ids, announce=True):
         run("DELETE FROM group_requests WHERE group_id = ? AND user_id = ?", (g["id"], cid))
         run("INSERT INTO group_members(group_id, user_id, role, joined_at, last_read) VALUES (?,?,?,?,?)",
             (g["id"], cid, "member", time.time(), time.time()))
+        run("INSERT INTO group_events(group_id, user_id, kind, at) VALUES (?,?,?,?)", (g["id"], cid, "join", time.time()))
         if announce:
             post_system(g["id"], cid, "joined")
         count += 1
@@ -5570,7 +5707,9 @@ def apply_settings(d, current=None):
     if "history" in d:
         out["history"] = 1 if d["history"] else 0
     if "who_writes" in d:
-        out["who_writes"] = "admins" if d["who_writes"] == "admins" else "all"
+        out["who_writes"] = d["who_writes"] if d["who_writes"] in ("admins", "selected") else "all"
+    if isinstance(d.get("perms"), dict):
+        out["perms"] = json.dumps({k: bool(d["perms"].get(k, True)) for k in PERM_KEYS})
     if "slow" in d:
         try:
             v = int(d["slow"])
@@ -5602,6 +5741,7 @@ def create_group(req, me):
          s.get("history", 1)))
     run("INSERT INTO group_members(group_id, user_id, role, joined_at, last_read) VALUES (?,?,?,?,?)",
         (gid, uid, "owner", time.time(), time.time()))
+    run("INSERT INTO group_events(group_id, user_id, kind, at) VALUES (?,?,?,?)", (gid, uid, "join", time.time()))
     g = group_row(gid)
     ids = d.get("members")
     if isinstance(ids, list):
@@ -5715,9 +5855,15 @@ def edit_group(req, me, gid):
         handle = None
     run("UPDATE groups SET kind = ?, handle = ? WHERE id = ?", (kind, handle, gid))
     for col, val in apply_settings(d).items():
-        if g["type"] == "channel" and col in ("slow", "who_writes"):
+        if g["type"] == "channel" and col in ("slow", "who_writes", "perms"):
             continue
         run("UPDATE groups SET %s = ? WHERE id = ?" % col, (val, gid))
+    if isinstance(d.get("writers"), list) and g["type"] == "group":
+        # «писать могут выбранные»: только участники этой группы
+        run("DELETE FROM group_writers WHERE group_id = ?", (gid,))
+        for wid in [str(x) for x in d["writers"]][:500]:
+            if member_row(gid, wid):
+                run("INSERT OR IGNORE INTO group_writers(group_id, user_id) VALUES (?,?)", (gid, wid))
     if not d.get("approve", g["approve"]):
         # заявки больше не нужны — всех, кто ждёт, принимаем
         for r in q("SELECT user_id FROM group_requests WHERE group_id = ?", (gid,)):
@@ -5802,7 +5948,8 @@ def invite_members(req, me, gid):
     mem = member_row(gid, me["id"]) if g else None
     if not mem:
         raise ApiError(404, "not_found")
-    if (g["kind"] == "closed" or g["type"] == "channel") and not is_admin(mem):
+    if (g["kind"] == "closed" or g["type"] == "channel") and not is_admin(mem) \
+            and not (g["type"] == "group" and group_perms(g)["invite"]):
         raise ApiError(403, "forbidden")
     ids = req.body_json().get("user_ids")
     if not isinstance(ids, list):
@@ -5887,6 +6034,147 @@ def unban(req, me, gid, uid):
         raise ApiError(403, "forbidden")
     run("DELETE FROM group_bans WHERE group_id = ? AND user_id = ?", (gid, uid))
     req.send_json(200, {"ok": True})
+
+
+RESTRICT_STEPS = (0, 3600, 86400, 7 * 86400)       # 0 — навсегда
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/moderate/([A-Za-z0-9_\-]+)")
+def moderate_member(req, me, gid, uid):
+    """Админ удаляет чужое сообщение и заодно: все сообщения этого человека, запрет писать, блокировка (как в Telegram)"""
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    if not is_admin(mem) or uid == me["id"]:
+        raise ApiError(403, "forbidden")
+    target = member_row(gid, uid)
+    if target and (target["role"] == "owner" or (target["role"] == "admin" and mem["role"] != "owner")):
+        raise ApiError(403, "forbidden")
+    d = req.body_json()
+    removed = 0
+    mid = str(d.get("message_id") or "")
+    if mid:
+        m = q1("SELECT * FROM group_messages WHERE id = ? AND group_id = ? AND sender = ?", (mid, gid, uid))
+        if m:
+            drop_message_media(m)
+            run("DELETE FROM group_messages WHERE id = ?", (mid,))
+            removed += 1
+    if d.get("delete_all"):
+        for m in q("SELECT * FROM group_messages WHERE group_id = ? AND sender = ? AND (kind IS NULL OR kind = 'poll')", (gid, uid)):
+            drop_message_media(m)
+            run("DELETE FROM group_messages WHERE id = ?", (m["id"],))
+            removed += 1
+    if d.get("ban"):
+        run("INSERT OR IGNORE INTO group_bans(group_id, user_id) VALUES (?,?)", (gid, uid))
+        run("DELETE FROM group_restricted WHERE group_id = ? AND user_id = ?", (gid, uid))
+        if target:
+            post_system(gid, uid, "removed")
+            leave_group(gid, uid)
+    elif d.get("restrict") is not None and d.get("restrict") is not False and target:
+        try:
+            secs = 0 if d["restrict"] is True else int(d["restrict"])
+        except (TypeError, ValueError):
+            raise ApiError(400, "bad_value")
+        secs = secs if secs in RESTRICT_STEPS else 0
+        run("INSERT OR REPLACE INTO group_restricted(group_id, user_id, until, by_user, created_at) VALUES (?,?,?,?,?)",
+            (gid, uid, time.time() + secs if secs else 0, me["id"], time.time()))
+    req.send_json(200, {"ok": True, "removed": removed})
+
+
+@route("GET", r"/v1/groups/(g_[a-f0-9]{32})/restricted")
+def list_restricted(req, me, gid):
+    if not is_admin(member_row(gid, me["id"])):
+        raise ApiError(403, "forbidden")
+    out = []
+    for r in q("SELECT * FROM group_restricted WHERE group_id = ? ORDER BY created_at DESC", (gid,)):
+        if restricted_until(gid, r["user_id"]) is not None:
+            out.append({"user": user_brief(r["user_id"], me["id"]), "until": r["until"]})
+    req.send_json(200, {"restricted": out})
+
+
+@route("DELETE", r"/v1/groups/(g_[a-f0-9]{32})/restricted/([A-Za-z0-9_\-]+)")
+def unrestrict(req, me, gid, uid):
+    if not is_admin(member_row(gid, me["id"])):
+        raise ApiError(403, "forbidden")
+    run("DELETE FROM group_restricted WHERE group_id = ? AND user_id = ?", (gid, uid))
+    req.send_json(200, {"ok": True})
+
+
+DAY = 86400
+
+
+def day_start(t):
+    return int(t // DAY * DAY)
+
+
+@route("GET", r"/v1/groups/(g_[a-f0-9]{32})/stats")
+def group_stats(req, me, gid):
+    """Статистика канала или группы для админов (как в Telegram): рост, вступили/вышли, источники просмотров,
+    языки, активность по часам, последние публикации. Дни — в UTC, клиент подписывает их в своём часовом поясе"""
+    g = group_row(gid)
+    if not g or not is_admin(member_row(gid, me["id"])):
+        raise ApiError(403, "forbidden")
+    now = time.time()
+    try:
+        days = max(7, min(365, int(req.query().get("days", "90"))))
+    except ValueError:
+        days = 90
+    first = day_start(now) - (days - 1) * DAY
+    count = group_count(gid)
+
+    # вступили / вышли по дням и число участников на конец каждого дня
+    joined, left = {}, {}
+    for r in q("SELECT kind, at FROM group_events WHERE group_id = ? AND at >= ?", (gid, first)):
+        bucket = joined if r["kind"] == "join" else left
+        d0 = day_start(r["at"])
+        bucket[d0] = bucket.get(d0, 0) + 1
+    growth, followers, running = [], [], count
+    for i in range(days - 1, -1, -1):
+        d0 = first + i * DAY
+        growth.append([d0, running])
+        followers.append([d0, joined.get(d0, 0), left.get(d0, 0)])
+        running -= joined.get(d0, 0) - left.get(d0, 0)
+    growth.reverse()
+    followers.reverse()
+    week_ago = next((c for d0, c in growth if d0 >= day_start(now) - 7 * DAY), count)
+
+    # просмотры: по дням и источникам, по часам, языки
+    sources = {}
+    hours = [0] * 24
+    for r in q("SELECT source, at FROM channel_views WHERE group_id = ? AND at >= ?", (gid, first)):
+        d0 = day_start(r["at"])
+        row = sources.setdefault(d0, {})
+        row[r["source"]] = row.get(r["source"], 0) + 1
+        if r["at"] >= now - 7 * DAY:
+            hours[int(r["at"] % DAY // 3600)] += 1
+    views_by_day = [[first + i * DAY, sources.get(first + i * DAY, {})] for i in range(days)]
+    langs = {}
+    for r in q("SELECT ul.lang FROM group_members gm LEFT JOIN user_langs ul ON ul.user_id = gm.user_id WHERE gm.group_id = ?", (gid,)):
+        key = r["lang"] or "other"
+        langs[key] = langs.get(key, 0) + 1
+
+    # последние публикации: просмотры, реакции, пересылки
+    posts = []
+    for m in q("SELECT * FROM group_messages WHERE group_id = ? AND (kind IS NULL OR kind = 'poll') "
+               "ORDER BY created_at DESC LIMIT 20", (gid,)):
+        views = q1("SELECT COUNT(*) c FROM channel_views WHERE message_id = ?", (m["id"],))["c"]
+        if g["type"] == "channel":
+            views = max(views, q1("SELECT COUNT(*) c FROM group_members WHERE group_id = ? AND last_read >= ?",
+                                  (gid, m["created_at"]))["c"])
+        posts.append({"id": m["id"], "text": summary_of(m, 80), "created_at": m["created_at"], "views": views,
+                      "reactions": q1("SELECT COUNT(*) c FROM reactions WHERE message_id = ?", (m["id"],))["c"],
+                      "shares": q1("SELECT COUNT(*) c FROM channel_shares WHERE message_id = ?", (m["id"],))["c"]})
+    recent = [p for p in posts if p["created_at"] >= now - 7 * DAY] or posts[:5]
+    avg = lambda key: round(sum(p[key] for p in recent) / len(recent), 1) if recent else 0
+    muted = q1("SELECT COUNT(*) c FROM group_members WHERE group_id = ? AND muted = 1", (gid,))["c"]
+    req.send_json(200, {
+        "period": [day_start(now) - 7 * DAY, day_start(now)],
+        "count": count, "count_week_ago": week_ago,
+        "notify_pct": round(100.0 * (count - muted) / count, 2) if count else 0,
+        "views_per_post": avg("views"), "shares_per_post": avg("shares"), "reactions_per_post": avg("reactions"),
+        "growth": growth, "followers": followers, "views": views_by_day, "hours": hours,
+        "languages": sorted(([k, v] for k, v in langs.items()), key=lambda x: -x[1]),
+        "posts": posts,
+    })
 
 
 @route("GET", r"/g/([A-Za-z0-9_]{5,32})", auth=False)

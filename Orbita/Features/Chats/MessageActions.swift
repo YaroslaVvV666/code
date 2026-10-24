@@ -33,6 +33,8 @@ struct MessageActionOverlay: View {
     var onDelete: () -> Void = {}
     /// Подтверждённое удаление: true — у всех. Меню превращается в кнопку подтверждения, как в Telegram
     var onConfirmDelete: (Bool) -> Void = { _ in }
+    /// Админ группы удаляет чужое сообщение: галочки «удалить все его сообщения», «запретить писать», «заблокировать»
+    var onModerate: ((ModerationOptions) -> Void)? = nil
     var isSaved = false
     var onForward: () -> Void = {}
     var onSelect: () -> Void = {}
@@ -48,6 +50,9 @@ struct MessageActionOverlay: View {
     @Environment(\.lang) private var lang
     @State private var appear = false
     @State private var confirming = false
+    @State private var modDeleteAll = false
+    @State private var modRestrict = false
+    @State private var modBan = false
     @State private var reminding = false          // список «Напомнить: через час / вечером / завтра»
     @State private var closing = false           // меню уходит плавно, а не исчезает в один кадр
 
@@ -323,7 +328,70 @@ struct MessageActionOverlay: View {
     }
 
     /// Вместо списка действий — только кнопка(и) удаления
+    /// Чужое сообщение в группе, а ты админ — удаление с галочками, как в Telegram
+    private var moderating: Bool {
+        guard onModerate != nil, let g = model.group, g.isAdmin, !g.isChannel, !message.mine,
+              message.system == nil, let sender = message.sender else { return false }
+        // админа может наказать только владелец, владельца — никто
+        let role = g.members.first { $0.id == sender.id }?.role
+        return role != "owner" && (role != "admin" || g.isOwner)
+    }
+
+    @ViewBuilder
     private var confirmList: some View {
+        if moderating { moderationList } else { plainConfirmList }
+    }
+
+    private var moderationList: some View {
+        let name = message.sender?.name ?? ""
+        return VStack(spacing: 0) {
+            Text(s.t("Удалить сообщение от \(name)?", "Delete message from \(name)?"))
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center).padding(.horizontal, 16).padding(.vertical, 12)
+            divider
+            checkRow(s.t("Удалить все его сообщения", "Delete all their messages"), isOn: $modDeleteAll)
+            divider
+            checkRow(s.t("Запретить писать", "Restrict from writing"), isOn: $modRestrict)
+                .disabled(modBan).opacity(modBan ? 0.4 : 1)
+            divider
+            checkRow(s.t("Заблокировать", "Ban from the group"), isOn: $modBan)
+            divider
+            Button {
+                var o = ModerationOptions()
+                o.deleteAll = modDeleteAll
+                o.ban = modBan
+                o.restrict = modRestrict && !modBan ? 0 : nil
+                dismiss { onModerate?(o) }
+            } label: {
+                Text(s.delete).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.danger)
+                    .frame(maxWidth: .infinity).frame(height: 48).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 290)
+        .menuSurface(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+        .animation(.easeOut(duration: 0.15), value: modBan)
+    }
+
+    private func checkRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            Haptics.select()
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { isOn.wrappedValue.toggle() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: isOn.wrappedValue ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 21)).foregroundStyle(isOn.wrappedValue ? theme.danger : theme.textTertiary)
+                    .contentTransition(.symbolEffect(.replace))
+                Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16).frame(height: 46).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var plainConfirmList: some View {
         let everyone = message.mine || model.group?.isAdmin == true
         return VStack(spacing: 0) {
             if isSaved {
