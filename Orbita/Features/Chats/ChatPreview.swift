@@ -25,7 +25,7 @@ struct ChatPreviewBody: View {
                     if !loading && messages.isEmpty {
                         Text(s.chatStart).font(.system(size: 14)).foregroundStyle(theme.textTertiary).padding(.vertical, 30)
                     }
-                    ForEach(messages) { m in
+                    ForEach(Array(messages.enumerated()), id: \.element.key) { index, m in
                         if m.id == firstUnread {
                             Text(s.t("Новые сообщения", "New messages"))
                                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.accentColor)
@@ -34,7 +34,7 @@ struct ChatPreviewBody: View {
                                 .padding(.horizontal, -12).padding(.vertical, 4)
                                 .id("strip")
                         }
-                        bubble(m).id(m.key)
+                        bubble(m, index: index).id(m.key)
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -54,22 +54,17 @@ struct ChatPreviewBody: View {
         }
     }
 
-    private func bubble(_ m: ChatMessage) -> some View {
-        HStack {
-            if m.mine { Spacer(minLength: 40) }
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(m.summary.isEmpty ? "…" : m.summary)
-                    .font(.system(size: 15))
-                    .foregroundStyle(m.mine ? Color.white : theme.text)
-                    .multilineTextAlignment(.leading)
-                Text(ChatTime.clock(m.createdAt))
-                    .font(.system(size: 10)).foregroundStyle(m.mine ? Color.white.opacity(0.7) : theme.textTertiary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(m.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            if !m.mine { Spacer(minLength: 40) }
-        }
+    /// Настоящий пузырь из переписки (без нажатий): видно фото, кружки, стикеры и крупные анимированные эмодзи,
+    /// а не надписи «Фото», «Видеосообщение»
+    private func bubble(_ m: ChatMessage, index: Int) -> some View {
+        let prev = index > 0 ? messages[index - 1] : nil
+        let next = index + 1 < messages.count ? messages[index + 1] : nil
+        let isFirst = prev.map { $0.mine != m.mine || $0.sender?.id != m.sender?.id } ?? true
+        let isLast = next.map { $0.mine != m.mine || $0.sender?.id != m.sender?.id } ?? true
+        return MessageRow(message: m, isFirst: isFirst, isLast: isLast,
+                          onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
+                          showSender: peer.isGroup && !peer.isChannel, noForward: peer.noForward, interactive: false)
+            .allowsHitTesting(false)
     }
 }
 

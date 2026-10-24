@@ -57,6 +57,9 @@ final class BannerWindowController {
 /// Невидимая вставка в иерархию: держит окно баннера и обновляет его тему / язык
 struct BannerWindowInstaller: UIViewRepresentable {
     let chats: ChatsModel
+    /// Окно баннера живёт отдельно от экранов: всё, что нужно пузырям сообщений в предпросмотре, передаём явно
+    let session: AppSession
+    let flow: AuthFlow
     let theme: Theme
     let lang: AppLanguage
     let onOpen: (ChatPeer) -> Void
@@ -67,6 +70,7 @@ struct BannerWindowInstaller: UIViewRepresentable {
         let root = AnyView(
             ChatBannerHost(chats: chats, onOpen: onOpen)
                 .environment(\.theme, theme).environment(\.lang, lang)
+                .environmentObject(session).environmentObject(flow).environmentObject(session.player)
                 .preferredColorScheme(theme.dark ? .dark : .light)
         )
         DispatchQueue.main.async { BannerWindowController.shared.install(root) }

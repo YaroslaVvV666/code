@@ -191,7 +191,7 @@ struct MainTabView: View {
             }
         }
         .background {
-            BannerWindowInstaller(chats: session.chats, theme: theme, lang: lang) { peer in
+            BannerWindowInstaller(chats: session.chats, session: session, flow: flow, theme: theme, lang: lang) { peer in
                 push.openChat = ChatRoute(peer: peer)
                 tab = .chats
             }
