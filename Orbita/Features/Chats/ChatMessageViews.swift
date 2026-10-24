@@ -793,7 +793,8 @@ struct VoiceBlock: View {
     private func playerRow(tint: Color) -> some View {
         HStack(spacing: 10) {
             Button {
-                guard let mediaID = attachment.mediaID else { return }
+                // зажали голосовое ради реакций — отпускание пальца не должно его включать
+                guard !MessageMenu.isOpen, let mediaID = attachment.mediaID else { return }
                 player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
             } label: {
                 ZStack {
@@ -1104,7 +1105,8 @@ struct CircleVideoBubble: View {
         .overlay { if callToast { Text(CallGate.message(lang)).font(.system(size: 12, weight: .semibold)).multilineTextAlignment(.center).foregroundStyle(.white).padding(10).background(Color.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 12)).padding(14) } }
         .contentShape(Circle())
         .onTapGesture {
-            guard !message.isPending, let id = attachment.mediaID else { return }
+            // зажали кружок ради реакций — отпускание пальца не должно его включать
+            guard !MessageMenu.isOpen, !message.isPending, let id = attachment.mediaID else { return }
             if CallGate.busy {
                 callToast = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { callToast = false }

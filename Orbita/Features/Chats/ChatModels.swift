@@ -71,7 +71,36 @@ final class ChatsModel: ObservableObject {
     private var gotFresh = false
     @Published var error: APIError?
     /// Открыта переписка — нижняя панель вкладок прячется (как в Telegram)
-    @Published var chatOpen = false
+    @Published private(set) var chatOpen = false
+    /// Сколько экранов переписки сейчас на экране. Считаем, а не ставим флаг: при быстром выходе и входе iOS может прислать
+    /// «появился» нового чата раньше, чем «исчез» старого, — флаг тогда застревал, и панель вкладок пропадала или мешала
+    private var openScreens = 0
+    /// Нажали на чат, и он выезжает: панель прячется сразу, ещё до появления экрана переписки
+    private var opening = false
+
+    func chatScreenAppeared(_ peerID: String) {
+        openScreens += 1
+        openPeerID = peerID
+        syncChatOpen()
+    }
+
+    func chatScreenDisappeared() {
+        openScreens = max(0, openScreens - 1)
+        if openScreens == 0 { openPeerID = nil }
+        syncChatOpen()
+    }
+
+    /// Список чатов: какой чат сейчас открывается (nil — вернулись в список)
+    func setOpening(_ peerID: String?) {
+        opening = peerID != nil
+        if let peerID { openPeerID = peerID }
+        syncChatOpen()
+    }
+
+    private func syncChatOpen() {
+        let now = openScreens > 0 || opening
+        if chatOpen != now { chatOpen = now }
+    }
     /// Какая переписка открыта прямо сейчас (для неё баннер не нужен)
     var openPeerID: String?
     /// Всплывающее сообщение о новом сообщении в другом чате

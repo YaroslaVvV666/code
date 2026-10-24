@@ -96,9 +96,7 @@ struct ChatsListView: View {
         }
         // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
         // посреди открытия, список пересчитывался и на пару кадров пустел
-        .onChange(of: openChat?.peer.id) { _, id in
-            if let id { session.chats.chatOpen = true; session.chats.openPeerID = id }
-        }
+        .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(id) }
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
         .onAppear { takePushRoute() }
         .onChange(of: push.openChat) { _, _ in takePushRoute() }
@@ -768,10 +766,10 @@ struct ChatScreen: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: model.pinned.count)
         .onChange(of: model.messages.count) { _, _ in session.player.syncQueue(model.musicItems.map(\.track)) }
         .onAppear {
-            session.chats.chatOpen = true; session.chats.openPeerID = route.peer.id
+            session.chats.chatScreenAppeared(route.peer.id)
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
         }
-        .onDisappear { session.chats.chatOpen = false; session.chats.openPeerID = nil }
+        .onDisappear { session.chats.chatScreenDisappeared() }
         .task {
             // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
             // меню по зажатию оживает сразу, а не после разбора JSON в момент открытия
