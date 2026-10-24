@@ -47,7 +47,24 @@ final class UserPageModel: ObservableObject {
         extras = session.extras
         ownStore = session.profile
         feed = session.feed
+        // «Моя страница» открывается сразу с содержимым: профиль уже загружен во вкладке «Профиль»,
+        // записи — с прошлого открытия. Иначе страница строилась пустой и перестраивалась прямо посреди перехода
+        if source == .me {
+            profile = session.profile.profile
+            if let cached = Self.myWall {
+                posts = cached.posts
+                guestEntries = cached.guests
+                guestCanWrite = cached.canWrite
+                wallLoaded = true
+            }
+        }
     }
+
+    /// Последняя загруженная стена своей страницы (на время работы приложения)
+    private static var myWall: (posts: [Post], guests: [WallEntry], canWrite: Bool)?
+
+    /// Есть что показать сразу, не дожидаясь сети
+    var prefilled: Bool { profile != nil }
 
     var isMe: Bool { profile?.id.lowercased() == myID || source == .me }
 
@@ -112,6 +129,7 @@ final class UserPageModel: ObservableObject {
             guestEntries = guests.entries
             guestCanWrite = guests.canWrite
         }
+        if source == .me, wallLoaded { Self.myWall = (posts, guestEntries, guestCanWrite) }
     }
 
     /// Запись гостя: фото и рисунок сначала загружаются (там проверка на 18+), потом создаётся сама запись
@@ -465,7 +483,12 @@ struct UserPageView: View {
                 StickyProfileBar(name: profile.displayName, subtitle: statusLine(profile), color: profile.styleColor, tracker: tracker)
             }
         }
-        .task { await model.load() }
+        .task {
+            // страница уже показана с готовым содержимым — свежие данные подтягиваем после перехода,
+            // чтобы они не перестраивали её посреди анимации
+            if model.prefilled { try? await Task.sleep(nanoseconds: 450_000_000) }
+            await model.load()
+        }
         .onChange(of: stage) { _, new in
             if new == 0 {
                 namesReady = false

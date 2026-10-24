@@ -101,15 +101,21 @@ struct ProfileView: View {
     }
 
     var body: some View {
+        // Переход как в iOS: новый экран наезжает справа поверх профиля, а профиль немного уходит влево и притемняется.
+        // Экраны целиком не гаснут (проявление на весь экран тяжёлое и давало рывки), анимация без «отскока»
         ZStack {
             if let route {
                 ProfileSubScreen(route: route, store: store) { self.route = nil }
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .background(SpaceBackground(isDark: theme.dark, showStars: false).ignoresSafeArea())   // непрозрачный: профиль под ним не просвечивает
+                    .transition(.move(edge: .trailing))
+                    .zIndex(1)
             } else {
-                main.transition(.move(edge: .leading).combined(with: .opacity))
+                main
+                    .transition(.modifier(active: PushedBack(amount: 1), identity: PushedBack(amount: 0)))
+                    .zIndex(0)
             }
         }
-        .animation(.spring(response: 0.36, dampingFraction: 0.9), value: route)
+        .animation(.spring(response: 0.42, dampingFraction: 1), value: route)
     }
 
     private func openPlaylist() {
@@ -650,4 +656,15 @@ private struct NameMidKey: PreferenceKey {
 private struct DockMidKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Экран под наезжающим сверху: сдвинут влево на четверть ширины и притемнён (как в навигации iOS)
+private struct PushedBack: ViewModifier {
+    let amount: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: -UIScreen.main.bounds.width * 0.28 * amount)
+            .overlay(Color.black.opacity(0.22 * Double(amount)).ignoresSafeArea().allowsHitTesting(false))
+    }
 }
