@@ -182,6 +182,7 @@ struct ProfileStyleScreen: View {
             PrimaryButton(title: s.t("Применить стиль", "Apply style"), enabled: changed, loading: saving) { apply() }
         }
         .padding(.horizontal, 16)
+        .padding(.bottom, 96)                 // кнопка «Применить» не прячется под нижней панелью вкладок
         .onAppear {
             guard !loaded else { return }
             loaded = true
@@ -199,18 +200,21 @@ struct ProfileStyleScreen: View {
         }
     }
 
+    /// Высота превью — по содержимому (аватарка, имя, «в сети»), без пустой полосы до цветов
+    private static let previewHeight: CGFloat = 250
+
     private var preview: some View {
         ZStack(alignment: .top) {
-            ProfileBackdrop(color: color, emoji: emoji, height: 330)
+            ProfileBackdrop(color: color, emoji: emoji, height: Self.previewHeight)
             VStack(spacing: 6) {
                 AvatarView(name: name, size: 118, avatarID: store.profile?.avatarID).clipShape(Circle())
-                    .padding(.top, 34)
+                    .padding(.top, 28)
                 Text(name.isEmpty ? s.you : name)
                     .font(.system(size: 26, weight: .bold)).foregroundStyle(ProfilePalette.ink(color, fallback: theme.text))
                 Text(s.online).font(.system(size: 16)).foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary))
             }
         }
-        .frame(height: 330, alignment: .top)
+        .frame(height: Self.previewHeight, alignment: .top)
         .clipped()
     }
 
