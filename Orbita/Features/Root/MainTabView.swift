@@ -224,10 +224,17 @@ struct TabBarHost: View {
     @Binding var selection: MainTab
     let onCompose: () -> Void
 
+    /// Панель на экране. Отстаёт от chatOpen при выходе из чата: вышли и сразу зашли обратно — панель не успевает
+    /// выехать и не мелькает. При входе в чат прячется сразу
+    @State private var shown = true
+    @State private var showTask: Task<Void, Never>?
+    /// Сколько ждать после выхода из чата, прежде чем показать панель
+    private static let showDelay: UInt64 = 300_000_000
+
     var body: some View {
         // Внутри переписки панель прячется — как в Telegram
         Group {
-        if !chats.chatOpen {
+        if shown {
             OrbitaTabBar(selection: $selection, chatsBadge: chats.unread, onCompose: onCompose)
                 // вся полоса под панелью «съедает» касания: посты и фото позади не нажимаются
                 .background(Color.black.opacity(0.001).ignoresSafeArea(edges: .bottom))
@@ -235,7 +242,20 @@ struct TabBarHost: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: chats.chatOpen)
+        .onAppear { shown = !chats.chatOpen }
+        .onChange(of: chats.chatOpen) { _, open in
+            showTask?.cancel()
+            if open {
+                // зашли в чат (в том числе сразу после выхода) — панель уезжает сразу и быстро, даже если только начала выезжать
+                withAnimation(.easeOut(duration: 0.2)) { shown = false }
+            } else {
+                showTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: Self.showDelay)
+                    guard !Task.isCancelled, !chats.chatOpen else { return }
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { shown = true }
+                }
+            }
+        }
     }
 }
 
