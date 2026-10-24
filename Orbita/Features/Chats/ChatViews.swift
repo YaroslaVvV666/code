@@ -646,6 +646,7 @@ struct ChatScreen: View {
         nonmutating set { actionState.target = newValue }
     }
     @State private var messageFrames = MessageFrameStore()
+    @State private var scrollAnchor = ScrollAnchorBox()
     @State private var showRequests = false
     @State private var scrollTarget: String?
     @State private var highlightID: String?
@@ -1248,14 +1249,13 @@ struct ChatScreen: View {
             ScrollView {
                 // Не Lazy: сотня сообщений — это дёшево, зато нет скачков и пустых экранов при отправке
                 VStack(spacing: 0) {
-                    if startIdx > 0, let firstKey = list.first?.id {
-                        // Ранние сообщения добавляются сами, когда долистал до верха; при входе список не растёт —
-                        // иначе большой чат строил десятки строк разом, пустел и перескакивал
-                        // «долистал до верха» — по настоящему положению метки на экране. Список не ленивый, поэтому
-                        // onAppear срабатывал сразу при входе, и первое же касание подгружало раннее и кидало в середину
+                    if startIdx > 0 {
+                        // Ранние сообщения добавляются сами, заранее — примерно за полтора экрана до верха, чтобы не упираться в край.
+                        // «Близко к верху» — по настоящему положению метки (список не ленивый, onAppear срабатывал сразу при входе).
+                        // Экран после добавления никуда не перекидываем: прокрутку держит scrollPosition — видимое остаётся на месте
                         Color.clear.frame(height: 1)
                             .background(GeometryReader { g in
-                                let near = g.frame(in: .named("chatScroll")).minY > -300
+                                let near = g.frame(in: .named("chatScroll")).minY > -1200
                                 Color.clear
                                     .onAppear { topVisible = near }
                                     .onChange(of: near) { _, now in topVisible = now }
@@ -1263,7 +1263,6 @@ struct ChatScreen: View {
                             .onChange(of: topVisible && userDragged) { _, go in
                                 guard go else { return }
                                 topKey = all[max(0, startIdx - 40)].id
-                                DispatchQueue.main.async { proxy.scrollTo(firstKey, anchor: .top) }
                             }
                     }
                     if list.isEmpty && model.loaded {
@@ -1272,6 +1271,9 @@ struct ChatScreen: View {
                             .padding(.top, 60)
                     }
                     ForEach(list) { entry in
+                        // одна строка списка на сообщение (вместе с плашками дня и «Новые сообщения») — так scrollPosition
+                        // однозначно знает, какое сообщение на экране, и держит его на месте
+                        VStack(spacing: 0) {
                         if entry.message.id == model.firstUnreadID {
                             newMessagesStrip.id("unreadStrip")
                         }
@@ -1297,6 +1299,7 @@ struct ChatScreen: View {
                                 insertion: .scale(scale: 0.88, anchor: entry.message.mine ? .bottomTrailing : .bottomLeading)
                                     .combined(with: .move(edge: .bottom)).combined(with: .opacity),
                                 removal: .opacity.combined(with: .scale(scale: 0.9))))
+                        }
                     }
                     Color.clear.frame(height: 1).id("bottom")
                         .background(GeometryReader { g in
@@ -1305,8 +1308,13 @@ struct ChatScreen: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .animation(.spring(response: 0.38, dampingFraction: 0.86), value: list.map(\.id))
+                // анимируем только новое внизу (пришло / отправили); подгрузка ранних сверху — без анимации, строки не «летают»
+                .animation(.spring(response: 0.38, dampingFraction: 0.86), value: list.last?.id)
+                .scrollTargetLayout()
             }
+            // Прокрутка держится за сообщение на экране: когда сверху добавляются ранние сообщения или догружается превью
+            // ссылки, видимое не уезжает. Позиция — в обычном классе, а не @State: прокрутка не перерисовывает экран чата
+            .scrollPosition(id: Binding(get: { scrollAnchor.id }, set: { scrollAnchor.id = $0 }))
             .coordinateSpace(name: "chatScroll")
             .background(GeometryReader { g in
                 Color.clear
@@ -2181,4 +2189,9 @@ struct ChatHeaderLayout: Layout {
         subviews[1].place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
                           proposal: ProposedViewSize(width: width, height: ideal.height))
     }
+}
+
+/// Какое сообщение сейчас держит прокрутку переписки (для scrollPosition). Обычный класс: смена при прокрутке не перерисовывает экран
+final class ScrollAnchorBox {
+    var id: String?
 }
