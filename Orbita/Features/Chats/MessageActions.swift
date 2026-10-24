@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// Открыто ли меню зажатого сообщения. Обычный флаг без подписки: строки чата проверяют его только в обработчиках
+/// касаний, поэтому открытие меню не перерисовывает список
+enum MessageMenu {
+    static var isOpen = false
+}
+
+/// Пока открыто меню, список под размытием не листается: палец, которым зажали сообщение, иначе продолжал
+/// прокручивать чат. Подписан на выбранное сообщение сам — меняется только флаг прокрутки, строки не перерисовываются
+struct ActionScrollLock<Content: View>: View {
+    @ObservedObject var state: ActionTargetState
+    @ViewBuilder var content: Content
+    var body: some View {
+        content.scrollDisabled(state.target != nil)
+    }
+}
+
 /// Зажатое сообщение: сверху ряд реакций, посередине само сообщение, снизу меню действий (стекло)
 struct MessageActionOverlay: View {
     let message: ChatMessage
@@ -60,6 +76,7 @@ struct MessageActionOverlay: View {
             // размытие ставится сразу и без анимации прозрачности (анимированный blur пересчитывается каждый кадр и тормозит);
             // плавно проявляется и уходит только затемнение
             Rectangle().fill(.ultraThinMaterial)
+                .contentShape(Rectangle())
                 .overlay(Color.black.opacity(shown ? (theme.dark ? 0.35 : 0.12) : 0)
                     .animation(closing ? .easeOut(duration: Self.closeDuration) : .easeOut(duration: 0.25), value: shown))
                 .ignoresSafeArea()
@@ -101,9 +118,11 @@ struct MessageActionOverlay: View {
                 .animation(motion(0.05), value: shown)
             }
             .padding(.horizontal, 12)
+            .allowsHitTesting(!closing)               // пункты меню — только пока не закрывается
         }
-        .allowsHitTesting(!closing)
-        .onAppear { appear = true }
+        // размытый фон ловит все касания, в том числе пока меню плавно уходит: под ним ничего не нажимается
+        .onAppear { appear = true; MessageMenu.isOpen = true }
+        .onDisappear { MessageMenu.isOpen = false }
     }
 
     private var reactionBar: some View {

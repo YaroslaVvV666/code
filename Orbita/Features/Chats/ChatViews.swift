@@ -678,7 +678,7 @@ struct ChatScreen: View {
     var body: some View {
         ZStack {
             SpaceBackground(isDark: theme.dark, showStars: false).ignoresSafeArea()
-            messagesList
+            ActionScrollLock(state: actionState) { messagesList }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 6) {
                         if searching { searchBar } else { header }
@@ -1469,7 +1469,7 @@ struct ChatScreen: View {
                 onReactionInfo: { infoMessage = m },
                 onJumpToReply: { scrollTarget = $0 },
                 onReact: { model.react(m, emoji: $0) },
-                onLongPress: { if !selecting { actionTarget = m } },
+                onLongPress: { if !selecting { MessageMenu.isOpen = true; actionTarget = m } },     // флаг — сразу, ещё до первого кадра меню
                 onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } },
                 onOpenPost: { openSharedPost($0) },
                 onOpenStory: openStory,

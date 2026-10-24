@@ -98,6 +98,10 @@ struct MessageRow: View {
     private var s: Strings { Strings(lang: lang) }
     private var colors: ChatColors { ChatColors(theme: theme) }
     private var mine: Bool { message.mine }
+    /// Касания сообщения не срабатывают: только что было зажатие или открыто меню реакций.
+    /// Палец, которым зажали, остаётся «привязан» к этой строке и после появления меню — его движения и отпускание
+    /// не должны отвечать свайпом, ставить ❤️ или открывать фото/видео/файл под размытием
+    private var blocked: Bool { longFired || MessageMenu.isOpen }
 
     private var stickerOnly: ChatAttachment? {
         guard message.attachments.count == 1, message.text.isEmpty, message.reply == nil,
@@ -173,7 +177,7 @@ struct MessageRow: View {
         }
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture(count: 2).onEnded {
-            if interactive, !message.isPending { onReact?("\u{2764}\u{FE0F}") }
+            if interactive, !message.isPending, !blocked { onReact?("\u{2764}\u{FE0F}") }
         })
         .simultaneousGesture(LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
             .updating($pressing) { value, state, tx in
@@ -183,7 +187,7 @@ struct MessageRow: View {
                 tx.animation = .easeOut(duration: 0.22).delay(0.05)
             }
             .onEnded { _ in
-                if interactive, !message.isPending, let onLongPress {
+                if interactive, !message.isPending, !MessageMenu.isOpen, let onLongPress {
                     longFired = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { longFired = false }
                     Haptics.impact(.medium); onLongPress()
@@ -192,11 +196,12 @@ struct MessageRow: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 18)
                 .onChanged { value in
+                    guard !MessageMenu.isOpen else { if dragX != 0 { dragX = 0 }; return }      // меню открыто — свайп-ответа нет
                     guard abs(value.translation.width) > abs(value.translation.height) * 1.6 else { return }
                     dragX = max(-80, min(0, value.translation.width))
                 }
                 .onEnded { value in
-                    if dragX <= -56 {
+                    if dragX <= -56 && !MessageMenu.isOpen {
                         Haptics.impact(.medium)
                         onReply()
                     }
@@ -247,7 +252,7 @@ struct MessageRow: View {
         .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onTapGesture {
-            guard interactive, let onCallBack else { return }
+            guard interactive, !blocked, let onCallBack else { return }
             Haptics.impact(.medium)
             onCallBack(info.video)
         }
@@ -256,7 +261,7 @@ struct MessageRow: View {
     private var reactionChips: some View {
         HStack(spacing: 4) {
             ForEach(message.reactions, id: \.emoji) { r in
-                Button { if interactive { onReact?(r.emoji) } } label: {
+                Button { if interactive && !blocked { onReact?(r.emoji) } } label: {
                     HStack(spacing: 4) {
                         AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
                         if r.count > 1 || !r.mine {
@@ -274,7 +279,7 @@ struct MessageRow: View {
                 }
                 .buttonStyle(.plain)
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                    if interactive { Haptics.impact(.medium); onReactionInfo?() }
+                    if interactive && !blocked { Haptics.impact(.medium); onReactionInfo?() }
                 })
                 .transition(.scale.combined(with: .opacity))
             }
@@ -355,10 +360,11 @@ struct MessageRow: View {
                     .lineLimit(1)
                     .padding(.horizontal, 11)
                     .padding(.top, 6)
-                    .onTapGesture { onOpenProfile?(sender.id) }
+                    .onTapGesture { if !blocked { onOpenProfile?(sender.id) } }
             }
             if let fwd = message.forwarded, !fwd.name.isEmpty {
                 Button {
+                    if blocked { return }
                     if let post = fwd.postID { onOpenPost?(post) } else if let id = fwd.id { onOpenProfile?(id) }
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
@@ -374,7 +380,7 @@ struct MessageRow: View {
                 .buttonStyle(.plain)
             }
             if let story = message.storyReply {
-                Button { Haptics.impact(.light); onOpenStory?(story.id) } label: {
+                Button { if !blocked { Haptics.impact(.light); onOpenStory?(story.id) } } label: {
                 HStack(spacing: 8) {
                     Capsule().fill(mine ? Color.white.opacity(0.85) : theme.accentColor).frame(width: 3)
                     ZStack {
@@ -408,7 +414,7 @@ struct MessageRow: View {
             if let reply = message.reply {
                 ReplyQuote(reply: reply, mine: mine)
                     .contentShape(Rectangle())
-                    .onTapGesture { Haptics.impact(.light); onJumpToReply?(reply.id) }
+                    .onTapGesture { if !blocked { Haptics.impact(.light); onJumpToReply?(reply.id) } }
                     .padding(.horizontal, 10)
                     .padding(.top, 7)
                     .padding(.bottom, 2)
@@ -425,7 +431,7 @@ struct MessageRow: View {
             if !mediaItems.isEmpty {
                 MediaBlock(items: mediaItems, pending: message.isPending) { index in
                     // присланный шортс: нажатие открывает ленту шортсов на этом видео (как в TikTok)
-                    if longFired { return }
+                    if blocked { return }
                     if let pid = message.forwarded?.postID, mediaItems.first?.mediaItem?.kind == .video, let open = onOpenPost {
                         open(pid); return
                     }
@@ -443,12 +449,12 @@ struct MessageRow: View {
                 Group {
                     switch a.kind {
                     case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
-                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { if !longFired { onPlayAudio(a) } }
+                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onPlayAudio(a) } }
                     case .file:
                         if a.isMusic {
-                            AudioBlock(attachment: a, mine: mine) { if !longFired { onPlayAudio(a) } }
+                            AudioBlock(attachment: a, mine: mine) { if !blocked { onPlayAudio(a) } }
                         } else {
-                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !longFired { onOpenFile(a) } }
+                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onOpenFile(a) } }
                         }
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
                     default: StickerImage(sticker: Sticker(id: a.sticker ?? "", emoji: ""), size: 120)
