@@ -249,6 +249,8 @@ struct ChatsListView: View {
                         messageResults
                     }
                     .padding(.bottom, 90)
+                    // чат с новым сообщением плавно переезжает наверх, остальные мягко сдвигаются (а не перескакивают)
+                    .animation(.spring(response: 0.42, dampingFraction: 0.86), value: filtered.map(\.id))
                 }
                 .scrollIndicators(.hidden)
             }

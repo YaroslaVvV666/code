@@ -545,6 +545,7 @@ struct SettingsGroup<Content: View>: View {
 struct ToastView: View {
     let text: String
     @Environment(\.theme) private var theme
+    @State private var shown = false
 
     var body: some View {
         Text(text)
@@ -556,5 +557,10 @@ struct ToastView: View {
             .background(theme.danger.opacity(0.95), in: RoundedRectangle(cornerRadius: 14))
             .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
             .padding(.horizontal, 24)
+            // мягко выезжает сверху с лёгкой пружинкой, а не появляется рывком
+            .offset(y: shown ? 0 : -28)
+            .scaleEffect(shown ? 1 : 0.92, anchor: .top)
+            .opacity(shown ? 1 : 0)
+            .onAppear { withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { shown = true } }
     }
 }
