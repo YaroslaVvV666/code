@@ -39,6 +39,8 @@ struct MessageActionOverlay: View {
     var onInfo: () -> Void = {}
     /// «Перевести» — системный переводчик iOS (17.4+), прямо на телефоне
     var onTranslate: (() -> Void)? = nil
+    /// Своя заметка к сообщению — видна только тебе
+    var onNote: (() -> Void)? = nil
     /// Где сообщение стоит на экране (экранные координаты): копия встаёт ровно туда же, как в Telegram
     var sourceFrame: CGRect? = nil
 
@@ -92,6 +94,8 @@ struct MessageActionOverlay: View {
     private static let rowHeight: CGFloat = 46
 
     /// Высота списка действий — считается заранее, чтобы сразу знать, сколько места нужно под сообщением
+    private var canNote: Bool { onNote != nil && !message.isPending && message.system == nil }
+
     private var actionCount: Int {
         var n = 4                                                                   // ответить, напомнить, выбрать, удалить
         if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
@@ -100,6 +104,7 @@ struct MessageActionOverlay: View {
         if showSender || message.mine { n += 1 }
         if canEdit && message.poll == nil { n += 1 }
         if canTranslate { n += 1 }
+        if canNote { n += 1 }
         return n
     }
     private var listHeight: CGFloat {
@@ -255,6 +260,13 @@ struct MessageActionOverlay: View {
             if canEdit && message.poll == nil {
                 divider
                 row("pencil", s.editMessage) { dismiss(onEdit) }
+            }
+            if canNote {
+                divider
+                row(message.note == nil ? "note.text.badge.plus" : "note.text",
+                    message.note == nil ? s.t("Добавить заметку", "Add note") : s.t("Изменить заметку", "Edit note")) {
+                    dismiss { onNote?() }
+                }
             }
             divider
             row("bell", s.t("Напомнить", "Remind me")) {

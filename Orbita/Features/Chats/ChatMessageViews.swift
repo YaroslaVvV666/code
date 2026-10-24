@@ -32,6 +32,9 @@ struct MessageMeta: View {
                 Text(views >= 1000 ? String(format: "%.1fK", Double(views) / 1000) : "\(views)").font(.system(size: 11))
                 Text("·").font(.system(size: 11))
             }
+            if let note = message.note {
+                MessageNoteChip(messageID: message.id, note: note, color: color)
+            }
             if message.editedAt != nil {
                 Text(Strings(lang: lang).edited).font(.system(size: 11))
             }
@@ -56,6 +59,134 @@ struct MessageMeta: View {
         .padding(.horizontal, onMedia ? 7 : 0)
         .padding(.vertical, onMedia ? 3 : 0)
         .background(onMedia ? Color.black.opacity(0.42) : Color.clear, in: Capsule())
+    }
+}
+
+// MARK: - Своя заметка к сообщению
+
+/// Экран чата открывает редактор заметки по id сообщения (из раскрытой заметки — «Изменить»)
+private struct EditMessageNoteKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var editMessageNote: ((String) -> Void)? {
+        get { self[EditMessageNoteKey.self] }
+        set { self[EditMessageNoteKey.self] = newValue }
+    }
+}
+
+/// Заметка мелким текстом слева от времени. Длинная обрезается; нажатие — полная версия во всплывающем окне
+struct MessageNoteChip: View {
+    let messageID: String
+    let note: String
+    let color: Color
+
+    static let maxChars = 16
+
+    /// Длинная — первые символы и «…»; ширина предсказуема, под неё в пузыре оставляется место
+    static func short(_ note: String) -> String {
+        let line = note.replacingOccurrences(of: "\n", with: " ")
+        return line.count > maxChars ? String(line.prefix(maxChars - 1)).trimmingCharacters(in: .whitespaces) + "…" : line
+    }
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.editMessageNote) private var editNote
+    @State private var expanded = false
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "note.text").font(.system(size: 9, weight: .semibold))
+            Text(Self.short(note)).font(.system(size: 11).italic()).lineLimit(1)
+        }
+        .fixedSize()
+        .padding(.trailing, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard editNote != nil, !MessageMenu.isOpen else { return }
+            Haptics.select()
+            expanded = true
+        }
+        .popover(isPresented: $expanded, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(Strings(lang: lang).t("Заметка · видна только вам", "Note · only you can see it"), systemImage: "lock.fill")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+                ScrollView {
+                    Text(note).font(.system(size: 16)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 320)
+                .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    expanded = false
+                    let id = messageID
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { editNote?(id) }
+                } label: {
+                    Label(Strings(lang: lang).t("Изменить", "Edit"), systemImage: "pencil")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.accentColor)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .frame(width: min(320, UIScreen.main.bounds.width - 48))
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// Редактор заметки: добавить, изменить, удалить
+struct MessageNoteSheet: View {
+    let message: ChatMessage
+    var onSave: (String) -> Void
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button(s.t("Отмена", "Cancel")) { dismiss() }.foregroundStyle(theme.textSecondary)
+                Spacer()
+                Text(s.t("Заметка", "Note")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                Spacer()
+                Button(s.t("Готово", "Done")) {
+                    Haptics.notify(.success)
+                    onSave(text); dismiss()
+                }
+                .font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.accentColor)
+            }
+            .padding(.top, 16)
+            Label(s.t("Видна только вам — собеседник её не увидит", "Only you can see it — the other person won't"),
+                  systemImage: "lock.fill")
+                .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            TextField(s.t("Текст заметки", "Note text"), text: $text, axis: .vertical)
+                .font(.system(size: 16)).foregroundStyle(theme.text)
+                .lineLimit(3...10)
+                .focused($focused)
+                .padding(12)
+                .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onChange(of: text) { _, v in if v.count > 2000 { text = String(v.prefix(2000)) } }
+            if message.note != nil {
+                Button(role: .destructive) {
+                    Haptics.impact(.light)
+                    onSave(""); dismiss()
+                } label: {
+                    Label(s.t("Удалить заметку", "Delete note"), systemImage: "trash")
+                        .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.danger)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .onAppear { text = message.note ?? ""; focused = true }
     }
 }
 
@@ -355,6 +486,7 @@ struct MessageRow: View {
         let secondary = mine ? colors.outgoingSecondary : colors.incomingSecondary
         // место под время/галочки/просмотры: оценка ширины в «узких пробелах» (по 8 пт), чтобы не оставалось лишнего отступа
         let metaWidth: CGFloat = 32 + (mine ? 16 : 0) + (message.editedAt != nil ? 44 : 0)
+            + (message.note.map { n in 16 + CGFloat(MessageNoteChip.short(n).count) * 5.8 } ?? 0)
             + (message.views.map { v -> CGFloat in
                 // глаз + число + «·» + три зазора; число считаем так же, как рисует MessageMeta
                 let text = v >= 1000 ? String(format: "%.1fK", Double(v) / 1000) : "\(v)"
@@ -1004,6 +1136,16 @@ final class CircleFocus: ObservableObject {
     static let shared = CircleFocus()
     @Published var current: CirclePlayback?
     func stop() { current?.stop() }
+
+    /// Плеер кружка живёт здесь, а не во вью: следующий кружок может включиться сам, даже если он ещё не на экране
+    private var pool: [String: CirclePlayback] = [:]
+    func playback(for key: String) -> CirclePlayback {
+        if let p = pool[key] { return p }
+        if pool.count > 40 { pool = pool.filter { $0.value.player != nil } }
+        let p = CirclePlayback()
+        pool[key] = p
+        return p
+    }
 }
 
 @MainActor
@@ -1017,6 +1159,11 @@ final class CirclePlayback: ObservableObject {
     private var endObserver: NSObjectProtocol?
 
     private var rate: Float { VoicePlayer.shared.rate }
+
+    /// Включить с начала, если не играет (автопереход от предыдущего голосового или кружка)
+    func start(mediaID: String, duration: Double) {
+        if !isPlaying { toggle(mediaID: mediaID, duration: duration) }
+    }
 
     func toggle(mediaID: String, duration: Double) {
         if player == nil {
@@ -1040,7 +1187,10 @@ final class CirclePlayback: ObservableObject {
             }
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
                                                                  queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.stop() }
+                Task { @MainActor in
+                    self?.stop()
+                    VoicePlayer.shared.playNext(after: mediaID)          // досмотрели — следующее голосовое или кружок
+                }
             }
             CircleFocus.shared.current = self
         }
@@ -1088,7 +1238,18 @@ struct CircleVideoBubble: View {
     let message: ChatMessage
     var size: CGFloat = 214
 
-    @StateObject private var playback = CirclePlayback()
+    var body: some View {
+        CircleVideoContent(attachment: attachment, message: message, size: size,
+                           playback: CircleFocus.shared.playback(for: attachment.mediaID ?? attachment.id))
+    }
+}
+
+private struct CircleVideoContent: View {
+    let attachment: ChatAttachment
+    let message: ChatMessage
+    var size: CGFloat
+
+    @ObservedObject var playback: CirclePlayback
     /// Пока кружок смотрят, он вырастает (как в Telegram)
     private var shown: CGFloat { playback.started ? max(size, min(300, UIScreen.main.bounds.width - 70)) : size }
     @Environment(\.theme) private var theme

@@ -356,6 +356,24 @@ final class ChatModel: ObservableObject {
     }
 
     /// Одна реакция на человека: новая заменяет старую, такая же — снимает
+    /// Своя заметка к сообщению (пустая — удалить). Видна только тебе, хранится на сервере зашифрованной
+    func setNote(_ message: ChatMessage, text: String) {
+        guard !message.isPending, let i = messages.firstIndex(where: { $0.id == message.id }) else { return }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = messages[i].note
+        messages[i].note = clean.isEmpty ? nil : clean
+        let repo = repo, id = message.id
+        Task {
+            do {
+                let updated = try await repo.setNote(messageID: id, text: clean)
+                if let k = messages.firstIndex(where: { $0.id == id }) { messages[k].note = updated.note }
+            } catch {
+                if let k = messages.firstIndex(where: { $0.id == id }) { messages[k].note = old }
+                Haptics.notify(.error)
+            }
+        }
+    }
+
     func react(_ message: ChatMessage, emoji: String) {
         guard !message.isPending, let i = messages.firstIndex(where: { $0.id == message.id }) else { return }
         let current = messages[i].reactions.first(where: \.mine)?.emoji

@@ -664,6 +664,7 @@ struct ChatScreen: View {
     @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
     @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
+    @State private var noteTarget: ChatMessage?             // своя заметка к сообщению: добавить / изменить
     @State private var showPollCreate = false
     @State private var postLinkID: String?
     @State private var storyRoute: ChatStoryRoute?
@@ -745,6 +746,7 @@ struct ChatScreen: View {
                     onSelect: { selecting = true; selected = [target.id] },
                     onInfo: { infoMessage = target },
                     onTranslate: { translateText = target.text },
+                    onNote: { noteTarget = target },
                     sourceFrame: messageFrames.frames[target.id])
                     // в своём окне нет окружения экрана чата — передаём всё, что нужно пузырю сообщения
                     .environment(\.theme, theme)
@@ -794,16 +796,19 @@ struct ChatScreen: View {
         .onAppear {
             session.chats.chatScreenAppeared(route.peer.id)
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
-            // дослушали голосовое — сразу играет следующее голосовое этого чата
+            // дослушали голосовое или досмотрели кружок — сразу играет следующее голосовое или кружок этого чата
             VoicePlayer.shared.nextProvider = { [weak model = self.model] id in
                 guard let model else { return nil }
-                let voices = model.messages.flatMap { m in
-                    m.attachments.filter { $0.kind == .voice && $0.mediaID != nil }
+                let items: [ChatMediaNext] = model.messages.flatMap { m in
+                    m.attachments.compactMap { a -> ChatMediaNext? in
+                        guard a.kind == .voice || a.kind == .circle, let media = a.mediaID, !m.isPending else { return nil }
+                        return ChatMediaNext(id: media, mediaID: media, duration: a.duration, circle: a.kind == .circle, messageID: m.id)
+                    }
                 }
-                guard let i = voices.firstIndex(where: { ($0.mediaID ?? $0.id) == id }), i + 1 < voices.count else { return nil }
-                let next = voices[i + 1]
-                return (id: next.mediaID ?? next.id, mediaID: next.mediaID ?? "", duration: next.duration)
+                guard let i = items.firstIndex(where: { $0.id == id }), i + 1 < items.count else { return nil }
+                return items[i + 1]
             }
+            VoicePlayer.shared.onAdvance = { id in scrollTarget = id }
         }
         .onDisappear { session.chats.chatScreenDisappeared() }
         .task {
@@ -907,6 +912,13 @@ struct ChatScreen: View {
                 .presentationBackground(theme.sheet)
         }
         .profileSheet(id: $profileID)
+        .sheet(item: $noteTarget) { m in
+            MessageNoteSheet(message: m) { model.setNote(m, text: $0) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.height(320), .large])
+                .presentationBackground(theme.sheet)
+        }
+        .environment(\.editMessageNote, { id in noteTarget = model.messages.first { $0.id == id } })
         .sheet(item: $entitySheet) { e in
             EntityInfoSheet(entity: e, onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
                 .environmentObject(session)

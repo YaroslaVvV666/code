@@ -330,6 +330,9 @@ ensure_column("posts", "wall_only", "wall_only INTEGER NOT NULL DEFAULT 0")     
 # «Не интересует»: такой пост человеку больше никогда не рекомендуется (открыть можно, только если пришлют или найдёт сам)
 DB.execute("CREATE TABLE IF NOT EXISTS hidden_posts(user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(user_id, post_id))")
+# Заметки к сообщениям: видны только тому, кто их оставил (зашифрованы его ключом)
+DB.execute("CREATE TABLE IF NOT EXISTS message_notes(user_id TEXT NOT NULL, message_id TEXT NOT NULL, text_enc BLOB NOT NULL, "
+           "updated_at REAL NOT NULL, PRIMARY KEY(user_id, message_id))")
 # Свои стикеры (как в Telegram): наборы создаются через бота @stickers, стикер — картинка или короткое видео (анимированный)
 DB.execute("CREATE TABLE IF NOT EXISTS user_sticker_packs(id TEXT PRIMARY KEY, owner TEXT NOT NULL, title TEXT NOT NULL, "
            "created_at REAL NOT NULL)")
@@ -3764,6 +3767,7 @@ def message_json(m, me_id):
         "created_at": m["created_at"], "edited_at": m["edited_at"],
         "read": m["read_at"] is not None, "reply": reply, "attachments": attachments_of(m),
         "reactions": reactions_of(mid, me_id),
+        **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
         **fwd_fields(m),
     }
@@ -4928,6 +4932,29 @@ def set_reaction(req, me, mid):
     req.send_json(200, gmsg_json(m, me["id"]) if grp else message_json(m, me["id"]))
 
 
+NOTE_COL = "message_notes.text"
+MAX_NOTE = 2000
+
+
+def note_field(mid, me_id):
+    """Своя заметка к сообщению — только для того, кто её оставил"""
+    r = q1("SELECT text_enc FROM message_notes WHERE user_id = ? AND message_id = ?", (me_id, mid))
+    text = dec(me_id, "messages", NOTE_COL, mid + ":" + me_id, r["text_enc"]) if r else None
+    return {"note": text} if text else {}
+
+
+@route("PUT", r"/v1/messages/([a-f0-9]+)/note")
+def set_note(req, me, mid):
+    m, grp, _ = find_message(mid, me["id"])
+    text = str(req.body_json().get("text") or "").strip()[:MAX_NOTE]
+    if not text:
+        run("DELETE FROM message_notes WHERE user_id = ? AND message_id = ?", (me["id"], mid))
+    else:
+        run("INSERT OR REPLACE INTO message_notes(user_id, message_id, text_enc, updated_at) VALUES (?,?,?,?)",
+            (me["id"], mid, enc(me["id"], "messages", NOTE_COL, mid + ":" + me["id"], text), time.time()))
+    req.send_json(200, gmsg_json(m, me["id"]) if grp else message_json(m, me["id"]))
+
+
 @route("PUT", r"/v1/messages/([a-f0-9]+)/pin")
 def set_pin(req, me, mid):
     m, grp, key = find_message(mid, me["id"])
@@ -5269,7 +5296,7 @@ def gmsg_json(m, me_id, channel=None):
         "entities": json.loads(dec(m["sender"], "messages", COL["msg_entities"], mid, m["entities_enc"]) or "[]"),
         "created_at": m["created_at"], "edited_at": m["edited_at"], "read": read,
         "reply": reply, "attachments": attachments_of(m), "sender": user_brief(m["sender"], me_id),
-        "reactions": reactions_of(mid, me_id),
+        "reactions": reactions_of(mid, me_id), **note_field(mid, me_id),
     }
     if m["fwd_enc"]:
         out["forwarded"] = fwd_of(m)

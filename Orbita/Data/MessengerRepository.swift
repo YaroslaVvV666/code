@@ -285,6 +285,7 @@ struct ChatMessage: Identifiable, Equatable {
     var poll: PollInfo? = nil
     var storyReply: StoryReplyRef? = nil
     var comments: Int? = nil        // в канале с обсуждением — число комментариев
+    var note: String? = nil         // своя заметка к сообщению: видна только тебе
 
     var summary: String {
         if system != nil { return "" }
@@ -392,6 +393,7 @@ protocol MessengerRepository: Sendable {
     func cachedThread(peerID: String) -> ChatThread?
     func react(messageID: String, emoji: String?) async throws -> ChatMessage
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
+    func setNote(messageID: String, text: String) async throws -> ChatMessage
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
               replyTo: String?, silent: Bool) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
@@ -595,6 +597,7 @@ private struct MessageDTO: Decodable {
     let poll: PollDTO?
     let storyReply: StoryReplyDTO?
     let comments: Int?
+    let note: String?
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -606,7 +609,7 @@ private struct MessageDTO: Decodable {
                     forwarded: forwarded.map { ForwardRef(id: $0.id, name: $0.name, postID: $0.post) },
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
-                    comments: comments)
+                    comments: comments, note: note)
     }
 }
 
@@ -785,6 +788,12 @@ struct RemoteMessengerRepository: MessengerRepository {
     func react(messageID: String, emoji: String?) async throws -> ChatMessage {
         let body = ServerAPI.json(["emoji": emoji ?? ""] as [String: Any])
         let data = try await api.request("PUT", "/v1/messages/\(messageID)/reaction", body: body)
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func setNote(messageID: String, text: String) async throws -> ChatMessage {
+        let body = ServerAPI.json(["text": text] as [String: Any])
+        let data = try await api.request("PUT", "/v1/messages/\(messageID)/note", body: body)
         return try decodeAPI(MessageDTO.self, from: data).model
     }
 

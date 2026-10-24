@@ -120,6 +120,15 @@ final class VoiceRecorder: NSObject, ObservableObject {
 
 // MARK: - Воспроизведение голосовых
 
+/// Следующее голосовое или кружок в чате
+struct ChatMediaNext {
+    let id: String              // как у плеера: mediaID вложения
+    let mediaID: String
+    let duration: Double
+    let circle: Bool
+    let messageID: String
+}
+
 @MainActor
 final class VoicePlayer: ObservableObject {
     static let shared = VoicePlayer()
@@ -142,8 +151,22 @@ final class VoicePlayer: ObservableObject {
     /// Музыкальный плеер гасится, когда начинается голосовое
     var onStart: (() -> Void)?
 
-    /// Открытый чат подсказывает, какое голосовое идёт следом: дослушали одно — сразу играет следующее (как в Telegram)
-    var nextProvider: ((String) -> (id: String, mediaID: String, duration: Double)?)?
+    /// Открытый чат подсказывает, что идёт следом: дослушали голосовое или досмотрели кружок — сразу играет
+    /// следующее голосовое или кружок этого чата (как в Telegram)
+    var nextProvider: ((String) -> ChatMediaNext?)?
+    /// Перешли к следующему сам — чат прокручивается к этому сообщению
+    var onAdvance: ((String) -> Void)?
+
+    /// Включает то, что идёт в чате после голосового или кружка `id`
+    func playNext(after id: String) {
+        guard !CallGate.busy, let next = nextProvider?(id) else { return }
+        onAdvance?(next.messageID)
+        if next.circle {
+            CircleFocus.shared.playback(for: next.id).start(mediaID: next.mediaID, duration: next.duration)
+        } else {
+            toggle(id: next.id, mediaID: next.mediaID, duration: next.duration)
+        }
+    }
 
     /// Где остановились в каждом голосовом: переключились на другое и вернулись — продолжаем с того же места
     private var positions: [String: Double] = {
@@ -160,9 +183,8 @@ final class VoicePlayer: ObservableObject {
     private func finished(_ id: String) {
         positions[id] = nil
         UserDefaults.standard.set(positions, forKey: "voice_positions")
-        let next = nextProvider?(id)
         stop(save: false)
-        if let next { toggle(id: next.id, mediaID: next.mediaID, duration: next.duration) }
+        playNext(after: id)
     }
 
     func resume() { player?.rate = rate; isPlaying = player != nil }
