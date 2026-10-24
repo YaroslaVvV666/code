@@ -758,7 +758,7 @@ struct UserPageView: View {
     /// «в сети» / «был(а) …»; ник вынесен в карточку с данными
     private func statusLine(_ profile: UserProfile) -> String {
         let base = model.isMe ? (profile.username.map { "@" + $0 } ?? "") : s.lastSeenText(profile.lastSeen)
-        guard let n = profile.followersCount else { return base }
+        guard let n = profile.followersCount, n > 0 else { return base }      // 0 подписчиков — не пишем
         let f = followersText(n)
         return base.isEmpty ? f : base + " · " + f
     }
