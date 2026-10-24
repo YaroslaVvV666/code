@@ -600,6 +600,8 @@ struct TimedLottieEmoji: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
+                // зажали сообщение ради реакций — отпускание пальца не должно ни вибрировать, ни запускать анимацию
+                guard !MessageMenu.isOpen else { return }
                 Haptics.impact(.light)
                 token += 1
                 playing = true
