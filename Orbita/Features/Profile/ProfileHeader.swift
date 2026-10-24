@@ -444,6 +444,10 @@ struct AvatarStage: View, Animatable {
         set { expand = newValue }
     }
 
+    /// Высота строки с песней (MusicBar) и размытой полоски под ней: сама строка + мягкий переход сверху
+    private static let musicBarHeight: CGFloat = 38
+    private static let musicStripHeight: CGFloat = 70
+
     var body: some View {
         let e: CGFloat = min(2, max(0, expand))
         let t1: CGFloat = min(1, e)
@@ -505,7 +509,28 @@ struct AvatarStage: View, Animatable {
                 Spacer(minLength: 0)
                 LinearGradient(colors: [.clear, Color.black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
                     .frame(height: 120)
+                    .padding(.bottom, track != nil ? Self.musicBarHeight : 0)      // под песней не затемняем — там своё размытие
                     .opacity(1 - Double(t2))
+            }
+            // как в Telegram: строка с песней лежит не на чёрном, а на сильно размытом фото.
+            // Размывается только узкая нижняя полоска фото, а не всё фото — раскрытие аватарки не тяжелеет
+            if track != nil, photos.indices.contains(page) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    RemoteImage(id: photos[page].mediaID)
+                        .frame(width: w, height: h)
+                        .clipped()
+                        .frame(width: w, height: Self.musicStripHeight, alignment: .bottom)   // та же картинка, только низ
+                        .clipped()
+                        .blur(radius: 36, opaque: true)
+                        .overlay(Color.black.opacity(0.2))                // белый текст читается на любом фото
+                        .mask(LinearGradient(stops: [.init(color: .clear, location: 0),
+                                                     .init(color: .black, location: 0.45)],
+                                             startPoint: .top, endPoint: .bottom))
+                }
+                .frame(width: w, height: h)
+                .opacity(1 - Double(t2))
+                .allowsHitTesting(false)
             }
             zones                                  // под содержимым: нажатия на полосу с песней и на ник доходят до них
             VStack(alignment: .leading, spacing: 0) {

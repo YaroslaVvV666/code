@@ -374,7 +374,7 @@ struct MusicBar: View {
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity)
             .frame(height: 38)
-            .background(Color.black.opacity(0.4))
+            .background(Color.black.opacity(0.06))          // под строкой — размытое фото профиля, а не чёрная плашка
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
