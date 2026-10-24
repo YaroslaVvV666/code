@@ -90,10 +90,6 @@ struct MessageRow: View {
     @Environment(\.lang) private var lang
     @State private var dragX: CGFloat = 0
     @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
-    /// Палец лежит на сообщении: пузырь чуть сжимается ещё до срабатывания зажатия — отклик сразу, а не через 0.25 с.
-    /// Только визуально: порог и допуск жеста те же, прокрутку это не перехватывает
-    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.3, dampingFraction: 0.7)))
-    private var pressing = false
 
     private var s: Strings { Strings(lang: lang) }
     private var colors: ChatColors { ChatColors(theme: theme) }
@@ -163,7 +159,6 @@ struct MessageRow: View {
         HStack(spacing: 0) {
             if mine { Spacer(minLength: 44) }
             content
-                .scaleEffect(pressing && interactive && !message.isPending ? 0.96 : 1, anchor: mine ? .trailing : .leading)
                 .offset(x: dragX)
                 .overlay(alignment: mine ? .leading : .trailing) {
                     Image(systemName: "arrowshape.turn.up.left.circle.fill")
@@ -180,12 +175,6 @@ struct MessageRow: View {
             if interactive, !message.isPending, !blocked { onReact?("\u{2764}\u{FE0F}") }
         })
         .simultaneousGesture(LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
-            .updating($pressing) { value, state, tx in
-                state = value
-                if value && interactive { Haptics.prepare(.medium) }
-                // короткое касание в начале прокрутки почти не успевает сжать пузырь — небольшая задержка и плавный вход
-                tx.animation = .easeOut(duration: 0.22).delay(0.05)
-            }
             .onEnded { _ in
                 if interactive, !message.isPending, !MessageMenu.isOpen, let onLongPress {
                     longFired = true
