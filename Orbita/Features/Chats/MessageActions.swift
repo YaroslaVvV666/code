@@ -1,6 +1,7 @@
 import SwiftUI
 #if canImport(Translation)
 import Translation
+import NaturalLanguage
 #endif
 
 /// Открыто ли меню зажатого сообщения. Обычный флаг без подписки: строки чата проверяют его только в обработчиках
@@ -63,9 +64,20 @@ struct MessageActionOverlay: View {
     private var current: String? { model.messages.first { $0.id == message.id }?.reactions.first(where: \.mine)?.emoji }
     /// Перевод есть для текста, если система умеет (iOS 17.4+)
     private var canTranslate: Bool {
-        guard onTranslate != nil, !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !message.text.hasPrefix("\u{200B}call:") else { return false }
-        return TranslationSheet.available
+        guard onTranslate != nil, TranslationSheet.available, !message.text.hasPrefix("\u{200B}call:") else { return false }
+        return Self.needsTranslation(message.text)
+    }
+
+    /// Есть что переводить: в тексте есть слова (не только эмодзи, числа, ссылки и @упоминания)
+    /// и он не на языке телефона — как в Telegram
+    static func needsTranslation(_ text: String) -> Bool {
+        let words = text.replacingOccurrences(of: "(https?://|www\\.)\\S+|@\\w+", with: " ", options: .regularExpression)
+        guard words.unicodeScalars.filter({ CharacterSet.letters.contains($0) }).count >= 2 else { return false }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(String(words.prefix(400)))        // для определения языка хватает начала
+        guard let found = recognizer.dominantLanguage, found != .undetermined else { return true }
+        let mine = Locale.preferredLanguages.first.map { String($0.prefix(2)).lowercased() } ?? "ru"
+        return found.rawValue.prefix(2).lowercased() != mine
     }
 
     private var canEdit: Bool {
@@ -107,7 +119,7 @@ struct MessageActionOverlay: View {
         if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
         if !message.text.isEmpty && !noForward && message.poll == nil { n += 1 }
         if model.canPin { n += 1 }
-        if showSender || message.mine { n += 1 }
+        if showSender { n += 1 }
         if canEdit && message.poll == nil { n += 1 }
         if canTranslate { n += 1 }
         if canNote { n += 1 }
@@ -329,11 +341,10 @@ struct MessageActionOverlay: View {
                     model.togglePin(message); dismiss()
                 }
             }
-            if showSender || message.mine {
+            if showSender {
+                // в группе — кто прочитал и кто как отреагировал; в личке время и «прочитано» и так видны сверху меню
                 divider
-                row("eye", showSender ? s.t("Кто прочитал и отреагировал", "Seen & reactions") : s.t("Информация", "Info")) {
-                    dismiss(onInfo)
-                }
+                row("eye", s.t("Кто прочитал и отреагировал", "Seen & reactions")) { dismiss(onInfo) }
             }
             if canEdit && message.poll == nil {
                 divider
