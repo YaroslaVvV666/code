@@ -779,6 +779,7 @@ struct ChatScreen: View {
             }
         }
         .onPreferenceChange(MessageFrameKey.self) { messageFrames.frames = $0 }
+        .onAppear { model.frameOf = { [messageFrames] id in messageFrames.frames[id] } }
         .modifier(TranslationSheet(text: $translateText))
         .sheet(item: $stickerPack) { route in
             StickerPackSheet(packID: route.id, repo: session.messengerRepo,
@@ -1649,7 +1650,7 @@ struct ChatScreen: View {
                 onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) },
                 onOpenEntity: { entitySheet = $0 })
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
-            .dustDissolve(active: model.dissolving.contains(m.id), color: m.mine ? theme.accentColor : Color.white.opacity(0.85))
+            .dustDissolve(active: model.dissolving.contains(m.id))
             .background(GeometryReader { g in
                 Color.clear.preference(key: MessageFrameKey.self, value: [m.id: g.frame(in: .global)])
             })
@@ -1700,9 +1701,7 @@ struct ChatScreen: View {
                 } else {
                     let list = model.items.filter { selected.contains($0.id) }
                     Task {
-                        model.dissolving.formUnion(list.map(\.id))           // все рассыпаются одновременно
-                        Haptics.impact(.soft)
-                        try? await Task.sleep(nanoseconds: 950_000_000)
+                        await model.dissolve(list.map(\.id))              // все рассыпаются одновременно
                         for m in list { await model.delete(m, forEveryone: false, animated: false) }
                         selecting = false; selected = []
                     }

@@ -1370,97 +1370,264 @@ enum FileDownloader {
 // MARK: - Удаление: сообщение рассыпается на частицы, как в Telegram
 
 extension View {
-    func dustDissolve(active: Bool, color: Color) -> some View { modifier(DustDissolve(active: active, color: color)) }
+    /// Пока сообщение рассыпается, сама строка скрыта: частицы рисует MessageDust в своём окне поверх чата
+    func dustDissolve(active: Bool) -> some View { opacity(active ? 0 : 1) }
 }
 
-private struct DustDissolve: ViewModifier {
-    let active: Bool
-    let color: Color
-    @State private var start: Date?
-    private let duration: Double = 1.15
-    private let pad: CGFloat = 70
-    /// Ступени прозрачности улетающих песчинок
-    private static let levels = 8
+/// Сообщение рассыпается на частицы своих же цветов — как «материя» в Telegram.
+/// Снимок экрана на месте сообщения → сообщение прячется → второй снимок: где пиксели отличаются, там и было
+/// сообщение (обои и пустое место вокруг пузыря не рассыпаются). Частицы летят в отдельном прозрачном окне,
+/// поэтому строку сразу убирают из списка и соседние сообщения съезжают, пока пыль ещё в воздухе
+@MainActor
+enum MessageDust {
+    private static var window: UIWindow?
 
-    private static func rand(_ x: Int, _ y: Int, _ k: Int) -> Double {
-        var h = UInt32(truncatingIfNeeded: x &* 73856093 ^ y &* 19349663 ^ k &* 83492791)
-        h = (h ^ (h >> 13)) &* 1274126177
-        h ^= h >> 16
-        return Double(h % 10000) / 10000
+    private final class PassThroughWindow: UIWindow {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
     }
 
-    /// Размер «песчинки»: мелкая, но для больших вложений крупнее, чтобы число клеток не росло
-    private static func cell(for size: CGSize) -> CGFloat {
-        max(2, (size.width * size.height / 9000).squareRoot())
+    private static var host: UIWindow? {
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        return windows.first { $0.isKeyWindow && !($0 is PassThroughWindow) }
+            ?? windows.first { $0.windowLevel == .normal && !($0 is PassThroughWindow) }
     }
 
-    /// Когда клетка отрывается: волна идёт от нижнего левого края вправо и вверх, с шумом — как в Telegram
-    private static func threshold(_ ix: Int, _ iy: Int, cols: Int, rows: Int) -> Double {
-        let nx = Double(ix) / Double(max(cols, 1)), ny = Double(iy) / Double(max(rows, 1))
-        return 0.50 * (0.65 * nx + 0.35 * (1 - ny)) + 0.30 * rand(ix, iy, 1)
+    /// `frames` — где сообщения стоят на экране; `hide` прячет их (строки перестают рисоваться)
+    static func burst(_ frames: [CGRect], hide: () -> Void) async {
+        guard let host, let scene = host.windowScene else { hide(); return }
+        let rects = frames.map { $0.intersection(host.bounds) }.filter { !$0.isNull && $0.width > 4 && $0.height > 4 }
+        guard !rects.isEmpty else { hide(); return }
+        let scale = min(host.screen.scale, 2)
+        let before = rects.map { (sharp: snapshot(host, $0, scale: scale), small: snapshot(host, $0, scale: 1)) }
+        let overlay = window ?? {
+            let w = PassThroughWindow(windowScene: scene)
+            w.windowLevel = host.windowLevel + 1
+            w.backgroundColor = .clear
+            w.isUserInteractionEnabled = false
+            w.isHidden = false
+            window = w
+            return w
+        }()
+        // сначала поверх кладём неподвижный снимок — подмены не видно, пока строка прячется
+        let views = zip(rects, before).map { rect, shot -> DustView in
+            let v = DustView(rect: rect, image: shot.sharp)
+            overlay.addSubview(v)
+            return v
+        }
+        hide()
+        try? await Task.sleep(nanoseconds: 60_000_000)          // SwiftUI успевает перерисовать список без строки
+        for (i, rect) in rects.enumerated() {
+            views[i].start(with: before[i].small, without: snapshot(host, rect, scale: 1)) { finished(views[i]) }
+        }
     }
 
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if active {
-            TimelineView(.animation) { ctx in
-                let s = start ?? ctx.date
-                let p = min(1, max(0, ctx.date.timeIntervalSince(s) / duration))
-                content
-                    .mask {
-                        Canvas { g, size in
-                            let cell = Self.cell(for: size)
-                            let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
-                            // все клетки — в один путь и одну заливку: тысячи отдельных fill на кадр и были основной ценой
-                            var path = Path()
-                            for ix in 0..<cols {
-                                for iy in 0..<rows {
-                                    let th = Self.threshold(ix, iy, cols: cols, rows: rows)
-                                    let k = min(1, max(0, (th - p) * 9))              // песчинка сжимается и пропадает
-                                    guard k > 0 else { continue }
-                                    let d = cell * CGFloat(k)
-                                    path.addRect(CGRect(x: CGFloat(ix) * cell + (cell - d) / 2, y: CGFloat(iy) * cell + (cell - d) / 2, width: d, height: d))
-                                }
-                            }
-                            g.fill(path, with: .color(.white))
-                        }
+    private static func finished(_ view: UIView) {
+        view.removeFromSuperview()
+        if window?.subviews.isEmpty == true {
+            window?.isHidden = true
+            window = nil
+        }
+    }
+
+    private static func snapshot(_ window: UIWindow, _ rect: CGRect, scale: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(bounds: rect, format: format).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+    }
+}
+
+/// Частицы одного сообщения: рисуются раз в кадр (CADisplayLink), до ~4000 штук
+private final class DustView: UIView {
+    static let pad: CGFloat = 150                       // частицы разлетаются за края сообщения
+
+    private struct Particle {
+        let x: CGFloat, y: CGFloat                      // где была в сообщении (pt от его угла)
+        let vx: CGFloat, vy: CGFloat
+        let delay: Double, life: Double
+        let size: CGFloat
+        let color: CGColor
+        let wave: Double                                // положение на «волне» разрушения, 0…1
+    }
+
+    private var image: UIImage
+    private let contentRect: CGRect
+    private var particles: [Particle] = []
+    private var link: CADisplayLink?
+    private var startTime: CFTimeInterval = 0
+    private var endTime: Double = 0
+    private var onDone: (() -> Void)?
+    /// За сколько волна проходит всё сообщение (слева сверху → вправо вниз)
+    private let sweep: Double = 0.5
+
+    init(rect: CGRect, image: UIImage) {
+        self.image = image
+        contentRect = CGRect(x: Self.pad, y: Self.pad, width: rect.width, height: rect.height)
+        super.init(frame: rect.insetBy(dx: -Self.pad, dy: -Self.pad))
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        layer.contentsScale = min(UIScreen.main.scale, 2)
+        setNeedsDisplay()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Волна: левый край отрывается первым, верх чуть раньше низа
+    private static func wave(_ nx: CGFloat, _ ny: CGFloat) -> Double { Double(0.8 * nx + 0.2 * ny) }
+
+    func start(with before: UIImage, without after: UIImage, done: @escaping () -> Void) {
+        onDone = done
+        guard let a = before.cgImage, let b = after.cgImage, let pa = Self.pixels(a), let pb = Self.pixels(b, width: a.width, height: a.height) else {
+            done(); return
+        }
+        let w = a.width, h = a.height
+        // где сообщение: пиксели, которые изменились, когда его спрятали
+        var mask = [Bool](repeating: false, count: w * h)
+        var count = 0
+        for i in 0..<(w * h) {
+            let o = i * 4
+            let d = abs(Int(pa[o]) - Int(pb[o])) + abs(Int(pa[o + 1]) - Int(pb[o + 1])) + abs(Int(pa[o + 2]) - Int(pb[o + 2]))
+            if d > 18 { mask[i] = true; count += 1 }
+        }
+        guard count > 0 else { done(); return }
+        // частицы: клетки 2 pt и крупнее, если сообщение большое; цвет — средний цвет сообщения в клетке
+        let cell = max(2, Int((Double(count) / 4000).squareRoot().rounded(.up)))
+        let sx = contentRect.width / CGFloat(w), sy = contentRect.height / CGFloat(h)
+        var list: [Particle] = []
+        list.reserveCapacity(min(6000, count / (cell * cell) + 16))
+        var y0 = 0
+        while y0 < h {
+            var x0 = 0
+            while x0 < w {
+                var n = 0, r = 0, g = 0, bl = 0, al = 0
+                for y in y0..<min(h, y0 + cell) {
+                    for x in x0..<min(w, x0 + cell) where mask[y * w + x] {
+                        let o = (y * w + x) * 4
+                        r += Int(pa[o]); g += Int(pa[o + 1]); bl += Int(pa[o + 2]); al += Int(pa[o + 3]); n += 1
                     }
-                    .overlay {
-                        Canvas { g, full in
-                            let size = CGSize(width: full.width - pad * 2, height: full.height - pad * 2)
-                            let cell = Self.cell(for: size)
-                            let cols = Int(size.width / cell) + 1, rows = Int(size.height / cell) + 1
-                            let light = Color.white.opacity(0.9)
-                            // песчинки раскладываются по 2 цветам × 8 ступеням прозрачности: 16 заливок на кадр вместо тысяч
-                            var paths = [Path](repeating: Path(), count: Self.levels * 2)
-                            for ix in 0..<cols {
-                                for iy in 0..<rows {
-                                    guard Self.rand(ix, iy, 2) < 0.8 else { continue }
-                                    let th = Self.threshold(ix, iy, cols: cols, rows: rows)
-                                    let age = (p - th) / 0.5                          // 0 — только что оторвалась, 1 — растаяла
-                                    guard age > 0, age < 1 else { continue }
-                                    let r1 = Self.rand(ix, iy, 3), r2 = Self.rand(ix, iy, 4), r3 = Self.rand(ix, iy, 5)
-                                    let ease = CGFloat(age * (0.4 + 0.6 * age))      // разгоняются, как по ветру
-                                    // ветер вправо и чуть вверх; часть песчинок улетает далеко
-                                    let x = pad + CGFloat(ix) * cell + ease * CGFloat(30 + 110 * r1 * r1)
-                                    let y = pad + CGFloat(iy) * cell - ease * CGFloat(10 + 55 * r2) + CGFloat(sin(age * 9 + r1 * 6)) * 3
-                                    let d = cell * CGFloat(0.85 - 0.45 * age)
-                                    let level = min(Self.levels - 1, Int((1 - age) * Double(Self.levels)))
-                                    paths[(r3 < 0.28 ? Self.levels : 0) + level].addEllipse(in: CGRect(x: x, y: y, width: d, height: d))
-                                }
-                            }
-                            for i in paths.indices where !paths[i].isEmpty {
-                                let alpha = 0.95 * (Double(i % Self.levels) + 0.5) / Double(Self.levels)
-                                g.fill(paths[i], with: .color((i >= Self.levels ? light : color).opacity(alpha)))
-                            }
-                        }
-                        .padding(-pad)
-                        .allowsHitTesting(false)
-                    }
-                    .onAppear { if start == nil { start = ctx.date } }
+                }
+                if n * 3 >= cell * cell {
+                    let alpha = CGFloat(al) / CGFloat(n * 255)
+                    let k = alpha > 0 ? 1 / (CGFloat(n) * 255 * alpha) : 0      // пиксели снимка — с умноженной прозрачностью
+                    let color = CGColor(srgbRed: CGFloat(r) * k, green: CGFloat(g) * k, blue: CGFloat(bl) * k, alpha: alpha)
+                    let px = (CGFloat(x0) + CGFloat(cell) / 2) * sx, py = (CGFloat(y0) + CGFloat(cell) / 2) * sy
+                    let wv = Self.wave(px / contentRect.width, py / contentRect.height)
+                    let r1 = CGFloat.random(in: 0...1), r2 = CGFloat.random(in: 0...1)
+                    list.append(Particle(x: px, y: py,
+                                         vx: -25 + 120 * r1 * r1,              // в основном вправо, часть — влево
+                                         vy: -(15 + 85 * r2),                  // и вверх
+                                         delay: sweep * (0.85 * wv + 0.15 * Double.random(in: 0...1)),
+                                         life: Double.random(in: 0.55...1.0),
+                                         size: CGFloat(cell) * sx * CGFloat.random(in: 0.8...1.15),
+                                         color: color, wave: wv))
+                }
+                x0 += cell
             }
-        } else {
-            content
+            y0 += cell
+        }
+        particles = list
+        endTime = (list.map { $0.delay + $0.life }.max() ?? 0) + 0.05
+        image = Self.masked(image, mask: mask, width: w, height: h)
+        startTime = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func tick() {
+        if CACurrentMediaTime() - startTime > endTime {
+            link?.invalidate()
+            link = nil
+            onDone?()
+            onDone = nil
+            return
+        }
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        guard link != nil else { image.draw(in: contentRect); return }       // ещё не рассыпается — неподвижный снимок
+        let t = CACurrentMediaTime() - startTime
+        // нетронутая часть: всё, до чего волна точно не дошла, рисуется самим снимком (чётко, без «пикселей»)
+        let front = t / (0.85 * sweep)
+        if front < 1 {
+            let w = contentRect.width
+            let topX = CGFloat(front / 0.8) * w, bottomX = CGFloat((front - 0.2) / 0.8) * w
+            ctx.saveGState()
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: contentRect.minX + max(0, topX), y: contentRect.minY - 1))
+            ctx.addLine(to: CGPoint(x: contentRect.maxX + 1, y: contentRect.minY - 1))
+            ctx.addLine(to: CGPoint(x: contentRect.maxX + 1, y: contentRect.maxY + 1))
+            ctx.addLine(to: CGPoint(x: contentRect.minX + max(0, bottomX), y: contentRect.maxY + 1))
+            ctx.closePath()
+            ctx.clip()
+            image.draw(in: contentRect)
+            ctx.restoreGState()
+        }
+        for p in particles {
+            if t < p.delay {
+                // на волне, но ещё не оторвалась — стоит на месте
+                guard p.wave < front else { continue }
+                ctx.setAlpha(1)
+                ctx.setFillColor(p.color)
+                ctx.fill(CGRect(x: contentRect.minX + p.x - p.size / 2, y: contentRect.minY + p.y - p.size / 2, width: p.size, height: p.size))
+                continue
+            }
+            let age = t - p.delay
+            guard age < p.life else { continue }
+            let k = age / p.life
+            let a = CGFloat(age)
+            // разгоняются ветром вправо-вверх и тают
+            let x = contentRect.minX + p.x + p.vx * a + 55 * a * a
+            let y = contentRect.minY + p.y + p.vy * a - 35 * a * a
+            let d = p.size * CGFloat(1 - 0.55 * k)
+            ctx.setAlpha(CGFloat(1 - k * k))
+            ctx.setFillColor(p.color)
+            ctx.fill(CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d))
+        }
+    }
+
+    /// RGBA, 8 бит на канал, с умноженной прозрачностью — в заданном размере
+    private static func pixels(_ image: CGImage, width: Int? = nil, height: Int? = nil) -> [UInt8]? {
+        let w = width ?? image.width, h = height ?? image.height
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ok: Bool = data.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? data : nil
+    }
+
+    /// Чёткий снимок, в котором оставлено только сообщение (без обоев вокруг пузыря)
+    private static func masked(_ image: UIImage, mask: [Bool], width: Int, height: Int) -> UIImage {
+        var alpha = mask.map { $0 ? UInt8(255) : 0 }
+        guard let provider = CGDataProvider(data: Data(bytes: &alpha, count: alpha.count) as CFData),
+              let maskImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                      provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return image }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { r in
+            let ctx = r.cgContext
+            let rect = CGRect(origin: .zero, size: image.size)
+            // маска в CGContext перевёрнута относительно UIKit
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: rect.height)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.clip(to: rect, mask: maskImage)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: 0, y: -rect.height)
+            image.draw(in: rect)
+            ctx.restoreGState()
         }
     }
 }

@@ -228,6 +228,8 @@ final class ChatModel: ObservableObject {
     @Published private(set) var peer: ChatPeer
     /// Сообщения, которые прямо сейчас «рассыпаются» (эффект удаления); из списка уходят после анимации
     @Published var dissolving: Set<String> = []
+    /// Экран чата подсказывает, где сообщение стоит на экране: оттуда оно и рассыпается
+    var frameOf: ((String) -> CGRect?)?
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var pending: [ChatMessage] = []
     @Published private(set) var typing: String?
@@ -579,9 +581,7 @@ final class ChatModel: ObservableObject {
     func moderate(_ message: ChatMessage, options: ModerationOptions) async {
         guard let author = message.sender?.id else { return await delete(message, forEveryone: true) }
         let gone = Set(messages.filter { $0.id == message.id || (options.deleteAll && $0.sender?.id == author && $0.system == nil) }.map(\.id))
-        dissolving.formUnion(gone)
-        Haptics.impact(.soft)
-        try? await Task.sleep(nanoseconds: 950_000_000)
+        await dissolve(Array(gone))
         withAnimation(.easeOut(duration: 0.25)) {
             messages.removeAll { gone.contains($0.id) }
             dissolving.subtract(gone)
@@ -591,12 +591,15 @@ final class ChatModel: ObservableObject {
         await refresh()
     }
 
+    /// Сообщения рассыпаются на частицы (как в Telegram); строки сразу можно убирать из списка — пыль летит поверх
+    func dissolve(_ ids: [String]) async {
+        Haptics.impact(.soft)
+        let frames = ids.compactMap { frameOf?($0) }
+        await MessageDust.burst(frames) { dissolving.formUnion(ids) }
+    }
+
     func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
-        if animated {
-            dissolving.insert(message.id)
-            Haptics.impact(.soft)
-            try? await Task.sleep(nanoseconds: 950_000_000)
-        }
+        if animated { await dissolve([message.id]) }
         withAnimation(.easeOut(duration: 0.25)) {
             messages.removeAll { $0.id == message.id }
             dissolving.remove(message.id)
