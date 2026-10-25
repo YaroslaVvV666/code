@@ -259,6 +259,7 @@ struct CommunitiesView: View {
                 ChatScreen(route: route, session: session)
                     .environmentObject(session)
                     .environmentObject(flow)
+                    .environment(\.chatHostTab, .communities)
             }
         }
         .task { await chats.refresh() }

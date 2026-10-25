@@ -77,15 +77,22 @@ final class ChatsModel: ObservableObject {
     private var openScreens = 0
     /// Нажали на чат, и он выезжает: панель прячется сразу, ещё до появления экрана переписки
     private var opening = false
+    /// На каких вкладках сейчас открыта переписка. «Чаты» живут в памяти и при переходе на другую вкладку
+    /// (например, открыли присланный шортс) переписка остаётся открытой — панель прячем только на её вкладке
+    @Published private(set) var chatOpenTabs: Set<MainTab> = []
+    private var screensByTab: [MainTab: Int] = [:]
 
-    func chatScreenAppeared(_ peerID: String) {
+    /// tab — вкладка, внутри которой открыта переписка; nil — поверх всего (полноэкранно), панель её и так не видно
+    func chatScreenAppeared(_ peerID: String, tab: MainTab?) {
         openScreens += 1
+        if let tab { screensByTab[tab, default: 0] += 1 }
         openPeerID = peerID
         syncChatOpen()
     }
 
-    func chatScreenDisappeared() {
+    func chatScreenDisappeared(tab: MainTab?) {
         openScreens = max(0, openScreens - 1)
+        if let tab { screensByTab[tab] = max(0, (screensByTab[tab] ?? 0) - 1) }
         if openScreens == 0 { openPeerID = nil }
         syncChatOpen()
     }
@@ -100,6 +107,9 @@ final class ChatsModel: ObservableObject {
     private func syncChatOpen() {
         let now = openScreens > 0 || opening
         if chatOpen != now { chatOpen = now }
+        var tabs = Set(screensByTab.filter { $0.value > 0 }.keys)
+        if opening { tabs.insert(.chats) }                  // нажали на чат в списке «Чатов»
+        if chatOpenTabs != tabs { chatOpenTabs = tabs }
     }
     /// Какая переписка открыта прямо сейчас (для неё баннер не нужен)
     var openPeerID: String?

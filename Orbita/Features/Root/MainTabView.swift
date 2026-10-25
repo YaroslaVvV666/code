@@ -219,6 +219,18 @@ struct MainTabView: View {
 // MARK: - Нижняя панель
 
 /// Следит за счётчиком непрочитанных (вложенный ObservableObject сам MainTabView не обновляет)
+/// В какой вкладке открыта переписка (по умолчанию — «Чаты»)
+private struct ChatHostTabKey: EnvironmentKey {
+    static let defaultValue: MainTab = .chats
+}
+
+extension EnvironmentValues {
+    var chatHostTab: MainTab {
+        get { self[ChatHostTabKey.self] }
+        set { self[ChatHostTabKey.self] = newValue }
+    }
+}
+
 struct TabBarHost: View {
     @ObservedObject var chats: ChatsModel
     @Binding var selection: MainTab
@@ -230,6 +242,8 @@ struct TabBarHost: View {
     @State private var showTask: Task<Void, Never>?
     /// Сколько ждать после выхода из чата, прежде чем показать панель
     private static let showDelay: UInt64 = 300_000_000
+    /// Переписка открыта на той вкладке, где мы сейчас. Ушли из чата в шортсы (присланное видео) — панель видна
+    private var chatHere: Bool { chats.chatOpenTabs.contains(selection) }
 
     var body: some View {
         // Внутри переписки панель прячется — как в Telegram
@@ -242,8 +256,8 @@ struct TabBarHost: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
         }
-        .onAppear { shown = !chats.chatOpen }
-        .onChange(of: chats.chatOpen) { _, open in
+        .onAppear { shown = !chatHere }
+        .onChange(of: chatHere) { _, open in
             showTask?.cancel()
             if open {
                 // зашли в чат (в том числе сразу после выхода) — панель уезжает сразу и быстро, даже если только начала выезжать
@@ -251,7 +265,7 @@ struct TabBarHost: View {
             } else {
                 showTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: Self.showDelay)
-                    guard !Task.isCancelled, !chats.chatOpen else { return }
+                    guard !Task.isCancelled, !chatHere else { return }
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { shown = true }
                 }
             }

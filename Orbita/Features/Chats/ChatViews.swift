@@ -611,6 +611,9 @@ struct ChatScreen: View {
     let route: ChatRoute
     let session: AppSession
     var standalone = false          // открыт поверх (не в навигации): свайп от края закрывает сам экран
+    /// Вкладка, внутри которой открыта переписка: только там она прячет нижнюю панель
+    @Environment(\.chatHostTab) private var chatHostTab
+    private var hostTab: MainTab? { standalone ? nil : chatHostTab }
 
     @StateObject private var model: ChatModel
     @EnvironmentObject private var flow: AuthFlow
@@ -809,7 +812,7 @@ struct ChatScreen: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: model.pinned.count)
         .onChange(of: model.messages.count) { _, _ in session.player.syncQueue(model.musicItems.map(\.track)) }
         .onAppear {
-            session.chats.chatScreenAppeared(route.peer.id)
+            session.chats.chatScreenAppeared(route.peer.id, tab: hostTab)
             VoicePlayer.shared.onStart = { [weak music = session.player] in music?.stop() }
             // дослушали голосовое или досмотрели кружок — сразу играет следующее голосовое или кружок этого чата
             VoicePlayer.shared.nextProvider = { [weak model = self.model] id in
@@ -825,7 +828,7 @@ struct ChatScreen: View {
             }
             VoicePlayer.shared.onAdvance = { id in scrollTarget = id }
         }
-        .onDisappear { session.chats.chatScreenDisappeared() }
+        .onDisappear { session.chats.chatScreenDisappeared(tab: hostTab) }
         .task {
             // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
             // меню по зажатию оживает сразу, а не после разбора JSON в момент открытия
