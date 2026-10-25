@@ -609,6 +609,28 @@ struct TimedLottieEmoji: View {
     }
 }
 
+/// Неподвижное крупное эмодзи — последний кадр анимации готовой картинкой (или обычный символ, пока картинки нет).
+/// Без Lottie: для копий сообщения, где анимация не играет
+struct StillEmoji: View {
+    let emoji: String
+    var size: CGFloat = 64
+
+    var body: some View {
+        Group {
+            #if canImport(Lottie)
+            if let image = LottieSnapshots.shared.cached(emoji, atEnd: true) {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                Text(emoji).font(.system(size: size * 0.78))
+            }
+            #else
+            Text(emoji).font(.system(size: size * 0.78))
+            #endif
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 /// Анимированные эмодзи: только они доступны для отправки и в реакциях
 enum AnimatedEmoji {
     static let all = ["\u{2764}\u{FE0F}", "\u{1F44D}", "\u{1F525}", "\u{1F923}", "\u{1F4A9}", "\u{1F921}", "\u{1F37E}",

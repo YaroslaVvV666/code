@@ -436,7 +436,7 @@ struct ChatsListView: View {
                     }
             }
             if let animated {
-                LottieEmojiView(emoji: animated, size: 24, playing: false)      // в списке чатов не играет, стоит на последнем кадре
+                StillEmoji(emoji: animated, size: 24)       // в списке чатов не играет — последний кадр готовой картинкой, без Lottie
             } else {
                 Text(chat.lastText).foregroundStyle(color)
             }
