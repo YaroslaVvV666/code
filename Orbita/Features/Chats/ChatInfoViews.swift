@@ -94,6 +94,7 @@ struct ChatInfoView: View {
                     actionRow
                     dmRows
                     infoCard
+                    if !isGroup { CommonChatsCard(userID: model.peer.id) }
                     if isGroup, let group, group.isAdmin { adminCard(group) }
                     // в канале подписчики — в отдельном списке, как в Telegram; в группе участники видны сразу
                     if isGroup, let group, !group.members.isEmpty, !group.isChannel { membersCard(group) }
@@ -1230,5 +1231,68 @@ struct GroupQRSheet: View {
             .padding(.horizontal, 24)
             Spacer(minLength: 0)
         }
+    }
+}
+
+
+/// «Общие чаты» в профиле человека — группы, где вы оба (как в Telegram и MAX). Нет общих — блока нет.
+/// Нажатие открывает группу
+struct CommonChatsCard: View {
+    let userID: String
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var chats: [ChatPeer] = []
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        Group {
+            if !chats.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(s.t("ОБЩИЕ ЧАТЫ", "GROUPS IN COMMON"))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                        .padding(.leading, 16)
+                    VStack(spacing: 0) {
+                        ForEach(chats, id: \.id) { peer in
+                            Button { open(peer) } label: {
+                                HStack(spacing: 14) {
+                                    AvatarView(name: peer.name, size: 48, avatarID: peer.avatarID).clipShape(Circle())
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(peer.name).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                                        Text("\(peer.memberCount) " + ChatInfoView.countWord(peer.memberCount, channel: false, lang: lang))
+                                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textTertiary)
+                                }
+                                .padding(.horizontal, 14).padding(.vertical, 9)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if peer.id != chats.last?.id {
+                                Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 76)
+                            }
+                        }
+                    }
+                    .card(theme, radius: 18)
+                }
+                .padding(.horizontal, 16)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: chats.count)
+        .task(id: userID) {
+            guard userID.lowercased() != session.serverID else { return }
+            chats = await session.extras.commonChats(userID: userID)
+        }
+    }
+
+    private func open(_ peer: ChatPeer) {
+        Haptics.impact(.light)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { PushManager.shared.openChat = ChatRoute(peer: peer) }
     }
 }

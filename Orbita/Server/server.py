@@ -1303,6 +1303,18 @@ def friend_brief(uid, me_id):
     return b
 
 
+@route("GET", r"/v1/users/([A-Za-z0-9_\-]+)/common")
+def common_chats(req, me, uid):
+    """Общие чаты — группы, где состоите оба (как в Telegram). Каналы не показываем: подписчиков видят только
+    админы, и список выдал бы, на что человек подписан"""
+    if uid == me["id"]:
+        return req.send_json(200, {"chats": []})
+    rows = q("SELECT g.* FROM groups g JOIN group_members a ON a.group_id = g.id AND a.user_id = ? "
+             "JOIN group_members b ON b.group_id = g.id AND b.user_id = ? WHERE g.type = 'group' "
+             "ORDER BY g.created_at DESC LIMIT 50", (me["id"], uid))
+    req.send_json(200, {"chats": [group_peer(g) for g in rows]})
+
+
 @route("GET", r"/v1/users/([A-Za-z0-9_\-]+)/friends")
 def user_friends(req, me, uid):
     if not q1("SELECT 1 FROM users WHERE id = ?", (uid,)):

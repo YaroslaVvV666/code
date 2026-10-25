@@ -444,6 +444,7 @@ struct UserPageView: View {
                     VStack(spacing: 14) {
                         actions(profile)
                         info(profile)
+                        if !model.isMe { CommonChatsCard(userID: profile.id) }
                         tabRows
                         switch tabKinds[min(tab, tabKinds.count - 1)] {
                         case .posts:   wall(profile)

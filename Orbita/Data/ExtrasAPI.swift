@@ -59,6 +59,18 @@ private struct ViewerList: Decodable { let viewers: [StoryViewer]; let likes: In
 struct ExtrasAPI {
     let api: ServerAPI
 
+    /// Общие чаты с человеком: группы, где состоите оба
+    func commonChats(userID: String) async -> [ChatPeer] {
+        struct Item: Decodable { let id: String; let name: String; let members: Int?; let kind: String?; let type: String?; let handle: String? }
+        struct List: Decodable { let chats: [Item] }
+        guard let data = try? await api.request("GET", "/v1/users/\(userID)/common"),
+              let list = try? decodeAPI(List.self, from: data) else { return [] }
+        return list.chats.map {
+            ChatPeer(id: $0.id, name: $0.name, username: $0.handle, avatarID: nil, isGroup: true, kind: $0.kind,
+                     memberCount: $0.members ?? 0, type: $0.type ?? "group", handle: $0.handle)
+        }
+    }
+
     // Отложенные
     func schedule(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment], at date: Date) async throws {
         var body: [String: Any] = ["text": text, "entities": RemoteMessengerRepository.entityJSON(entities),
