@@ -4678,13 +4678,16 @@ def notif_seen(uid):
 
 @route("GET", r"/v1/me/activity/count")
 def activity_count(req, me):
-    seen, total = notif_seen(me["id"]), 0
+    seen, total, kinds = notif_seen(me["id"]), 0, {}
     for kind, sql in ACT_SOURCES:
         r = q1("SELECT COUNT(*) c FROM (SELECT 1 FROM (%s) WHERE at > :seen LIMIT 1000)" % sql, {"me": me["id"], "seen": seen})
-        total += r["c"] if r else 0
+        n = r["c"] if r else 0
+        if n:
+            kinds[kind] = n                                     # для плашки у колокольчика: ♥ 3  💬 1  👤 2
+        total += n
         if total >= 1000:
             break
-    req.send_json(200, {"unread": min(total, 999), "more": total >= 1000})
+    req.send_json(200, {"unread": min(total, 999), "more": total >= 1000, "kinds": kinds})
 
 
 @route("GET", r"/v1/me/activity")

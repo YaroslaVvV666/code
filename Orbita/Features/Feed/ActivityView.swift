@@ -22,13 +22,13 @@ struct ActivityUser: Decodable {
 }
 
 private struct ActivityList: Decodable { let items: [ActivityItem] }
-private struct ActivityCount: Decodable { let unread: Int }
+private struct ActivityCount: Decodable { let unread: Int; let kinds: [String: Int]? }
 
 extension ExtrasAPI {
-    func activityCount() async -> Int? {
+    func activityCount() async -> (unread: Int, kinds: [String: Int])? {
         guard let data = try? await api.request("GET", "/v1/me/activity/count"),
               let c = try? decodeAPI(ActivityCount.self, from: data) else { return nil }
-        return c.unread
+        return (c.unread, c.kinds ?? [:])
     }
 
     func activity(before: Double? = nil) async -> [ActivityItem]? {
@@ -48,20 +48,127 @@ extension ExtrasAPI {
 @MainActor
 final class ActivityStore: ObservableObject {
     @Published var unread = 0
+    /// Плашка у колокольчика «что было»: ♥ 3  💬 1  👤 2 (пусто — не показывается)
+    @Published var toast: [ActivityToastItem] = []
+    /// Сколько новых уже показали плашкой (на весь запуск): та же пачка второй раз не выскакивает
+    private static var toasted = 0
 
     func refresh(_ extras: ExtrasAPI) async {
-        if let n = await extras.activityCount() { unread = n }
+        guard let c = await extras.activityCount() else { return }
+        unread = c.unread
+        // зашли на главную и есть новое (или с прошлого раза прибавилось) — показываем, что именно
+        if c.unread > Self.toasted {
+            let items = ActivityToastItem.group(c.kinds)
+            Self.toasted = c.unread
+            if !items.isEmpty { toast = items }
+        }
+    }
+
+    /// Открыли уведомления — всё прочитано, следующая плашка будет только о новом
+    func markSeen() {
+        unread = 0
+        toast = []
+        Self.toasted = 0
     }
 
     var badgeText: String { unread > 999 ? "999+" : "\(unread)" }
+}
+
+/// Одна группа в плашке: значок и сколько
+struct ActivityToastItem: Identifiable, Equatable {
+    let icon: String
+    let count: Int
+    var id: String { icon }
+
+    /// Лайки (публикаций, комментариев, историй), комментарии и ответы, подписки и заявки в друзья, репосты
+    static func group(_ kinds: [String: Int]) -> [ActivityToastItem] {
+        let groups: [(String, [String])] = [
+            ("heart.fill", ["like", "comment_like", "story_like"]),
+            ("bubble.left.fill", ["comment", "reply"]),
+            ("person.fill", ["follow", "friend_request"]),
+            ("arrow.2.squarepath", ["repost"]),
+        ]
+        return groups.compactMap { icon, keys in
+            let n = keys.reduce(0) { $0 + (kinds[$1] ?? 0) }
+            return n > 0 ? ActivityToastItem(icon: icon, count: n) : nil
+        }
+    }
+}
+
+/// Красная плашка под колокольчиком (как в TikTok): что нового — лайки, комментарии, подписки — и сколько.
+/// Сама прячется через несколько секунд, нажатие открывает уведомления
+private struct ActivityToast: View {
+    let items: [ActivityToastItem]
+    static let red = Color(red: 1, green: 0.17, blue: 0.33)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Triangle().fill(Self.red).frame(width: 14, height: 7)
+            HStack(spacing: 12) {
+                ForEach(items) { item in
+                    HStack(spacing: 4) {
+                        Image(systemName: item.icon).font(.system(size: 15, weight: .bold))
+                        Text(item.count > 99 ? "99+" : "\(item.count)").font(.system(size: 16, weight: .bold).monospacedDigit())
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14).frame(height: 38)
+            .background(Self.red, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(color: Self.red.opacity(0.35), radius: 8, y: 3)
+        }
+        .fixedSize()
+    }
+
+    private struct Triangle: Shape {
+        func path(in r: CGRect) -> Path {
+            Path { p in
+                p.move(to: CGPoint(x: r.midX, y: r.minY))
+                p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+                p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+                p.closeSubpath()
+            }
+        }
+    }
 }
 
 struct BellButton: View {
     @ObservedObject var store: ActivityStore
     let action: () -> Void
     @Environment(\.theme) private var theme
+    @State private var shown: [ActivityToastItem] = []
 
     var body: some View {
+        bell
+            .overlay(alignment: .top) {
+                if !shown.isEmpty {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) { shown = [] }
+                        action()
+                    } label: { ActivityToast(items: shown) }
+                    .buttonStyle(PressStyle())
+                    .offset(y: 42)
+                    .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
+                }
+            }
+            .zIndex(shown.isEmpty ? 0 : 20)
+            .onChange(of: store.toast) { _, items in present(items) }
+            .onAppear { present(store.toast) }
+    }
+
+    private func present(_ items: [ActivityToastItem]) {
+        guard !items.isEmpty else { return }
+        store.toast = []
+        Haptics.impact(.light)
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.7)) { shown = items }
+        let current = items
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+            guard shown == current else { return }
+            withAnimation(.easeOut(duration: 0.25)) { shown = [] }
+        }
+    }
+
+    private var bell: some View {
         Button(action: action) {
             Image(systemName: "bell")
                 .font(.system(size: 19, weight: .medium))
@@ -139,7 +246,7 @@ struct ActivityView: View {
         .task {
             await load()
             await session.extras.markActivitySeen()
-            store.unread = 0
+            store.markSeen()
         }
     }
 

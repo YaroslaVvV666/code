@@ -53,6 +53,7 @@ struct FeedView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+                .zIndex(5)          // плашка «что нового» под колокольчиком ложится поверх ленты
 
             ScrollView {
                 LazyVStack(spacing: 0) {
