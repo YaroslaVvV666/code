@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Свайп от левого края вправо — «назад» (как в iOS и Telegram) для экранов с собственной стрелкой назад
 struct EdgeSwipeBack: ViewModifier {
