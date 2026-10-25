@@ -39,14 +39,14 @@ struct GroupInfo: Equatable {
     var slow = 0                        // медленный режим, секунд
     var whoWrites = "all"               // "all" | "admins" | "selected"
     var history = true                  // новые участники видят историю
-    var perms = GroupPerms()            // что участники могут без админки
-    var writers: [String] = []          // «писать могут выбранные» (видят только админы)
-    var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var count = 0
     var muted = false
     var canWrite = true
     var requests = 0
     var pending = false
+    var perms = GroupPerms()            // что участники могут без админки
+    var writers: [String] = []          // «писать могут выбранные» (видят только админы)
+    var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var discussion: DiscussionRef? = nil    // чат для комментариев канала
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
