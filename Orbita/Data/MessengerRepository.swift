@@ -225,6 +225,7 @@ struct ChatSummary: Identifiable, Equatable {
     let lastMine: Bool
     let lastRead: Bool
     let typing: String?             // "typing", "voice", "video", … или nil
+    var lastSender: String? = nil   // кто написал последнее (имя), если не вы: «Андрей: привет»
     var muted = false
     var mentions = 0                // непрочитанные «тэги» (@username) — вместо числа ставится значок @
     var lastThumb: LastThumb? = nil // миниатюра фото/видео из последнего сообщения
@@ -550,6 +551,7 @@ private struct LastDTO: Decodable {
     let read: Bool
     let createdAt: Double
     let thumb: Thumb?
+    let who: String?
 }
 
 private struct ChatDTO: Decodable {
@@ -938,7 +940,8 @@ struct RemoteMessengerRepository: MessengerRepository {
         let dto = try decodeAPI(ChatListDTO.self, from: data)
         let list = dto.chats.map {
             ChatSummary(peer: $0.peer.model, unread: $0.unread, updatedAt: Date(timeIntervalSince1970: $0.updatedAt),
-                        lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing, muted: $0.muted ?? false,
+                        lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing,
+                        lastSender: $0.last.who, muted: $0.muted ?? false,
                         mentions: $0.mentions ?? 0, lastThumb: $0.last.thumb.map { LastThumb(kind: $0.type, mediaID: $0.media) })
         }
         return (list, dto.unread)

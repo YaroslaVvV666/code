@@ -4234,8 +4234,11 @@ def list_chats(req, me):
         peer = last["peer"]
         unread = unread_by.get(peer, 0) if peer != uid else 0
         total += unread
-        chats.append({"peer": user_brief(peer, uid, users.get(peer)), "unread": unread, "updated_at": last["created_at"],
+        brief = user_brief(peer, uid, users.get(peer))
+        chats.append({"peer": brief, "unread": unread, "updated_at": last["created_at"],
                       "last": {"text": preview_of(last, uid), "mine": last["sender"] == uid,
+                               # кто написал последнее — «Андрей: привет» в списке чатов
+                               "who": brief["name"].split(" ")[0] if last["sender"] != uid and peer != uid else None,
                                "read": last["read_at"] is not None, "created_at": last["created_at"],
                                "thumb": last_thumb(last)},
                       "typing": typing_action(peer, uid), "mentions": tags_by.get(peer, 0) if peer != uid else 0})
@@ -5409,8 +5412,8 @@ def group_chat_rows(uid):
         total += unread if not mem["muted"] else mentions
         channel = g["type"] == "channel"
         if last:
-            who = "" if (channel or last["sender"] == uid or last["kind"] in SYS_LABELS) else user_brief(last["sender"], uid)["name"].split(" ")[0] + ": "
-            item = {"text": who + summary_of(last), "mine": last["sender"] == uid,
+            who = None if (channel or last["sender"] == uid or last["kind"] in SYS_LABELS) else user_brief(last["sender"], uid)["name"].split(" ")[0]
+            item = {"text": summary_of(last), "mine": last["sender"] == uid, "who": who,
                     "read": q1("SELECT 1 FROM group_members WHERE group_id = ? AND user_id != ? AND last_read >= ?",
                                (g["id"], uid, last["created_at"])) is not None,
                     "created_at": last["created_at"], "thumb": last_thumb(last)}

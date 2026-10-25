@@ -413,9 +413,15 @@ struct ChatsListView: View {
             },
             .init(icon: isMuted(chat) ? "bell.fill" : "bell.slash.fill", tint: .indigo) { toggleMute(chat) },
             .init(icon: "trash.fill", tint: .red) { deleting = chat },
-        ]) { rowBody(chat) }
+        ]) {
+            rowBody(chat)
+                // закреплённые — на чуть более светлом фоне, как в Telegram
+                .background(prefs.isPinned(chat.id) ? pinnedFill : Color.clear)
+        }
         .onAppear { ThreadPrefetcher.shared.visible(chat, repo: session.messengerRepo) }
     }
+
+    private var pinnedFill: Color { theme.dark ? Color.white.opacity(0.075) : Color.black.opacity(0.04) }
 
     /// Последнее сообщение в списке: миниатюра фото/видео и анимированный эмодзи вместо голого текста
     @ViewBuilder
@@ -423,7 +429,13 @@ struct ChatsListView: View {
         let color = chat.lastMine ? theme.textSecondary : (chat.unread > 0 ? theme.text : theme.textSecondary)
         let bare = chat.lastText.trimmingCharacters(in: .whitespacesAndNewlines)
         let animated = AnimatedEmoji.all.first { $0 == bare || LottieEmojiStore.code($0, keepVariation: false) == LottieEmojiStore.code(bare, keepVariation: false) }
+        // кто написал: «Вы: привет» / «Андрей: привет» (в каналах — без имени)
+        let author: String? = chat.peer.isChannel || chat.peer.id == session.serverID ? nil
+            : (chat.lastMine ? s.t("Вы", "You") : chat.lastSender)
         HStack(alignment: .center, spacing: 5) {
+            if let author, chat.lastThumb != nil || animated != nil {
+                Text(author + ":").foregroundStyle(theme.text)
+            }
             if let thumb = chat.lastThumb {
                 RemoteImage(id: thumb.mediaID, maxPixel: 120)
                     .frame(width: 22, height: 22)
@@ -437,6 +449,8 @@ struct ChatsListView: View {
             }
             if let animated {
                 StillEmoji(emoji: animated, size: 24)       // в списке чатов не играет — последний кадр готовой картинкой, без Lottie
+            } else if let author, chat.lastThumb == nil {
+                Text(author + ": ").foregroundStyle(theme.text) + Text(chat.lastText).foregroundStyle(color)
             } else {
                 Text(chat.lastText).foregroundStyle(color)
             }
