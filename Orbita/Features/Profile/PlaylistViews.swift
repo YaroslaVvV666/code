@@ -70,6 +70,18 @@ final class AudioPlayer: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var timeObserver: Any?
     private var remoteReady = false
+    private var videoObserver: NSObjectProtocol?
+
+    /// Открыли видео со звуком (история, присланное видео, видео на весь экран) — песня встаёт на паузу, как в Telegram.
+    /// Пауза, а не стоп: песню можно продолжить с того же места
+    init() {
+        videoObserver = NotificationCenter.default.addObserver(forName: .orbitaVideoWithSound, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isPlaying else { return }
+                self.pause()
+            }
+        }
+    }
 
     var total: Double { max(current?.duration ?? 0, 1) }
     var progress: Double { min(1, elapsed / total) }

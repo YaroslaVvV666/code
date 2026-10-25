@@ -722,6 +722,7 @@ struct StoryViewerScreen: View {
             p.pause()
             p.replaceCurrentItem(with: AVPlayerItem(url: url))
             p.seek(to: .zero)
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)      // музыка — на паузу
             p.play()
             if player == nil { player = p }
         } else {

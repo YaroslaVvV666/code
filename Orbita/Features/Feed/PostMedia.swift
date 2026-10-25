@@ -477,7 +477,10 @@ private struct ViewerVideo: View {
         .onAppear(perform: start)
         .onDisappear(perform: stop)
         .onChange(of: isCurrent) { _, now in
-            if now { player?.play(); player?.rate = rate; playing = true } else { player?.pause() }
+            if now, let player {
+                NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
+                player.play(); player.rate = rate; playing = true
+            } else { player?.pause() }
         }
     }
 
@@ -492,6 +495,7 @@ private struct ViewerVideo: View {
         if playing { player.pause(); playing = false }
         else {
             if total > 0, time >= total - 0.05 { player.seek(to: .zero) }
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
             player.play(); player.rate = rate; playing = true
         }
     }
@@ -565,7 +569,10 @@ private struct ViewerVideo: View {
                 }
             }
         }
-        if isCurrent { newPlayer.play(); playing = true }
+        if isCurrent {
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)      // музыка — на паузу
+            newPlayer.play(); playing = true
+        }
         player = newPlayer
     }
 
