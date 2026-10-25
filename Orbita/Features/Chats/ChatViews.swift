@@ -684,6 +684,11 @@ struct ChatScreen: View {
     private var isSaved: Bool { model.peer.id == session.serverID }
 
     var body: some View {
+        chatSheets(chatLifecycle(chatChrome(chatMain)))
+    }
+
+    /// Сама переписка: список, шапка, поле ввода, меню сообщения
+    private var chatMain: some View {
         ZStack {
             SpaceBackground(isDark: theme.dark, showStars: false).ignoresSafeArea()
             ActionScrollLock(state: actionState) { messagesList }
@@ -789,6 +794,11 @@ struct ChatScreen: View {
                 .presentationDetents([.medium, .large])
                 .presentationBackground(theme.sheet)
         }
+    }
+
+    /// Оформление экрана, анимации, подписки и загрузка при появлении
+    private func chatChrome<C: View>(_ content: C) -> some View {
+        content
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .preferredColorScheme(theme.dark ? .dark : .light)
@@ -841,6 +851,11 @@ struct ChatScreen: View {
                     }
             }
         }
+    }
+
+    /// Жесты «назад», окна информации и плеера, опрос отложенных сообщений
+    private func chatLifecycle<C: View>(_ content: C) -> some View {
+        content
         .swipeBackEnabled(fullScreen: false)
         .edgeSwipeBack(enabled: true, fullWidth: true, skipEdge: !standalone) { dismiss() }
         .fullScreenCover(isPresented: $showInfo) {
@@ -886,6 +901,11 @@ struct ChatScreen: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
+    }
+
+    /// Листы и диалоги экрана чата (вынесены из body: одна длинная цепочка не успевала проверяться компилятором)
+    private func chatSheets<C: View>(_ content: C) -> some View {
+        content
         .sheet(isPresented: $showScheduled) {
             ScheduledListSheet(peerID: model.peer.id, items: scheduled) {
                 Task { scheduled = await session.extras.scheduled(peerID: model.peer.id) }
