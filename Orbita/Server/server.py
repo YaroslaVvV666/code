@@ -392,6 +392,7 @@ ensure_column("groups", "type", "type TEXT NOT NULL DEFAULT 'group'")
 ensure_column("groups", "handle", "handle TEXT")
 ensure_column("groups", "discussion", "discussion TEXT")             # чат для комментариев канала
 ensure_column("group_messages", "mirror_of", "mirror_of TEXT")        # копия поста канала в чате обсуждения
+ensure_column("group_messages", "thread", "thread TEXT")              # комментарий: к какой копии поста относится (ответ на комментарий — тоже)
 DB.execute("CREATE INDEX IF NOT EXISTS idx_gm_mirror ON group_messages(mirror_of)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_gm_reply ON group_messages(reply_to)")
 ensure_column("groups", "approve", "approve INTEGER NOT NULL DEFAULT 0")
@@ -5347,7 +5348,26 @@ def comments_count(g, mid):
     mirror = q1("SELECT id FROM group_messages WHERE mirror_of = ? AND group_id = ?", (mid, di))
     if not mirror:
         return 0
-    return q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND reply_to = ?", (di, mirror["id"]))["c"]
+    return q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND (thread = ? OR reply_to = ?)",
+              (di, mirror["id"], mirror["id"]))["c"]
+
+
+def recent_commenters(g, mid, me_id):
+    """Аватарки последних (до трёх) комментаторов под постом — как в Telegram"""
+    di = g["discussion"] if g and g["type"] == "channel" else None
+    mirror = q1("SELECT id FROM group_messages WHERE mirror_of = ? AND group_id = ?", (mid, di)) if di else None
+    if not mirror:
+        return []
+    out, seen = [], set()
+    for r in q("SELECT sender FROM group_messages WHERE group_id = ? AND (thread = ? OR reply_to = ?) ORDER BY created_at DESC LIMIT 40",
+               (di, mirror["id"], mirror["id"])):
+        if r["sender"] in seen:
+            continue
+        seen.add(r["sender"])
+        out.append(user_brief(r["sender"], me_id))
+        if len(out) == 3:
+            break
+    return out
 
 
 def group_typing(gid, me_id):
@@ -5436,9 +5456,12 @@ def gmsg_json(m, me_id, channel=None):
     if channel:
         out["views"] = max(1, q1("SELECT COUNT(*) c FROM group_members WHERE group_id = ? AND last_read >= ?",
                                  (m["group_id"], m["created_at"]))["c"])
-        n = comments_count(group_row(m["group_id"]), mid)
+        cg = group_row(m["group_id"])
+        n = comments_count(cg, mid)
         if n is not None:
             out["comments"] = n
+            if n:
+                out["commenters"] = recent_commenters(cg, mid, me_id)
     return out
 
 
@@ -5889,7 +5912,8 @@ def comment_thread(req, me, gid, mid):
 @route("GET", r"/v1/groups/(g_[a-f0-9]{32})/comments/([a-f0-9]+)")
 def get_comments(req, me, gid, mid):
     g, dg, mem, mirror = comment_thread(req, me, gid, mid)
-    rows = q("SELECT * FROM group_messages WHERE group_id = ? AND reply_to = ? ORDER BY created_at LIMIT 300", (dg["id"], mirror["id"]))
+    rows = q("SELECT * FROM group_messages WHERE group_id = ? AND (thread = ? OR reply_to = ?) ORDER BY created_at LIMIT 500",
+             (dg["id"], mirror["id"], mirror["id"]))
     req.send_json(200, {"discussion": dg["id"], "mirror": mirror["id"], "can_comment": bool(mem),
                         "messages": [gmsg_json(r, me["id"], False) for r in rows]})
 
@@ -5913,10 +5937,18 @@ def post_comment(req, me, gid, mid):
             raise ApiError(403, "forbidden")
     now = time.time()
     cid = uuid.uuid4().hex
-    run("INSERT INTO group_messages(id, group_id, sender, text_enc, entities_enc, attachments_enc, reply_to, created_at, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+    # ответ на конкретный комментарий этой же ветки (как в Telegram); иначе — на сам пост
+    reply_to = mirror["id"]
+    if d.get("reply_to"):
+        r = q1("SELECT id FROM group_messages WHERE id = ? AND group_id = ? AND (thread = ? OR reply_to = ?)",
+               (str(d["reply_to"]), dg["id"], mirror["id"], mirror["id"]))
+        if r:
+            reply_to = r["id"]
+    run("INSERT INTO group_messages(id, group_id, sender, text_enc, entities_enc, attachments_enc, reply_to, created_at, kind, thread) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (cid, dg["id"], uid, enc(uid, "messages", COL["msg_text"], cid, text),
-         enc(uid, "messages", COL["msg_entities"], cid, json.dumps(entities, ensure_ascii=False)), None, mirror["id"], now, None))
+         enc(uid, "messages", COL["msg_entities"], cid, json.dumps(entities, ensure_ascii=False)), None, reply_to, now, None,
+         mirror["id"]))
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, dg["id"], uid))
     row = q1("SELECT * FROM group_messages WHERE id = ?", (cid,))
     tagged = record_mentions(dg, uid, cid, text, now)

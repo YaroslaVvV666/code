@@ -954,11 +954,13 @@ struct ChatScreen: View {
                 .presentationDetents([.medium])
                 .presentationBackground(theme.sheet)
         }
-        .sheet(item: $commentsRoute) { r in
+        .fullScreenCover(item: $commentsRoute) { r in
+            // комментарии — отдельная переписка на весь экран, как в Telegram
             ChannelCommentsSheet(route: r)
                 .environmentObject(session)
+                .environmentObject(flow)
+                .environmentObject(session.player)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
         }
         .fullScreenCover(item: $storyRoute) { r in
             StoryViewerScreen(groups: [r.group], startGroup: 0, startIndex: 0)

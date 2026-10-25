@@ -639,21 +639,7 @@ struct MessageRow: View {
             }
 
             if let n = message.comments, !message.isPending, let open = onOpenComments {
-                Button(action: open) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "bubble.left").font(.system(size: 14, weight: .semibold))
-                        Text(n == 0 ? s.t("Оставить комментарий", "Leave a comment")
-                                    : s.t("Комментарии: \(n)", "\(n) comments"))
-                            .font(.system(size: 15, weight: .semibold))
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(theme.accentColor)
-                    .padding(.horizontal, 12).frame(height: 38)
-                    .frame(minWidth: 210, alignment: .leading)
-                    .background(theme.accentColor.opacity(0.10))
-                }
-                .buttonStyle(.plain)
+                commentsBar(n, open: open)
             }
         }
         .frame(minWidth: 56, alignment: .leading)
@@ -662,6 +648,47 @@ struct MessageRow: View {
         .overlay(shape.stroke(mine ? Color.clear : (theme.dark ? Color.white.opacity(0.04) : Color.black.opacity(0.06)), lineWidth: 1))
         .shadow(color: mine ? theme.accentColor.opacity(theme.dark ? 0.25 : 0.22) : Color.black.opacity(theme.dark ? 0 : 0.06),
                 radius: mine ? 6 : 2, y: mine ? 2 : 1)
+    }
+
+    /// Низ поста канала, как в Telegram: аватарки последних комментаторов, «9 комментариев» и стрелка
+    private func commentsBar(_ n: Int, open: @escaping () -> Void) -> some View {
+        let tint: Color = mine ? .white : theme.accentColor
+        let ring: Color = mine ? theme.accentColor : colors.incoming
+        return Button {
+            guard !blocked else { return }
+            Haptics.select()
+            open()
+        } label: {
+            HStack(spacing: 10) {
+                if message.commenters.isEmpty {
+                    Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 17))
+                        .frame(width: 30, height: 30)
+                } else {
+                    HStack(spacing: -10) {
+                        ForEach(Array(message.commenters.prefix(3).enumerated()), id: \.element.id) { i, p in
+                            AvatarView(name: p.name, size: 30, avatarID: p.avatarID)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(ring, lineWidth: 2))
+                                .zIndex(Double(3 - i))
+                        }
+                    }
+                }
+                Text(n == 0 ? s.t("Прокомментировать", "Leave a comment") : CommentWord.count(n, lang: lang))
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 12).frame(height: 48)
+            .frame(minWidth: 240, alignment: .leading)
+            .overlay(alignment: .top) {
+                Rectangle().fill(mine ? Color.white.opacity(0.22) : (theme.dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)))
+                    .frame(height: 0.5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func senderColor(_ id: String) -> Color {

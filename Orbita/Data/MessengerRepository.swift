@@ -123,6 +123,7 @@ struct DiscussionRef: Equatable {
 struct CommentThread {
     var messages: [ChatMessage]
     var canComment: Bool
+    var mirrorID: String? = nil      // копия поста в чате обсуждения: ответы «на пост» — это ответы на неё
 }
 
 /// Параметры новой группы или канала
@@ -350,6 +351,7 @@ struct ChatMessage: Identifiable, Equatable {
     var storyReply: StoryReplyRef? = nil
     var comments: Int? = nil        // в канале с обсуждением — число комментариев
     var note: String? = nil         // своя заметка к сообщению: видна только тебе
+    var commenters: [ChatPeer] = [] // пост канала: последние комментаторы (аватарки под постом)
 
     var summary: String {
         if system != nil { return "" }
@@ -492,7 +494,7 @@ protocol MessengerRepository: Sendable {
     func setMuted(groupID: String, muted: Bool) async throws
     func deleteGroup(id: String) async throws
     func comments(channelID: String, messageID: String) async throws -> CommentThread
-    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage
+    func postComment(channelID: String, messageID: String, text: String, replyTo: String?) async throws -> ChatMessage
 
     // импорт записной книги и уведомления «теперь в Orbita»
     func importContacts(_ entries: [BookEntry]) async throws -> [ImportMatch]
@@ -666,6 +668,7 @@ private struct MessageDTO: Decodable {
     let storyReply: StoryReplyDTO?
     let comments: Int?
     let note: String?
+    let commenters: [PeerDTO]?
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -677,7 +680,7 @@ private struct MessageDTO: Decodable {
                     forwarded: forwarded.map { ForwardRef(id: $0.id, name: $0.name, postID: $0.post) },
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
-                    comments: comments, note: note)
+                    comments: comments, note: note, commenters: (commenters ?? []).map(\.model))
     }
 }
 
@@ -708,7 +711,7 @@ private struct MemberDTO: Decodable {
 }
 
 private struct DiscussionDTO: Decodable { let id: String; let name: String }
-private struct CommentThreadDTO: Decodable { let messages: [MessageDTO]; let canComment: Bool }
+private struct CommentThreadDTO: Decodable { let messages: [MessageDTO]; let canComment: Bool; let mirror: String? }
 
 private struct GroupDTO: Decodable {
     let id: String
@@ -1132,11 +1135,13 @@ struct RemoteMessengerRepository: MessengerRepository {
     func comments(channelID: String, messageID: String) async throws -> CommentThread {
         let data = try await api.request("GET", "/v1/groups/\(channelID)/comments/\(messageID)")
         let dto = try decodeAPI(CommentThreadDTO.self, from: data)
-        return CommentThread(messages: dto.messages.map(\.model), canComment: dto.canComment)
+        return CommentThread(messages: dto.messages.map(\.model), canComment: dto.canComment, mirrorID: dto.mirror)
     }
 
-    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage {
-        let body = ServerAPI.json(["text": text, "entities": [Any]()] as [String: Any])
+    func postComment(channelID: String, messageID: String, text: String, replyTo: String?) async throws -> ChatMessage {
+        var fields: [String: Any] = ["text": text, "entities": [Any]()]
+        if let replyTo { fields["reply_to"] = replyTo }
+        let body = ServerAPI.json(fields)
         let data = try await api.request("POST", "/v1/groups/\(channelID)/comments/\(messageID)", body: body)
         return try decodeAPI(MessageDTO.self, from: data).model
     }
