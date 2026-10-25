@@ -166,10 +166,37 @@ actor ServerAPI {
         // Несколько запросов стартуют одновременно (профиль, лента…): регистрируемся один раз,
         // остальные ждут тот же результат. Иначе второй запрос получил бы «user_exists» и выкинул из аккаунта.
         if let pendingRegistration { return try await pendingRegistration.value }
-        let task = Task { try await self.register() }
+        let task = Task { () throws -> String in
+            if let moved = try await self.adoptPreviousToken() { return moved }
+            return try await self.register()
+        }
         pendingRegistration = task
         defer { pendingRegistration = nil }
         return try await task.value
+    }
+
+    /// Тот же сервер, но у компьютера сменился адрес (другой IP в Wi-Fi): токен хранится под старым адресом.
+    /// Пробуем токены этого аккаунта, сохранённые для прежних адресов: принял сервер — переносим токен на новый адрес.
+    /// Без этого приложение пыталось зарегистрироваться заново, получало «такой пользователь уже есть» и выходило из аккаунта.
+    /// Другой сервер чужие токены не примет, там всё как раньше — обычная регистрация
+    private func adoptPreviousToken() async throws -> String? {
+        let others = Keychain.accounts(withPrefix: "orbita.token.\(userID)@").filter { $0 != tokenAccount }
+        for account in others {
+            guard let candidate = Keychain.string(account) else { continue }
+            var req = URLRequest(url: try makeURL("/v1/me", query: [:]), timeoutInterval: 20)
+            req.setValue("Bearer \(candidate)", forHTTPHeaderField: "Authorization")
+            do {
+                _ = try await perform(req, upload: nil)
+            } catch APIError.unauthorized {
+                continue                                        // токен от другого сервера или отозван
+            } catch APIError.server {
+                continue
+            }
+            Keychain.setString(candidate, account: tokenAccount)
+            token = candidate
+            return candidate
+        }
+        return nil
     }
 
     private func register() async throws -> String {
