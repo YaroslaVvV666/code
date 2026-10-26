@@ -127,6 +127,12 @@ struct MessageActionOverlay: View {
         }
     }
 
+    /// Одно медиа без текста (видео, фото, кружок): в меню показывается целиком, уменьшаясь с сохранением пропорций
+    private var mediaCopy: Bool {
+        message.text.isEmpty && message.poll == nil && message.reply == nil && !message.attachments.isEmpty
+            && message.attachments.allSatisfy { [.photo, .video, .circle].contains($0.kind) }
+    }
+
     // Раскладка: сверху ряд реакций, посередине сообщение на своём месте, снизу кнопки
     private static let barHeight: CGFloat = 52
     private static let gap: CGFloat = 10
@@ -157,12 +163,19 @@ struct MessageActionOverlay: View {
             let top = TopInset.value + 8
             let bottom = screen.height - max(BottomInset.value, 12) - 8
             let f = sourceFrame ?? CGRect(x: 0, y: screen.height * 0.35, width: screen.width, height: 80)
-            // сообщение слишком высокое — показываем его в прокрутке нужной высоты
+            // одно медиа без текста (видео, фото, кружок) не влезает по высоте — показываем целиком, уменьшив с сохранением
+            // пропорций; ряд реакций ложится поверх его верха. Остальное (длинный текст) — как раньше, в прокрутке
+            let fullAvail = max(80, bottom - top - (Self.gap + listHeight))
+            let fitScale = mediaCopy ? min(1, fullAvail / max(1, f.height)) : 1
             let maxMessage = max(60, bottom - top - (Self.barHeight + Self.gap) - (Self.gap + listHeight))
-            let messageH = min(f.height, maxMessage)
-            // стоит на своём месте; сдвигается, только если сверху не хватает места для реакций или снизу — для кнопок
-            let target = min(max(f.minY, top + Self.barHeight + Self.gap), bottom - listHeight - Self.gap - messageH)
+            let messageH = mediaCopy ? f.height * fitScale : min(f.height, maxMessage)
+            let messageW = f.width * fitScale
+            // стоит на своём месте; сдвигается, только если не хватает места. Для медиа можно подняться к самому верху
+            let topLimit = mediaCopy ? top : top + Self.barHeight + Self.gap
+            let target = min(max(f.minY, topLimit), bottom - listHeight - Self.gap - messageH)
             let y = shown ? target : f.minY                      // при закрытии сообщение возвращается на место
+            let mx = message.mine ? f.maxX - messageW : f.minX   // уменьшенное медиа держится за свой край
+            let messageX = shown ? mx : f.minX
             let side: Alignment = message.mine ? .trailing : .leading
 
             ZStack(alignment: .topLeading) {
@@ -185,8 +198,20 @@ struct MessageActionOverlay: View {
                         .opacity(shown ? 1 : 0)
                         .animation(motion(0.03), value: shown)
                         .frame(width: screen.width - 24, alignment: side)
-                        .offset(x: 12, y: y - Self.gap - Self.barHeight)
+                        // ряд реакций над сообщением; если сверху места нет (высокое видео) — ложится поверх его верха
+                        .offset(x: 12, y: max(top, y - Self.gap - Self.barHeight))
 
+                    if mediaCopy {
+                        // видео/фото/кружок целиком: рисуем копию в натуральную величину и равномерно уменьшаем — пропорции сохраняются
+                        MessageRow(message: message, isFirst: true, isLast: true,
+                                   onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
+                                   showSender: showSender, noForward: noForward, interactive: false)
+                            .allowsHitTesting(false)
+                            .frame(width: f.width, height: f.height)
+                            .scaleEffect(fitScale, anchor: .topLeading)
+                            .frame(width: messageW, height: messageH, alignment: .topLeading)
+                            .offset(x: messageX, y: y)
+                    } else {
                     ScrollView {
                         MessageRow(message: message, isFirst: true, isLast: true,
                                    onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
@@ -197,6 +222,7 @@ struct MessageActionOverlay: View {
                     .scrollBounceBehavior(.basedOnSize)
                     .frame(width: f.width, height: messageH)
                     .offset(x: f.minX, y: y)
+                    }
 
                     Group {
                         if confirming {
