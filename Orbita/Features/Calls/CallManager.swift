@@ -53,8 +53,15 @@ final class CallManager: ObservableObject {
     func run() async {
         while !Task.isCancelled {
             await pollOnce()
-            let busy = phase != .idle
-            try? await Task.sleep(nanoseconds: busy ? 700_000_000 : 1_800_000_000)
+            // пока звонок соединяется, ICE-кандидаты нужно забирать часто, иначе путь между разными сетями не успевает найтись
+            let delay: UInt64
+            switch phase {
+            case .idle:                         delay = 1_800_000_000
+            case .outgoing, .incoming, .connecting: delay = 250_000_000
+            case .active:                       delay = 600_000_000
+            case .ended:                        delay = 1_800_000_000
+            }
+            try? await Task.sleep(nanoseconds: delay)
         }
     }
 

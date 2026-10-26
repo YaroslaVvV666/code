@@ -11,6 +11,7 @@ Orbita Server — бэкенд соцсети. Всё, что хранится �
 Шифрование и выдача ключей: см. orbita_crypto.py и keytool.py.
 Для интернета поставьте перед сервером HTTPS (nginx / Caddy).
 """
+import base64
 import datetime
 import gzip
 import html as htmllib
@@ -4825,12 +4826,28 @@ DB.executescript(CALL_LOG_SCHEMA)
 
 
 def ice_servers():
-    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+    """STUN помогает собеседникам узнать свои внешние адреса, TURN — ретранслятор на случай строгого NAT (мобильные сети).
+    Без TURN звонки между разными сетями часто не соединяются, поэтому в проде TURN обязателен.
+
+    Поддерживается два способа задать TURN:
+      1) постоянные логин/пароль — ORBITA_TURN_USER / ORBITA_TURN_PASS;
+      2) временные логины coturn (use-auth-secret) — ORBITA_TURN_SECRET: сервер выдаёт на каждый звонок
+         короткоживущий логин, пароль которого нельзя переиспользовать. Это безопаснее постоянного пароля."""
+    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302",
+                         "stun:stun2.l.google.com:19302"]}]
     turn = os.environ.get("ORBITA_TURN_URL")
     if turn:
-        servers.append({"urls": [u.strip() for u in turn.split(",")],
-                        "username": os.environ.get("ORBITA_TURN_USER", ""),
-                        "credential": os.environ.get("ORBITA_TURN_PASS", "")})
+        urls = [u.strip() for u in turn.split(",") if u.strip()]
+        secret = os.environ.get("ORBITA_TURN_SECRET")
+        if secret:
+            # coturn REST API: username = "<срок_истечения>:<метка>", password = HMAC-SHA1(secret, username)
+            ttl = int(os.environ.get("ORBITA_TURN_TTL", "86400"))
+            username = "%d:orbita" % (int(time.time()) + ttl)
+            password = base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
+            servers.append({"urls": urls, "username": username, "credential": password})
+        else:
+            servers.append({"urls": urls, "username": os.environ.get("ORBITA_TURN_USER", ""),
+                            "credential": os.environ.get("ORBITA_TURN_PASS", "")})
     return servers
 
 

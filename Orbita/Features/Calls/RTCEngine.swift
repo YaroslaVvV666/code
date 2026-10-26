@@ -53,6 +53,9 @@ final class RTCEngine: NSObject, ObservableObject {
         config.iceServers = servers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
+        config.iceCandidatePoolSize = 1                // кандидаты собираются заранее — соединение между сетями быстрее
+        config.bundlePolicy = .maxBundle
+        config.rtcpMuxPolicy = .require
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
         pc = Self.factory.peerConnection(with: config, constraints: constraints, delegate: self)
 
