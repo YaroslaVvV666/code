@@ -1281,6 +1281,7 @@ private struct CircleVideoContent: View {
     var size: CGFloat
 
     @ObservedObject var playback: CirclePlayback
+    @Environment(\.mediaFrozen) private var frozen
     /// Пока кружок смотрят, он вырастает (как в Telegram)
     private var shown: CGFloat { playback.started ? max(size, min(300, UIScreen.main.bounds.width - 70)) : size }
     @Environment(\.theme) private var theme
@@ -1301,7 +1302,7 @@ private struct CircleVideoContent: View {
                 if let id = attachment.mediaID, !message.isPending, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id) }
             }
 
-            if playback.started, let player = playback.player {
+            if playback.started, let player = playback.player, !frozen {
                 PlayerLayerView(player: player)
             }
 
@@ -1481,6 +1482,7 @@ private final class DustView: UIView {
         let size: CGFloat
         let color: CGColor
         let wave: Double                                // положение на «волне» разрушения, 0…1
+        let phase: CGFloat                              // покачивание в полёте — у каждой своё
     }
 
     private var image: UIImage
@@ -1491,7 +1493,7 @@ private final class DustView: UIView {
     private var endTime: Double = 0
     private var onDone: (() -> Void)?
     /// За сколько волна проходит всё сообщение (слева сверху → вправо вниз)
-    private let sweep: Double = 0.5
+    private let sweep: Double = 0.62
 
     init(rect: CGRect, image: UIImage) {
         self.image = image
@@ -1548,12 +1550,12 @@ private final class DustView: UIView {
                     let wv = Self.wave(px / contentRect.width, py / contentRect.height)
                     let r1 = CGFloat.random(in: 0...1), r2 = CGFloat.random(in: 0...1)
                     list.append(Particle(x: px, y: py,
-                                         vx: -25 + 120 * r1 * r1,              // в основном вправо, часть — влево
-                                         vy: -(15 + 85 * r2),                  // и вверх
+                                         vx: -20 + 115 * r1 * r1,              // в основном вправо, часть — влево
+                                         vy: -(20 + 80 * r2),                  // и вверх
                                          delay: sweep * (0.85 * wv + 0.15 * Double.random(in: 0...1)),
-                                         life: Double.random(in: 0.55...1.0),
+                                         life: Double.random(in: 0.75...1.25),
                                          size: CGFloat(cell) * sx * CGFloat.random(in: 0.8...1.15),
-                                         color: color, wave: wv))
+                                         color: color, wave: wv, phase: CGFloat.random(in: 0...(2 * .pi))))
                 }
                 x0 += cell
             }
@@ -1564,6 +1566,7 @@ private final class DustView: UIView {
         image = Self.masked(image, mask: mask, width: w, height: h)
         startTime = CACurrentMediaTime()
         let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)     // на 120 Гц — плавнее
         link.add(to: .main, forMode: .common)
         self.link = link
     }
@@ -1612,11 +1615,15 @@ private final class DustView: UIView {
             guard age < p.life else { continue }
             let k = age / p.life
             let a = CGFloat(age)
-            // разгоняются ветром вправо-вверх и тают
-            let x = contentRect.minX + p.x + p.vx * a + 55 * a * a
-            let y = contentRect.minY + p.y + p.vy * a - 35 * a * a
-            let d = p.size * CGFloat(1 - 0.55 * k)
-            ctx.setAlpha(CGFloat(1 - k * k))
+            // отрывается мягко: сначала почти на месте, потом разгоняется ветром вправо-вверх (без рывка на старте)
+            let go = a * a / (a + 0.22)
+            let sway = sin(a * 7 + p.phase) * 3 * min(1, a * 4)
+            let x = contentRect.minX + p.x + p.vx * go + 50 * go * go + sway
+            let y = contentRect.minY + p.y + p.vy * go - 32 * go * go
+            // чуть «вспухает» в момент отрыва, потом плавно уменьшается и тает
+            let d = p.size * CGFloat((1 + 0.18 * sin(min(1, k * 5) * .pi)) * (1 - 0.6 * k))
+            let fade = max(0, min(1, (k - 0.3) / 0.7))
+            ctx.setAlpha(CGFloat(1 - fade * fade * (3 - 2 * fade)))
             ctx.setFillColor(p.color)
             ctx.fill(CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d))
         }

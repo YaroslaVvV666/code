@@ -238,6 +238,8 @@ final class ChatModel: ObservableObject {
     @Published private(set) var peer: ChatPeer
     /// Сообщения, которые прямо сейчас «рассыпаются» (эффект удаления); из списка уходят после анимации
     @Published var dissolving: Set<String> = []
+    /// Видео в этих сообщениях на миг показывает превью-кадр — чтобы рассыпалась картинка, а не чёрный видеослой
+    @Published var freezing: Set<String> = []
     /// Экран чата подсказывает, где сообщение стоит на экране: оттуда оно и рассыпается
     var frameOf: ((String) -> CGRect?)?
     @Published private(set) var messages: [ChatMessage] = []
@@ -592,9 +594,10 @@ final class ChatModel: ObservableObject {
         guard let author = message.sender?.id else { return await delete(message, forEveryone: true) }
         let gone = Set(messages.filter { $0.id == message.id || (options.deleteAll && $0.sender?.id == author && $0.system == nil) }.map(\.id))
         await dissolve(Array(gone))
-        withAnimation(.easeOut(duration: 0.25)) {
+        withAnimation(Self.closeGap) {
             messages.removeAll { gone.contains($0.id) }
             dissolving.subtract(gone)
+            freezing.subtract(gone)
         }
         do { try await repo.moderate(groupID: peerID, userID: author, messageID: message.id, options: options) }
         catch let e as APIError { error = e } catch {}
@@ -605,14 +608,37 @@ final class ChatModel: ObservableObject {
     func dissolve(_ ids: [String]) async {
         Haptics.impact(.soft)
         let frames = ids.compactMap { frameOf?($0) }
+        freezing.formUnion(ids)
+        try? await Task.sleep(nanoseconds: 40_000_000)            // превью вместо видео успевает отрисоваться
         await MessageDust.burst(frames) { dissolving.formUnion(ids) }
+        try? await Task.sleep(nanoseconds: 90_000_000)            // пыль уже отрывается — теперь соседи плавно съезжают
+    }
+
+    /// Как соседние сообщения съезжают на место удалённого
+    static let closeGap = Animation.spring(response: 0.45, dampingFraction: 0.9)
+
+    /// Несколько выбранных: рассыпаются и уходят из списка разом, запросы на сервер — уже после
+    func deleteMany(_ list: [ChatMessage]) async {
+        let ids = Set(list.map(\.id))
+        await dissolve(Array(ids))
+        withAnimation(Self.closeGap) {
+            messages.removeAll { ids.contains($0.id) }
+            dissolving.subtract(ids)
+            freezing.subtract(ids)
+        }
+        for m in list {
+            do { try await repo.delete(messageID: m.id, forEveryone: false) }
+            catch let e as APIError { error = e } catch {}
+        }
+        await refresh()
     }
 
     func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
         if animated { await dissolve([message.id]) }
-        withAnimation(.easeOut(duration: 0.25)) {
+        withAnimation(Self.closeGap) {
             messages.removeAll { $0.id == message.id }
             dissolving.remove(message.id)
+            freezing.remove(message.id)
         }
         do { try await repo.delete(messageID: message.id, forEveryone: forEveryone) }
         catch let e as APIError { error = e } catch {}

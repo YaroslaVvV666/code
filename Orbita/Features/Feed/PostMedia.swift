@@ -251,8 +251,20 @@ struct MediaGrid: View {
 // MARK: - Видео
 
 /// Беззвучное зацикленное видео прямо в ленте (настройка «Автовоспроизведение»)
+/// Сообщение сейчас рассыпается на частицы: видео показывает превью-кадр — живой видеослой iOS не отдаёт в снимок экрана,
+/// и вместо картинки рассыпалась бы чёрная или пустая область
+private struct MediaFrozenKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var mediaFrozen: Bool {
+        get { self[MediaFrozenKey.self] }
+        set { self[MediaFrozenKey.self] = newValue }
+    }
+}
+
 struct InlineVideo: View {
     let item: MediaItem
+    @Environment(\.mediaFrozen) private var frozen
     @State private var player: AVPlayer?
     @State private var endObserver: NSObjectProtocol?
     @State private var statusObserver: NSKeyValueObservation?
@@ -263,7 +275,7 @@ struct InlineVideo: View {
     var body: some View {
         ZStack {
             MediaCell(item: item)
-            if let player {
+            if let player, !frozen {
                 // лёгкий слой AVPlayerLayer вместо VideoPlayer из AVKit: тот строит целый контроллер с элементами управления
                 PlayerLayerView(player: player, gravity: .resizeAspectFill)
                     .allowsHitTesting(false)

@@ -1690,6 +1690,7 @@ struct ChatScreen: View {
                 onOpenEntity: { entitySheet = $0 })
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
             .dustDissolve(active: model.dissolving.contains(m.id))
+            .environment(\.mediaFrozen, model.freezing.contains(m.id))
             .background(GeometryReader { g in
                 Color.clear.preference(key: MessageFrameKey.self, value: [m.id: g.frame(in: .global)])
             })
@@ -1740,8 +1741,7 @@ struct ChatScreen: View {
                 } else {
                     let list = model.items.filter { selected.contains($0.id) }
                     Task {
-                        await model.dissolve(list.map(\.id))              // все рассыпаются одновременно
-                        for m in list { await model.delete(m, forEveryone: false, animated: false) }
+                        await model.deleteMany(list)                     // все рассыпаются и уходят одновременно
                         selecting = false; selected = []
                     }
                 }
