@@ -15,8 +15,29 @@ enum MessageMenu {
 struct ActionScrollLock<Content: View>: View {
     @ObservedObject var state: ActionTargetState
     @ViewBuilder var content: Content
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
-        content.scrollDisabled(state.target != nil)
+        content
+            .scrollDisabled(state.target != nil)
+            // страховка: если меню так и не появилось или исчезло само (свернули приложение, окно не создалось),
+            // выбор сбрасывается — иначе переписка оставалась «замороженной» и не листалась
+            .onChange(of: state.target?.id) { _, id in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    guard state.target?.id == id, !MessageMenuWindow.isShowing else { return }
+                    state.target = nil
+                    MessageMenu.isOpen = false
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase != .active, state.target != nil else { return }
+                state.target = nil
+                MessageMenu.isOpen = false
+            }
+            .onDisappear {
+                state.target = nil
+                MessageMenu.isOpen = false
+            }
     }
 }
 
@@ -592,6 +613,7 @@ private extension View {
 @MainActor
 enum MessageMenuWindow {
     private static var window: UIWindow?
+    static var isShowing: Bool { window != nil }
 
     static func show<V: View>(_ view: V) {
         hide()
@@ -600,7 +622,9 @@ enum MessageMenuWindow {
         let host = UIHostingController(rootView: view)
         host.view.backgroundColor = .clear
         let w = UIWindow(windowScene: scene)
-        w.windowLevel = UIWindow.Level(rawValue: 10_000_001)          // выше окна клавиатуры
+        // выше всех окон, включая клавиатуру (её уровень зависит от версии iOS): размыто всё, и клавиатура тоже
+        let top = scene.windows.map(\.windowLevel.rawValue).max() ?? 0
+        w.windowLevel = UIWindow.Level(rawValue: max(10_000_001, top + 1))
         w.backgroundColor = .clear
         w.rootViewController = host
         w.isHidden = false

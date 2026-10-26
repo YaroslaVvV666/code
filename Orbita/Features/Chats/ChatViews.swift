@@ -656,8 +656,6 @@ struct ChatScreen: View {
     @State private var topKey: String?              // с какого сообщения построен список: при входе фиксируется и дальше не растёт сам
     @State private var userDragged = false          // пока не листали сами — длинная история не должна уводить экран от низа
     @State private var atBottom = true
-    @State private var peekSearch = false
-    @State private var lastBottomY: CGFloat = 0
     @State private var unreadIDs: Set<String> = []      // входящие, которые ещё не показывались на экране
     @State private var viewH: CGFloat = 800
     @State private var downloading = false
@@ -715,7 +713,6 @@ struct ChatScreen: View {
                         requestsBar
                         scheduledBar
                         pinnedBar
-                        PeekSearchRow(visible: peekSearch && !searching) { startSearch() }
                         NowPlayingBar { showPlayer = true }
                         VoiceNowBar()
                     }
@@ -1513,13 +1510,6 @@ struct ChatScreen: View {
             .onPreferenceChange(BottomKey.self) { y in
                 let near = y < viewH + 140
                 if near != atBottom { atBottom = near }
-                // листаем вверх (низ контента уезжает вниз) — показываем строку поиска, вниз — прячем
-                let dy = y - lastBottomY
-                if abs(dy) > 14 {
-                    let up = dy > 0 && !near
-                    if up != peekSearch { withAnimation(.easeOut(duration: 0.2)) { peekSearch = up } }
-                    lastBottomY = y
-                }
             }
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in userDragged = true })
@@ -2306,33 +2296,6 @@ private struct BackWithUnread: View {
         .glassCapsule()
         .contentShape(Capsule())
         .animation(.easeOut(duration: 0.15), value: unread)
-    }
-}
-
-
-/// Строка поиска над плеером в чате — появляется, когда листаешь вверх
-struct PeekSearchRow: View {
-    let visible: Bool
-    let action: () -> Void
-    @EnvironmentObject private var player: AudioPlayer
-    @Environment(\.theme) private var theme
-    @Environment(\.lang) private var lang
-
-    var body: some View {
-        if visible && player.current != nil {
-            Button(action: action) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
-                    Text(Strings(lang: lang).t("Поиск по переписке", "Search messages"))
-                        .font(.system(size: 15)).foregroundStyle(theme.textTertiary)
-                    Spacer()
-                }
-                .padding(.horizontal, 14).frame(height: 38)
-                .glassCapsule().contentShape(Capsule())
-            }
-            .buttonStyle(.plain).padding(.horizontal, 10)
-            .transition(.move(edge: .top).combined(with: .opacity))
-        }
     }
 }
 
