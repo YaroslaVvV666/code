@@ -36,6 +36,40 @@ class MemoryShared:
         self.signals = {}          # uid -> [сигналы]
         self.typing = {}           # (frm, to) -> (ts, action)
         self.qr = {}               # qid -> запись (dict)
+        self.blob = {}             # ключ -> (срок, bytes) — кэш (сессии, ленты)
+        self.vers = {}             # ключ -> int — счётчик версий для инвалидации кэша
+
+    # --- кэш: двоичные значения с TTL + счётчики версий ---
+
+    def cache_get(self, key):
+        with self._lock:
+            e = self.blob.get(key)
+            if not e:
+                return None
+            if e[0] < time.time():
+                self.blob.pop(key, None)
+                return None
+            return e[1]
+
+    def cache_set(self, key, value, ttl):
+        with self._lock:
+            if len(self.blob) > 20000:
+                self.blob.clear()
+            self.blob[key] = (time.time() + ttl, value)
+
+    def cache_del(self, key):
+        with self._lock:
+            self.blob.pop(key, None)
+
+    def ver_get(self, key):
+        with self._lock:
+            return self.vers.get(key, 0)
+
+    def ver_bump(self, key):
+        with self._lock:
+            v = self.vers.get(key, 0) + 1
+            self.vers[key] = v
+            return v
 
     # --- звонки ---
 
@@ -170,8 +204,29 @@ class RedisShared:
     def __init__(self, url):
         import redis
         self.r = redis.Redis.from_url(url, decode_responses=True)
+        self.rb = redis.Redis.from_url(url, decode_responses=False)   # для двоичного кэша (pickle/тела ответов)
         self.r.ping()
         self._tls = threading.local()
+
+    # --- кэш: двоичные значения с TTL + счётчики версий ---
+
+    def cache_get(self, key):
+        return self.rb.get("c:" + key)
+
+    def cache_set(self, key, value, ttl):
+        self.rb.set("c:" + key, value, ex=max(1, int(ttl)))
+
+    def cache_del(self, key):
+        self.rb.delete("c:" + key)
+
+    def ver_get(self, key):
+        v = self.r.get("ver:" + key)
+        return int(v) if v else 0
+
+    def ver_bump(self, key):
+        v = self.r.incr("ver:" + key)
+        self.r.expire("ver:" + key, 86400)
+        return int(v)
 
     # ключи
     @staticmethod

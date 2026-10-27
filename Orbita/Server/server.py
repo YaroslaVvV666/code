@@ -109,10 +109,13 @@ if POSTGRES:
     import psycopg2 as _psycopg2
     INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
 
+import pickle
 import sharedstate
 # Эфемерное состояние реального времени (звонки, набор, QR): в памяти (по умолчанию) или в Redis (REDIS_URL).
 # Для нескольких воркеров нужен Redis, иначе это состояние у каждого воркера своё.
 SHARED = sharedstate.make_shared()
+# Кэш проверки токена: каждый запрос иначе делает JOIN sessions+users. Короткий TTL + сброс при выходе/смене профиля.
+AUTH_CACHE_TTL = float(os.environ.get("ORBITA_AUTH_CACHE_TTL", "15") or "0")
 
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
 SCHEMA = """
@@ -989,10 +992,8 @@ class ApiError(Exception):
         self.status, self.code, self.extra = status, code, extra
 
 
-# Кэш ответов на частые опросы (список чатов, ленты): ключ включает счётчик собственных изменений пользователя,
-# поэтому его же действия видны сразу, а чужие — не позже чем через TTL секунд.
-RESP_CACHE = {}
-UVER = {}
+# Кэш ответов на частые опросы (список чатов, ленты) живёт в SHARED (память/Redis): ключ включает счётчик
+# собственных изменений пользователя (uver), поэтому его же действия видны сразу, а чужие — не позже чем через TTL.
 
 
 def cache_ttl(path, params):
@@ -1019,9 +1020,7 @@ class Handler(BaseHTTPRequestHandler):
         key = getattr(self, "_cache_key", None)
         if key is not None and status == 200:
             self._cache_key = None
-            if len(RESP_CACHE) > 3000:
-                RESP_CACHE.clear()
-            RESP_CACHE[key[0]] = [time.time() + key[1], body, None]
+            SHARED.cache_set(key[0], body, key[1])
         self._write_json(status, body)
 
     def _write_json(self, status, body, gz=None):
@@ -1067,10 +1066,36 @@ class Handler(BaseHTTPRequestHandler):
         header = self.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
             return None
+        th = token_hash(header[7:].strip())
+        ckey = "auth:" + th
+        if AUTH_CACHE_TTL:
+            blob = SHARED.cache_get(ckey)
+            if blob is not None:
+                try:
+                    r = pickle.loads(blob)
+                except Exception:
+                    r = None
+                # кэш действителен, только если пользователь ничего не менял с момента кэширования:
+                # любое его действие (правка профиля, выход, отключение устройства) увеличивает uver и сбрасывает кэш
+                if r and SHARED.ver_get("uver:" + r["id"]) == r.get("_uver"):
+                    if time.time() - r["session_last"] > 60:       # изредка продлеваем «активность» сессии
+                        now = time.time()
+                        run("UPDATE sessions SET last_active = ? WHERE id = ?", (now, r["session_id"]))
+                        r["session_last"] = now
+                        SHARED.cache_set(ckey, pickle.dumps(r), AUTH_CACHE_TTL)
+                    return r
         r = q1("SELECT u.*, s.id AS session_id, s.last_active AS session_last FROM sessions s "
-               "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (token_hash(header[7:].strip()),))
-        if r and time.time() - r["session_last"] > 60:
-            run("UPDATE sessions SET last_active = ? WHERE id = ?", (time.time(), r["session_id"]))
+               "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (th,))
+        if r:
+            # Postgres отдаёт BYTEA как memoryview (не пиклится) — приводим к bytes, как в SQLite
+            r = {k: (bytes(v) if isinstance(v, memoryview) else v) for k, v in dict(r).items()}
+            if time.time() - r["session_last"] > 60:
+                now = time.time()
+                run("UPDATE sessions SET last_active = ? WHERE id = ?", (now, r["session_id"]))
+                r["session_last"] = now
+            if AUTH_CACHE_TTL:
+                r["_uver"] = SHARED.ver_get("uver:" + r["id"])
+                SHARED.cache_set(ckey, pickle.dumps(r), AUTH_CACHE_TTL)
         return r
 
     def dispatch(self, method):
@@ -1092,17 +1117,16 @@ class Handler(BaseHTTPRequestHandler):
                     if me:
                         remember_lang(me["id"], self.headers.get("X-Orbita-Lang"))
                     if me and method != "GET":
-                        UVER[me["id"]] = UVER.get(me["id"], 0) + 1       # свои изменения сразу сбрасывают кэш
+                        SHARED.ver_bump("uver:" + me["id"])             # свои изменения сразу сбрасывают кэш лент/чатов
                     elif me and method == "GET":
                         ttl = cache_ttl(path, self.query())
                         if ttl:
-                            ck = (me["id"], UVER.get(me["id"], 0), self.path)
-                            hit = RESP_CACHE.get(ck)
-                            if hit and hit[0] > time.time():
-                                if hit[2] is None and len(hit[1]) > 1200 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
-                                    hit[2] = gzip.compress(hit[1], compresslevel=4)
-                                return self._write_json(200, hit[1], hit[2])
-                            self._cache_key = (ck, ttl)
+                            ver = SHARED.ver_get("uver:" + me["id"])
+                            ckey = "resp:%s:%d:%s" % (me["id"], ver, self.path)
+                            body = SHARED.cache_get(ckey)
+                            if body is not None:
+                                return self._write_json(200, body)
+                            self._cache_key = (ckey, ttl)
                     return fn(self, me, *match.groups())
             self.drain()
             raise ApiError(404, "not_found")
@@ -4376,7 +4400,7 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
         run("UPDATE messages SET fwd_enc = ? WHERE id = ?",
             (enc(uid, "messages", COL["msg_entities"], mid + ":fwd", json.dumps({"story": story}, ensure_ascii=False)), mid))
     SHARED.typing_clear(uid, peer)
-    UVER[peer] = UVER.get(peer, 0) + 1                 # у получателя список чатов обновится сразу
+    SHARED.ver_bump("uver:" + peer)                    # у получателя список чатов обновится сразу
     row = q1("SELECT * FROM messages WHERE id = ?", (mid,))
     if peer != uid:
         record_dm_mention(peer, uid, mid, text, now)
