@@ -101,7 +101,13 @@ DB = dbadapter.make_db(DATA_DIR)
 POSTGRES = DB.backend == "postgres"
 # Все обращения к БД идут через q/q1/run под этим замком — он же делает атомарными критические секции
 # «проверь-и-вставь» (with LOCK: ...). И для SQLite (один писатель), и для Postgres (одно общее соединение) замок нужен.
+# Замок — внутрипроцессный: при нескольких воркерах (ORBITA_WORKERS) гонку «проверь-и-вставь» между процессами
+# ловит уникальное ограничение БД — нарушение превращаем в 409 (см. INTEGRITY_ERRORS в dispatch).
 LOCK = threading.RLock()
+INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+if POSTGRES:
+    import psycopg2 as _psycopg2
+    INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
 
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
 SCHEMA = """
@@ -1101,6 +1107,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(e.status, {"error": e.code, **e.extra})
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except INTEGRITY_ERRORS:
+            # гонка «проверь-и-вставь» между воркерами: уникальное ограничение отбило дубль — это конфликт, не сбой
+            self.drain()
+            try:
+                self.send_json(409, {"error": "conflict"})
+            except OSError:
+                pass
         except Exception as e:  # noqa
             sys.stderr.write("ERROR %r\n" % (e,))
             self.close_connection = True          # тело запроса могло остаться непрочитанным — не склеиваем запросы
@@ -6631,22 +6644,85 @@ def seed():
 seed()
 
 
-def main():
+WORKER_INDEX = int(os.environ.get("ORBITA_WORKER_INDEX", "0"))
+
+
+def run_worker():
+    # Каждый воркер слушает свой порт (PORT + индекс), чтобы nginx мог «липко» направлять пользователя всегда
+    # в один и тот же воркер (иначе ломаются вход по коду, 2FA и мастер-бот, живущие в памяти воркера).
+    port = PORT + WORKER_INDEX
     ThreadingHTTPServer.request_queue_size = 128          # больше ожидающих соединений — пики не отбиваются
-    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd = ThreadingHTTPServer((HOST, port), Handler)
     httpd.daemon_threads = True
-    threading.Thread(target=scheduler_loop, daemon=True).start()
-    print("Orbita Server: http://%s:%d   данные: %s   отпечаток мастер-ключа: %s"
-          % (HOST, PORT, DATA_DIR, KR.fingerprint()))
+    # отложенные сообщения и протухшие истории обрабатывает ровно один воркер, иначе — двойная доставка
+    if WORKER_INDEX == 0:
+        threading.Thread(target=scheduler_loop, daemon=True).start()
+    tag = ("  воркер #%d" % WORKER_INDEX) if "ORBITA_WORKER_INDEX" in os.environ else ""
+    print("Orbita Server: http://%s:%d   данные: %s   отпечаток мастер-ключа: %s%s"
+          % (HOST, port, DATA_DIR, KR.fingerprint(), tag))
+    if WORKER_INDEX == 0:
+        if push.configured():
+            print("Push (APNs): включены, topic %s" % os.environ.get("ORBITA_APNS_TOPIC"))
+        else:
+            print("Push (APNs): не настроены — уведомления вне приложения не придут (см. Server/push.py)")
     if push.configured():
         push.start(drop_push_token)
-        print("Push (APNs): включены, topic %s" % os.environ.get("ORBITA_APNS_TOPIC"))
-    else:
-        print("Push (APNs): не настроены — уведомления вне приложения не придут (см. Server/push.py)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
+        pass
+
+
+def run_master(workers):
+    """Супервизор: поднимает N отдельных процессов-воркеров (каждый со своим соединением к БД) на портах
+    PORT..PORT+N-1 и перезапускает упавшие. Сам запросы не обслуживает — перед ним ставится nginx (docs/scaling.md)."""
+    import signal
+    import subprocess
+    script = os.path.abspath(__file__)
+
+    def spawn(i):
+        env = dict(os.environ, ORBITA_WORKER_INDEX=str(i))
+        return subprocess.Popen([sys.executable, script], env=env)
+
+    procs = {i: spawn(i) for i in range(workers)}
+    print("Orbita: мастер поднял %d воркеров на портах %d..%d. Перед ними поставьте nginx (docs/scaling.md). "
+          "Ctrl+C — остановить." % (workers, PORT, PORT + workers - 1))
+    stopping = {"v": False}
+
+    def on_sig(*_):
+        stopping["v"] = True
+    signal.signal(signal.SIGINT, on_sig)
+    signal.signal(signal.SIGTERM, on_sig)
+    try:
+        while not stopping["v"]:
+            time.sleep(2)
+            for i, p in list(procs.items()):
+                if p.poll() is not None and not stopping["v"]:
+                    print("Orbita: воркер #%d остановился (код %s) — перезапуск" % (i, p.returncode))
+                    procs[i] = spawn(i)
+    finally:
+        for p in procs.values():
+            p.terminate()
+        for p in procs.values():
+            try:
+                p.wait(timeout=10)
+            except Exception:
+                p.kill()
         print("\nОстановлено")
+
+
+def main():
+    workers = int(os.environ.get("ORBITA_WORKERS", "1") or "1")
+    # один воркер — как раньше, без супервизора; несколько — поднимаем отдельные процессы
+    if workers > 1 and "ORBITA_WORKER_INDEX" not in os.environ:
+        if not POSTGRES:
+            print("ВНИМАНИЕ: ORBITA_WORKERS>1 рекомендуется с PostgreSQL (DATABASE_URL). На SQLite несколько "
+                  "процессов делят файл — под нагрузкой возможны блокировки. Для продакшена включите Postgres.")
+        print("ВНИМАНИЕ: звонки, индикатор набора и вход по QR-коду пока держат состояние в памяти воркера. "
+              "С несколькими воркерами включите «липкие» сессии в nginx (docs/scaling.md); общее хранилище "
+              "для реального времени (Redis) добавляется следующим шагом (1b).")
+        return run_master(workers)
+    run_worker()
 
 
 if __name__ == "__main__":
