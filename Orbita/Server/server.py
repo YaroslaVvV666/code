@@ -109,6 +109,11 @@ if POSTGRES:
     import psycopg2 as _psycopg2
     INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
 
+import sharedstate
+# Эфемерное состояние реального времени (звонки, набор, QR): в памяти (по умолчанию) или в Redis (REDIS_URL).
+# Для нескольких воркеров нужен Redis, иначе это состояние у каждого воркера своё.
+SHARED = sharedstate.make_shared()
+
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -925,8 +930,7 @@ def backfill_username_prefixes():
 
 backfill_username_prefixes()
 
-QR_PENDING = {}
-QR_LOCK = threading.Lock()
+# Заявки на вход по QR-коду живут в SHARED (память/Redis); записи протухают по сроку QR_TTL
 
 
 def valid_birthday(value):
@@ -1684,24 +1688,18 @@ def twofa_remove(req, me):
 # Новое устройство показывает QR, уже вошедшее — сканирует и подтверждает. Токен выдаётся один раз тому,
 # кто знает секрет, созданный вместе с QR.
 
-def qr_cleanup(now):
-    for k in [k for k, e in QR_PENDING.items() if e["expires"] + 60 < now]:
-        del QR_PENDING[k]
-
-
 @route("POST", r"/v1/qr", auth=False)
 def qr_new(req, me):
     data = req.body_json()
     ip, now = req.client_ip(), time.time()
-    with QR_LOCK:
-        qr_cleanup(now)
-        if sum(1 for e in QR_PENDING.values() if e["info"]["ip"] == ip and now - e["created"] < 60) >= 15:
-            raise ApiError(429, "too_many_requests")
-        if len(QR_PENDING) > 2000:
-            raise ApiError(503, "busy")
-        qid, secret = secrets.token_hex(16), secrets.token_urlsafe(24)
-        QR_PENDING[qid] = {"secret_hash": token_hash(secret), "info": clean_info(data, ip), "created": now,
-                           "expires": now + QR_TTL, "token": None}
+    SHARED.qr_cleanup(now)
+    if SHARED.qr_count_ip(ip, 60) >= 15:
+        raise ApiError(429, "too_many_requests")
+    if SHARED.qr_total() > 2000:
+        raise ApiError(503, "busy")
+    qid, secret = secrets.token_hex(16), secrets.token_urlsafe(24)
+    SHARED.qr_put(qid, {"secret_hash": token_hash(secret), "info": clean_info(data, ip), "created": now,
+                        "expires": now + QR_TTL, "token": None})
     req.send_json(201, {"id": qid, "secret": secret, "expires_in": QR_TTL})
 
 
@@ -1709,12 +1707,12 @@ def qr_new(req, me):
 def qr_poll(req, me, qid):
     secret = req.query().get("secret", "")
     now = time.time()
-    with QR_LOCK:
-        e = QR_PENDING.get(qid)
+    with SHARED.qr_lock(qid):
+        e = SHARED.qr_get(qid)
         if not e or not hmac.compare_digest(e["secret_hash"], token_hash(secret)):
             raise ApiError(404, "not_found")
         if e["expires"] < now:
-            del QR_PENDING[qid]
+            SHARED.qr_del(qid)
             return req.send_json(200, {"status": "expired"})
         if e.get("twofa"):
             # QR подтверждён, но в аккаунте есть облачный пароль: сеанс выдаётся только после него
@@ -1722,7 +1720,7 @@ def qr_poll(req, me, qid):
                                        "name": e["name"], "user_id": e["user_id"]})
         if e["token"] is None:
             return req.send_json(200, {"status": "pending"})
-        del QR_PENDING[qid]
+        SHARED.qr_del(qid)
     req.send_json(200, {"status": "approved", "token": e["token"], "user_id": e["user_id"],
                         "name": e["name"], "phone": e["phone"]})
 
@@ -1731,38 +1729,37 @@ def qr_poll(req, me, qid):
 def qr_twofa(req, me, qid):
     d = req.body_json()
     secret, password = str(d.get("secret", "")), str(d.get("password", ""))
-    with QR_LOCK:
-        e = QR_PENDING.get(qid)
+    with SHARED.qr_lock(qid):
+        e = SHARED.qr_get(qid)
         if not e or e["expires"] < time.time() or not hmac.compare_digest(e["secret_hash"], token_hash(secret)):
             raise ApiError(404, "not_found")
         if not e.get("twofa"):
             raise ApiError(400, "not_required")
         uid = e["user_id"]
     twofa_verify(uid, password)          # бросит wrong_password / locked
-    with QR_LOCK:
-        e = QR_PENDING.pop(qid, None)
-    if not e:
-        raise ApiError(404, "not_found")
+    with SHARED.qr_lock(qid):
+        e = SHARED.qr_get(qid)
+        if not e:
+            raise ApiError(404, "not_found")
+        SHARED.qr_del(qid)
     token, _ = new_session(uid, e["info"])
     req.send_json(200, {"status": "approved", "token": token, "user_id": uid, "name": e["name"], "phone": e["phone"]})
 
 
 @route("GET", r"/v1/qr/([a-f0-9]{32})/info")
 def qr_info(req, me, qid):
-    with QR_LOCK:
-        e = QR_PENDING.get(qid)
-        if not e or e["expires"] < time.time() or e["token"] is not None or e.get("twofa"):
-            raise ApiError(404, "qr_expired")
-        info = dict(e["info"])
-    req.send_json(200, info)
+    e = SHARED.qr_get(qid)
+    if not e or e["expires"] < time.time() or e["token"] is not None or e.get("twofa"):
+        raise ApiError(404, "qr_expired")
+    req.send_json(200, dict(e["info"]))
 
 
 @route("POST", r"/v1/qr/([a-f0-9]{32})/approve")
 def qr_approve(req, me, qid):
     phone = str(req.body_json().get("phone", ""))
     phone = phone[:20] if re.match(r"^\+\d{6,18}$", phone) else ""
-    with QR_LOCK:
-        e = QR_PENDING.get(qid)
+    with SHARED.qr_lock(qid):
+        e = SHARED.qr_get(qid)
         if not e or e["expires"] < time.time() or e["token"] is not None or e.get("twofa"):
             raise ApiError(404, "qr_expired")
         if has_twofa(me["id"]):
@@ -1770,6 +1767,7 @@ def qr_approve(req, me, qid):
         else:
             token, _ = new_session(me["id"], e["info"])
             e.update(token=token, user_id=me["id"], name=names(me)[2], phone=phone)
+        SHARED.qr_put(qid, e)
     req.send_json(200, {"ok": True, "twofa": bool(e.get("twofa"))})
 
 
@@ -3351,7 +3349,7 @@ def unblock_user(req, me, uid):
 
 # ---------- мессенджер ----------
 
-TYPING = {}                       # (от кого, кому) -> (время, действие: typing|voice|video|photo|file)
+# Индикатор набора («печатает…») живёт в SHARED (память/Redis), ключ протухает сам через TYPING_TTL
 TYPING_TTL = 6
 MAX_MSG = 4000
 
@@ -3792,8 +3790,7 @@ def drop_message_media(m):
 
 def typing_action(frm, to):
     """Что сейчас делает собеседник ("typing", "voice", …) или None"""
-    t = TYPING.get((frm, to))
-    return t[1] if t and time.time() - t[0] < TYPING_TTL else None
+    return SHARED.typing_dm(frm, to, TYPING_TTL)
 
 
 def message_json(m, me_id):
@@ -4378,7 +4375,7 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     if story:
         run("UPDATE messages SET fwd_enc = ? WHERE id = ?",
             (enc(uid, "messages", COL["msg_entities"], mid + ":fwd", json.dumps({"story": story}, ensure_ascii=False)), mid))
-    TYPING.pop((uid, peer), None)
+    SHARED.typing_clear(uid, peer)
     UVER[peer] = UVER.get(peer, 0) + 1                 # у получателя список чатов обновится сразу
     row = q1("SELECT * FROM messages WHERE id = ?", (mid,))
     if peer != uid:
@@ -4476,6 +4473,10 @@ def scheduler_loop():
     """Раз в несколько секунд отправляет созревшие отложенные сообщения и убирает истёкшие истории"""
     while True:
         time.sleep(4)
+        try:
+            reap_calls()        # добиваем брошенные звонки (клиент пропал), даже если его собеседник не опрашивает
+        except Exception as e:
+            print("reap_calls: %s" % e.__class__.__name__)
         try:
             for r in q("SELECT * FROM scheduled WHERE send_at <= ? ORDER BY send_at LIMIT 50", (time.time(),)):
                 run("DELETE FROM scheduled WHERE id = ?", (r["id"],))
@@ -4772,10 +4773,9 @@ def delete_story(req, me, sid):
 def chat_typing(req, me, peer):
     if is_group(peer) and not member_row(peer, me["id"]):
         raise ApiError(403, "forbidden")
-    if len(TYPING) > 5000:
-        TYPING.clear()
     action = str(req.body_json().get("action", "typing"))
-    TYPING[(me["id"], peer)] = (time.time(), action if action in ("typing", "voice", "video", "photo", "file") else "typing")
+    action = action if action in ("typing", "voice", "video", "photo", "file") else "typing"
+    SHARED.typing_set(me["id"], peer, action, TYPING_TTL)
     req.send_json(200, {"ok": True})
 
 
@@ -4825,9 +4825,8 @@ def delete_message(req, me, mid):
 
 # ---------- звонки (WebRTC): сервер только передаёт сигналы, медиа идёт напрямую / через TURN ----------
 
-CALLS = {}                        # id -> {caller, callee, video, state, created, answered}
-CALL_SIGNALS = {}                 # user_id -> [сигналы]; живут только в памяти и не пишутся на диск
-USER_CALL = {}                    # user_id -> id текущего звонка
+# Состояние звонков (объект звонка, очередь сигналов, кто в каком звонке) живёт в SHARED:
+# в памяти при одном воркере, в Redis при нескольких — тогда звонок соединяет абонентов на разных воркерах.
 RING_SECONDS = 45
 CALL_LOG_SCHEMA = """CREATE TABLE IF NOT EXISTS call_log(
   id TEXT PRIMARY KEY, caller TEXT NOT NULL, callee TEXT NOT NULL, video INTEGER NOT NULL,
@@ -4868,14 +4867,13 @@ def call_push(call, caller):
 
 
 def finish_call(cid, status, by=None):
-    c = CALLS.pop(cid, None)
+    c = SHARED.call_pop(cid)
     if not c:
         return
     for u in (c["caller"], c["callee"]):
-        if USER_CALL.get(u) == cid:
-            USER_CALL.pop(u, None)
+        SHARED.user_call_clear(u, cid)
         if u != by:
-            CALL_SIGNALS.setdefault(u, []).append({"call": cid, "kind": "end", "data": status})
+            SHARED.signals_push(u, {"call": cid, "kind": "end", "data": status})
     dur = time.time() - c["answered"] if c.get("answered") else 0
     run("INSERT OR REPLACE INTO call_log(id, caller, callee, video, status, created_at, duration) VALUES (?,?,?,?,?,?,?)",
         (cid, c["caller"], c["callee"], 1 if c["video"] else 0, status, c["created"], dur))
@@ -4895,10 +4893,13 @@ def finish_call(cid, status, by=None):
 
 def reap_calls():
     now = time.time()
-    for cid, c in list(CALLS.items()):
+    for cid in SHARED.call_ids():
+        c = SHARED.call_get(cid)
+        if not c:
+            continue
         if c["state"] == "ringing" and now - c["created"] > RING_SECONDS:
             finish_call(cid, "missed")
-        elif c["state"] == "active" and now - min(c["seen"].values()) > 25:      # приложение закрыли / пропала сеть
+        elif c["state"] == "active" and c.get("seen") and now - min(c["seen"].values()) > 25:  # приложение закрыли / пропала сеть
             finish_call(cid, "ended")
 
 
@@ -4915,15 +4916,17 @@ def start_call(req, me):
     if not policy_allows(target, uid, privacy_of(target).get("calls", "all")):
         raise ApiError(403, "forbidden")
     reap_calls()
-    if uid in USER_CALL:
-        raise ApiError(409, "busy")
-    if to in USER_CALL:
-        raise ApiError(409, "callee_busy")
     cid = uuid.uuid4().hex
-    CALLS[cid] = {"caller": uid, "callee": to, "video": bool(d.get("video")), "state": "ringing",
-                  "created": time.time(), "answered": None, "seen": {uid: time.time(), to: time.time()}}
-    USER_CALL[uid] = USER_CALL[to] = cid
-    call_push(CALLS[cid], uid)
+    if not SHARED.user_call_claim(uid, cid, ttl=3600):
+        raise ApiError(409, "busy")
+    if not SHARED.user_call_claim(to, cid, ttl=3600):
+        SHARED.user_call_clear(uid, cid)
+        raise ApiError(409, "callee_busy")
+    now = time.time()
+    call = {"caller": uid, "callee": to, "video": bool(d.get("video")), "state": "ringing",
+            "created": now, "answered": None, "seen": {uid: now, to: now}}
+    SHARED.call_put(cid, call)
+    call_push(call, uid)
     req.send_json(201, {"id": cid, "ice": ice_servers()})
 
 
@@ -4931,22 +4934,23 @@ def start_call(req, me):
 def poll_calls(req, me):
     uid = me["id"]
     reap_calls()
-    cid = USER_CALL.get(uid)
-    c = CALLS.get(cid) if cid else None
+    cid = SHARED.user_call_get(uid)
+    c = SHARED.call_get(cid) if cid else None
     if c:
-        c["seen"][uid] = time.time()
+        SHARED.call_seen(cid, uid, time.time())
+        SHARED.user_call_set(uid, cid, ttl=3600)       # продлеваем «занятость», пока звонок идёт
     incoming = None
     if c and c["callee"] == uid and c["state"] == "ringing":
         incoming = {"id": cid, "video": c["video"], "from": user_brief(c["caller"], uid), "ice": ice_servers()}
     current = None
     if c and c["caller"] == uid:
         current = {"id": cid, "state": c["state"], "video": c["video"]}
-    signals = CALL_SIGNALS.pop(uid, [])
+    signals = SHARED.signals_drain(uid)
     req.send_json(200, {"incoming": incoming, "current": current, "signals": signals})
 
 
 def _my_call(cid, uid):
-    c = CALLS.get(cid)
+    c = SHARED.call_get(cid)
     if not c or uid not in (c["caller"], c["callee"]):
         raise ApiError(404, "not_found")
     return c
@@ -4961,10 +4965,7 @@ def call_signal(req, me, cid):
     if kind not in ("offer", "answer", "ice") or len(data) > 20000:
         raise ApiError(400, "bad_value")
     other = c["callee"] if me["id"] == c["caller"] else c["caller"]
-    q_ = CALL_SIGNALS.setdefault(other, [])
-    if len(q_) > 400:
-        del q_[:200]
-    q_.append({"call": cid, "kind": kind, "data": data})
+    SHARED.signals_push(other, {"call": cid, "kind": kind, "data": data})
     req.send_json(200, {"ok": True})
 
 
@@ -4973,10 +4974,10 @@ def call_answer(req, me, cid):
     c = _my_call(cid, me["id"])
     if c["callee"] != me["id"] or c["state"] != "ringing":
         raise ApiError(409, "bad_state")
-    c["state"] = "active"
-    c["answered"] = time.time()
-    c["seen"] = {c["caller"]: time.time(), c["callee"]: time.time()}
-    CALL_SIGNALS.setdefault(c["caller"], []).append({"call": cid, "kind": "accepted", "data": ""})
+    now = time.time()
+    SHARED.call_update(cid, {"state": "active", "answered": now,
+                             "seen": {c["caller"]: now, c["callee"]: now}})
+    SHARED.signals_push(c["caller"], {"call": cid, "kind": "accepted", "data": ""})
     req.send_json(200, {"ok": True, "ice": ice_servers(), "video": c["video"]})
 
 
@@ -5417,11 +5418,7 @@ def recent_commenters(g, mid, me_id):
 
 
 def group_typing(gid, me_id):
-    now = time.time()
-    for (frm, to), (t, action) in list(TYPING.items()):
-        if to == gid and frm != me_id and now - t < TYPING_TTL:
-            return action
-    return None
+    return SHARED.typing_group(gid, me_id, TYPING_TTL)
 
 
 def group_unread(gid, uid, last_read, since=0):
@@ -5637,7 +5634,7 @@ def group_send(req, me, gid):
     if poll:
         create_poll(mid, uid, poll)
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, gid, uid))
-    TYPING.pop((uid, gid), None)
+    SHARED.typing_clear(uid, gid)
     row = q1("SELECT * FROM group_messages WHERE id = ?", (mid,))
     tagged = record_mentions(g, uid, mid, text, now)
     if not d.get("silent"):
@@ -6718,9 +6715,13 @@ def main():
         if not POSTGRES:
             print("ВНИМАНИЕ: ORBITA_WORKERS>1 рекомендуется с PostgreSQL (DATABASE_URL). На SQLite несколько "
                   "процессов делят файл — под нагрузкой возможны блокировки. Для продакшена включите Postgres.")
-        print("ВНИМАНИЕ: звонки, индикатор набора и вход по QR-коду пока держат состояние в памяти воркера. "
-              "С несколькими воркерами включите «липкие» сессии в nginx (docs/scaling.md); общее хранилище "
-              "для реального времени (Redis) добавляется следующим шагом (1b).")
+        if SHARED.backend == "memory":
+            print("ВНИМАНИЕ: ORBITA_WORKERS>1 без REDIS_URL. Звонки, индикатор набора и вход по QR-коду связывают "
+                  "РАЗНЫХ пользователей/устройства, которых «липкие» сессии разводят по разным воркерам, поэтому "
+                  "между воркерами они работать не будут. Задайте REDIS_URL (redis://...) — тогда это состояние "
+                  "общее для всех воркеров. См. docs/scaling.md.")
+        else:
+            print("Redis подключён: звонки, набор и вход по QR общие для всех воркеров.")
         return run_master(workers)
     run_worker()
 

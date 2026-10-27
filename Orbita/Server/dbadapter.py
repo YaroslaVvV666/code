@@ -111,8 +111,12 @@ class PostgresDB:
         # psycopg2 трактует % как свой плейсхолдер — удваиваем литеральные % (например LIKE 'demo-%')
         if "%" in s:
             s = s.replace("%", "%%")
-        # плейсхолдеры ? -> %s (но не внутри строковых литералов — у нас их с ? нет)
-        s = s.replace("?", "%s")
+        # плейсхолдеры: SQLite-нумерованные ?1,?2 (один аргумент можно переиспользовать) -> именованные %(aN)s;
+        # обычные ? -> позиционные %s. Смешивать их в одном запросе нельзя (код и не смешивает).
+        if re.search(r"\?\d", s):
+            s = re.sub(r"\?(\d+)", lambda m: "%(a" + m.group(1) + ")s", s)
+        else:
+            s = s.replace("?", "%s")
         # DDL через DB.execute (CREATE/ALTER): типы и SQLite-only синтаксис, как в _translate_ddl
         head = s.lstrip()[:6].upper()
         if head in ("CREATE", "ALTER "):
@@ -173,10 +177,15 @@ class PostgresDB:
 
     def execute(self, sql, args=()):
         tsql = self._translate(sql)
+        # нумерованные плейсхолдеры переведены в %(aN)s — передаём аргументы словарём a1,a2,…
+        if re.search(r"\?\d", sql):
+            params = {"a%d" % (i + 1): v for i, v in enumerate(args)}
+        else:
+            params = tuple(args)
 
         def work(conn):
             with conn.cursor(cursor_factory=self._RealDict) as cur:
-                cur.execute(tsql, tuple(args))
+                cur.execute(tsql, params)
                 return _Result(cur.fetchall() if cur.description else [])
         return self._run_cursor(work)
 
