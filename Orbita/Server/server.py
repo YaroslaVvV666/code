@@ -95,18 +95,12 @@ if os.path.exists(os.path.join(DATA_DIR, "orbita.db")):
     print("ВНИМАНИЕ: найдена старая НЕзашифрованная база data/orbita.db. Она не используется и не переносится — "
           "удалите её вместе с data/media.")
 
-DB = sqlite3.connect(os.path.join(DATA_DIR, "orbita-v2.db"), check_same_thread=False, isolation_level=None)
-DB.row_factory = sqlite3.Row
-DB.execute("PRAGMA foreign_keys = ON")
-DB.execute("PRAGMA journal_mode = WAL")
-DB.execute("PRAGMA secure_delete = ON")
-# скорость: кэш страниц в памяти, реже fsync (в режиме WAL это безопасно), mmap, временные таблицы в памяти
-DB.execute("PRAGMA synchronous = NORMAL")
-DB.execute("PRAGMA cache_size = -65536")
-DB.execute("PRAGMA temp_store = MEMORY")
-DB.execute("PRAGMA mmap_size = 268435456")
-DB.execute("PRAGMA busy_timeout = 5000")
-DB.execute("PRAGMA wal_autocheckpoint = 2000")
+import dbadapter
+# SQLite по умолчанию; если задан DATABASE_URL (postgres://...) — PostgreSQL. Схему и запросы адаптер переводит сам
+DB = dbadapter.make_db(DATA_DIR)
+POSTGRES = DB.backend == "postgres"
+# Все обращения к БД идут через q/q1/run под этим замком — он же делает атомарными критические секции
+# «проверь-и-вставь» (with LOCK: ...). И для SQLite (один писатель), и для Postgres (одно общее соединение) замок нужен.
 LOCK = threading.RLock()
 
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
@@ -276,8 +270,8 @@ DB.executescript(SCHEMA)
 
 def ensure_column(table, column, ddl):
     """Лёгкая миграция для баз, созданных прежней версией"""
-    if column not in [r["name"] for r in DB.execute("PRAGMA table_info(%s)" % table)]:
-        DB.execute("ALTER TABLE %s ADD COLUMN %s" % (table, ddl))
+    if column not in DB.columns(table):
+        DB.add_column(table, ddl)
 
 
 ensure_column("group_messages", "kind", "kind TEXT")
@@ -963,6 +957,10 @@ _warned = [False]
 
 def data_intact():
     """Папку data удалили, пока сервер работал: база и файлы уже не те, нужен перезапуск"""
+    if POSTGRES:
+        # база живёт в Postgres, а не в папке data; локального файла-признака нет
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        return True
     if os.path.exists(DB_PATH):
         os.makedirs(MEDIA_DIR, exist_ok=True)
         return True
