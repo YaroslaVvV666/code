@@ -22,6 +22,11 @@ final class ProfileStore: ObservableObject {
         } catch {
             loadError = (error as? APIError) ?? .offline
         }
+        // свою аватарку (и все её фото) закачиваем в постоянный кэш — показывается без интернета даже после перезапуска
+        if let p = profile {
+            let ids = ([p.avatarID] + p.avatars.map(\.mediaID)).compactMap { $0 }
+            for id in ids where !id.isEmpty { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
+        }
     }
 
     /// Эмодзи-статус: рядом с ником появляется сразу, сервер — следом. Не получилось — возвращаем прежний

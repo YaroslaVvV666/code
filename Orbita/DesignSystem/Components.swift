@@ -235,7 +235,7 @@ struct AvatarView: View {
             if let id = avatarID, let url = ServerConfig.mediaURL(id) {
                 // аватарки маленькие: декодируем сразу в нужный размер (с запасом под @3x) и держим в памяти.
                 // Буквы и цветной фон — только пока фото грузится, под готовой картинкой их нет
-                CachedImage(url: url, maxPixel: min(1024, max(160, size * 3))) { image, _ in
+                CachedImage(url: url, maxPixel: min(1024, max(160, size * 3)), persistKey: id) { image, _ in
                     if let image {
                         Image(uiImage: image).resizable().scaledToFill()
                             .frame(width: size, height: size)
