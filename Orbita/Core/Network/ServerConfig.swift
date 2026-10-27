@@ -7,8 +7,22 @@ enum ServerConfig {
     static let defaultURL = "http://localhost:8080"
 
     static var urlString: String {
-        get { UserDefaults.standard.string(forKey: key) ?? defaultURL }
-        set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: key) }
+        // Keychain переживает удаление приложения, UserDefaults — нет. Поэтому адрес сервера храним в Keychain,
+        // а старое значение из UserDefaults подхватываем один раз (миграция). Иначе после переустановки адрес
+        // сбрасывался на localhost и приложение переставало подключаться к серверу
+        get {
+            if let saved = Keychain.string(key) { return saved }
+            if let old = UserDefaults.standard.string(forKey: key) {
+                Keychain.setString(old, account: key)
+                return old
+            }
+            return defaultURL
+        }
+        set {
+            let v = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            Keychain.setString(v, account: key)
+            UserDefaults.standard.set(v, forKey: key)
+        }
     }
 
     static func url(from string: String) -> URL? {
