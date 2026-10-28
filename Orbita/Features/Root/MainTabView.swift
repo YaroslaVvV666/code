@@ -183,12 +183,17 @@ struct MainTabView: View {
             }
         }
         .task(id: scenePhase) {
-            // счётчик непрочитанных для вкладки «Чаты» — пока приложение открыто
+            // счётчик непрочитанных и список чатов — пока приложение открыто. Обновляемся по событию long-poll,
+            // а таймер (30 с) остаётся лишь страховкой на случай пропущенной побудки.
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await session.chats.refresh()
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                await session.live.waitForTopics(["dm", "group", "call"], timeout: 30)
             }
+        }
+        .task { await session.live.run() }
+        .onReceive(session.live.events) { topics in
+            if topics.contains("call") { session.calls.wake() }      // звонок приходит мгновенно, без частого опроса
         }
         .background {
             BannerWindowInstaller(chats: session.chats, session: session, flow: flow, theme: theme, lang: lang) { peer in

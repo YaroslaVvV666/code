@@ -849,11 +849,12 @@ struct ChatScreen: View {
             #endif
         }
         .task(id: scenePhase) {
-            // опрос только пока приложение на экране; в фоне — ни запросов, ни батареи
+            // только пока чат на экране; в фоне — ни запросов, ни батареи. Обновляемся по событию long-poll
+            // (новое сообщение/набор приходят сразу), а таймер (5 с) — лишь страховка.
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await model.refresh()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await session.live.waitForTopics(["dm", "group", "typing"], timeout: 5)
             }
         }
         .overlay(alignment: .top) {

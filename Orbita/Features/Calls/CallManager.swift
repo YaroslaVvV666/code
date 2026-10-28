@@ -56,14 +56,18 @@ final class CallManager: ObservableObject {
             // пока звонок соединяется, ICE-кандидаты нужно забирать часто, иначе путь между разными сетями не успевает найтись
             let delay: UInt64
             switch phase {
-            case .idle:                         delay = 1_800_000_000
+            // в покое звонок приходит событием long-poll (wake()), поэтому опрос тут редкий — лишь страховка
+            case .idle:                         delay = 30_000_000_000
             case .outgoing, .incoming, .connecting: delay = 250_000_000
             case .active:                       delay = 600_000_000
-            case .ended:                        delay = 1_800_000_000
+            case .ended:                        delay = 5_000_000_000
             }
             try? await Task.sleep(nanoseconds: delay)
         }
     }
+
+    /// Внешний сигнал «пришло событие звонка» (из long-poll): опросить сервер немедленно, не дожидаясь таймера.
+    func wake() { Task { await pollOnce() } }
 
     private func pollOnce() async {
         guard let poll = try? await repo.poll() else { return }

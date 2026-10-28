@@ -38,6 +38,8 @@ final class AppSession: ObservableObject {
     let chats: ChatsModel
     let player = AudioPlayer()
     let calls: CallManager
+    /// Общий long-poll: экраны обновляются по событию с сервера, а не по частому таймеру
+    let live: LiveEvents
     let userID: String
     /// Идентификатор в формате сервера (нижний регистр): им сравниваются «я» и чужие id
     let serverID: String
@@ -58,6 +60,7 @@ final class AppSession: ObservableObject {
         taste = TasteTracker(extras: extras)
         chats = ChatsModel(repo: messengerRepo)
         calls = CallManager(repo: CallRepository(api: api))
+        live = LiveEvents(api: api)
         feed = FeedViewModel(repo: feedRepo)
         profile = ProfileStore(repo: profileRepo)
         devices = DevicesStore(repo: profileRepo)
