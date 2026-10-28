@@ -276,14 +276,20 @@ struct MessageActionOverlay: View {
     private static var visibleCount: Int { max(4, Int((UIScreen.main.bounds.width - 32 - 20 - 40) / 40)) }
     private static var hasMore: Bool { emojis.count > visibleCount }
 
-    private func emojiButton(_ e: String, index: Int, size: CGFloat = 38) -> some View {
+    private func emojiButton(_ e: String, index: Int, size: CGFloat = 38, animate: Bool = true) -> some View {
         Button {
             model.react(message, emoji: e)
             dismiss()
         } label: {
-            ReactionBarEmoji(emoji: e, index: index)
-                .frame(width: size, height: size + 2)
-                .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+            Group {
+                if animate {
+                    ReactionBarEmoji(emoji: e, index: index)          // первый ряд — живая анимация
+                } else {
+                    StillEmoji(emoji: e, size: size - 10)             // раскрытая панель — стоят статичными кадрами
+                }
+            }
+            .frame(width: size, height: size + 2)
+            .background(current == e ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
         }
         .buttonStyle(.plain)
     }
@@ -326,10 +332,12 @@ struct MessageActionOverlay: View {
     /// Все реакции сеткой; если их много — листается
     private func expandedPanel(width: CGFloat, height: CGFloat) -> some View {
         let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let cols = Self.panelColumns(width)
         return ScrollView {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: Self.panelColumns(width)), spacing: 6) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: cols), spacing: 6) {
                 ForEach(Array(Self.emojis.enumerated()), id: \.element) { index, e in
-                    emojiButton(e, index: index, size: 44)
+                    // живёт только верхний ряд; остальные, что открылись при раскрытии, стоят статично
+                    emojiButton(e, index: index, size: 44, animate: index < cols)
                 }
             }
             .padding(10)
