@@ -63,6 +63,7 @@ struct ChatsListView: View {
     @State private var deleting: ChatSummary?
     @State private var peek: ChatSummary?
     @State private var swipedOpen: String?
+    @State private var showArchive = false
     @State private var userHits: [ChatPeer] = []
     @State private var groupHits: [GroupPreview] = []
     @State private var messageHits: [MessageHit] = []
@@ -72,9 +73,16 @@ struct ChatsListView: View {
 
     private var searchingNow: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
+    /// Архивированные переписки (новые сверху); сам «Избранное» в архив не прячем
+    private var archivedChats: [ChatSummary] {
+        model.chats.filter { prefs.isArchived($0.id) && $0.id != session.serverID }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
     private var filtered: [ChatSummary] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let base = model.chats.filter { folder.contains($0) }
+        // архивированные не показываем в основном списке — они на отдельной полке
+        let base = model.chats.filter { folder.contains($0) && !prefs.isArchived($0.id) }
         let found = q.isEmpty ? base : base.filter {
             $0.peer.name.lowercased().contains(q) || ($0.peer.username ?? "").lowercased().contains(q)
                 || $0.lastText.lowercased().contains(q)
@@ -113,6 +121,18 @@ struct ChatsListView: View {
             .presentationBackground(theme.sheet)
             .presentationDetents([.height(250)])
         }
+        .sheet(isPresented: $showArchive) {
+            ArchivedChatsView(chats: archivedChats, prefs: prefs,
+                              onOpen: { chat in showArchive = false
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { open(chat) } },
+                              onDelete: { chat in showArchive = false
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { deleting = chat } })
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+                .presentationBackground(theme.sheet)
+        }
+        .onChange(of: archivedChats.isEmpty) { _, empty in if empty { showArchive = false } }
         .sheet(isPresented: $showImport) {
             ContactsImportSheet { peer in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openChat = ChatRoute(peer: peer) }
@@ -239,6 +259,7 @@ struct ChatsListView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        if query.trimmingCharacters(in: .whitespaces).isEmpty && !archivedChats.isEmpty { archiveRow }
                         if folder == .all && query.trimmingCharacters(in: .whitespaces).isEmpty { savedRow }
                         if searchingNow && !filtered.filter({ $0.id != session.serverID }).isEmpty {
                             sectionTitle(s.t("ЧАТЫ И КОНТАКТЫ", "CHATS AND CONTACTS"))
@@ -406,8 +427,39 @@ struct ChatsListView: View {
         .buttonStyle(.plain)
     }
 
+    private var archiveRow: some View {
+        let chats = archivedChats
+        let unread = chats.reduce(0) { $0 + (($1.muted || prefs.isDMMuted($1.id)) ? 0 : $1.unread) }
+        let preview = chats.prefix(3).map(\.peer.name).joined(separator: ", ")
+        return Button { Haptics.impact(.light); showArchive = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "archivebox.fill").font(.system(size: 20)).foregroundStyle(.white)
+                    .frame(width: 54, height: 54).background(Color.gray, in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(s.t("Архив", "Archived")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                    Text(preview.isEmpty ? s.t("Скрытые чаты", "Hidden chats") : preview)
+                        .font(.system(size: 15)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer()
+                if unread > 0 {
+                    Text(unread > 99 ? "99+" : "\(unread)")
+                        .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
+                        .background(theme.textTertiary, in: Capsule())
+                }
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textTertiary)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 9).contentShape(Rectangle())
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke.opacity(0.7)).frame(height: 0.5).padding(.leading, 82) }
+        }
+        .buttonStyle(.plain)
+    }
+
     private func row(_ chat: ChatSummary) -> some View {
         SwipeActionsRow(id: chat.id, openID: $swipedOpen, actions: [
+            .init(icon: "archivebox.fill", tint: .gray) {
+                withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
+            },
             .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill", tint: .orange) {
                 prefs.toggle(chat.id)
             },
@@ -533,6 +585,91 @@ struct ChatsListView: View {
                 Rectangle().fill(theme.stroke.opacity(0.7)).frame(height: 0.5).padding(.leading, 82)
             }
         }
+    }
+}
+
+// MARK: - Архив чатов
+
+/// Отдельная полка со скрытыми чатами. Свайп влево — вернуть из архива или удалить, нажатие — открыть.
+struct ArchivedChatsView: View {
+    let chats: [ChatSummary]
+    @ObservedObject var prefs: ChatListPrefs
+    let onOpen: (ChatSummary) -> Void
+    let onDelete: (ChatSummary) -> Void
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var swipedOpen: String?
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(s.t("Архив", "Archived")).font(.system(size: 22, weight: .bold)).foregroundStyle(theme.text)
+                Spacer()
+                Button(s.close) { dismiss() }.foregroundStyle(theme.accentColor)
+            }
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 10)
+
+            if chats.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "archivebox").font(.system(size: 34, weight: .light)).foregroundStyle(theme.textSecondary)
+                    Text(s.t("Архив пуст", "Archive is empty")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(chats) { chat in
+                            SwipeActionsRow(id: chat.id, openID: $swipedOpen, actions: [
+                                .init(icon: "tray.and.arrow.up.fill", tint: .green) {
+                                    withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
+                                },
+                                .init(icon: "trash.fill", tint: .red) { onDelete(chat) },
+                            ]) {
+                                archiveRowBody(chat)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 24)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func archiveRowBody(_ chat: ChatSummary) -> some View {
+        Button { Haptics.impact(.light); onOpen(chat) } label: {
+            HStack(spacing: 12) {
+                AvatarView(name: chat.peer.name, size: 54, avatarID: chat.peer.avatarID).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        if chat.peer.isChannel {
+                            Image(systemName: "megaphone.fill").font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+                        }
+                        Text(chat.peer.name).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                        Spacer(minLength: 6)
+                        Text(ChatTime.short(chat.updatedAt, lang: lang)).font(.system(size: 13)).foregroundStyle(theme.textTertiary)
+                    }
+                    HStack {
+                        Text(chat.lastText.isEmpty ? s.t("Нет сообщений", "No messages") : chat.lastText)
+                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary).lineLimit(2).multilineTextAlignment(.leading)
+                        Spacer(minLength: 6)
+                        if chat.unread > 0 {
+                            Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
+                                .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
+                                .background((chat.muted || prefs.isDMMuted(chat.id)) ? AnyShapeStyle(theme.textTertiary) : AnyShapeStyle(theme.accent), in: Capsule())
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 9).contentShape(Rectangle())
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke.opacity(0.7)).frame(height: 0.5).padding(.leading, 82) }
+        }
+        .buttonStyle(.plain)
     }
 }
 
