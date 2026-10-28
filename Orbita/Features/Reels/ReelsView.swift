@@ -205,6 +205,7 @@ struct ReelsView: View {
     @State private var shareFor: Post?
     @State private var showComposer = false
     @State private var showSearch = false          // поиск по шортсам: текущее видео стоит
+    @State private var searchQuery = ""            // предзаполненный запрос (нажали на #хэштег)
     @State private var musicFor: PostMusic?
     @State private var soundTrackID = ""
 
@@ -440,6 +441,7 @@ struct ReelsView: View {
                                              onMusic: { if fixed != nil { onClose?() } else if let m = reel.post.music { musicFor = m } },
                                              onAuthor: { onOpenAuthor(reel.post.author) },
                                              onOpenUser: { onOpenAuthor($0) },
+                                             onOpenTag: { tag in searchQuery = "#" + tag; showSearch = true },
                                              onHold: { holdFast = $0 },
                                              onFollow: { follow(reel) },
                                              onUnfollow: { unfollow(reel) },
@@ -583,7 +585,7 @@ struct ReelsView: View {
                 .onAppear { soundTrackID = music.mediaID }
         }
         .fullScreenCover(isPresented: $showSearch) {
-            ReelSearchView(onClose: { showSearch = false })
+            ReelSearchView(onClose: { showSearch = false }, initialQuery: searchQuery)
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
@@ -666,7 +668,7 @@ struct ReelsView: View {
                 .offset(x: -26)                      // чуть левее, чтобы не липло к поиску
                 HStack(spacing: 6) {
                     Spacer(minLength: 0)
-                    Button { Haptics.impact(.light); showSearch = true } label: {
+                    Button { Haptics.impact(.light); searchQuery = ""; showSearch = true } label: {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 19, weight: .medium)).foregroundStyle(.white)
                             .frame(width: 30, height: 30)
@@ -777,6 +779,7 @@ struct ReelPage: View {
     var onMusic: () -> Void = {}
     var onAuthor: () -> Void
     var onOpenUser: (Author) -> Void = { _ in }
+    var onOpenTag: (String) -> Void = { _ in }       // нажали на #хэштег в подписи
     var onHold: (Bool) -> Void = { _ in }
     var onFollow: () -> Void
     var onUnfollow: () -> Void = {}
@@ -785,6 +788,7 @@ struct ReelPage: View {
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.lang) private var lang
+    @Environment(\.openURL) private var systemOpenURL
     @ObservedObject private var bookmarks = BookmarkStore.shared
 
     @State private var player: AVPlayer?
@@ -1224,6 +1228,13 @@ struct ReelPage: View {
         captionAttributed
     }
 
+    /// Ссылка-жест для #хэштега: слово без решётки и хвостовой пунктуации, схема orbita-tag:
+    static func tagLink(_ word: String) -> URL? {
+        let tag = String(word.dropFirst().prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+        guard tag.count >= 1, let enc = tag.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return URL(string: "orbita-tag:" + enc)
+    }
+
     private var captionAttributed: Text {
         let full = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let cut = !expanded && full.count > collapsedLimit
@@ -1231,7 +1242,10 @@ struct ReelPage: View {
         var result = AttributedString()
         for (i, word) in shown.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
             var piece = AttributedString((i == 0 ? "" : " ") + String(word))
-            if word.hasPrefix("#") || word.hasPrefix("@") {
+            if word.hasPrefix("#"), let tag = Self.tagLink(String(word)) {
+                piece.font = .system(size: 16, weight: .bold)
+                piece.link = tag
+            } else if word.hasPrefix("@") {
                 piece.font = .system(size: 16, weight: .bold)
             } else if let url = Linkify.url(in: String(word)) {
                 piece.link = url
@@ -1362,6 +1376,15 @@ struct ReelPage: View {
                     .lineLimit(expanded ? 14 : 2)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .environment(\.openURL, OpenURLAction { url in
+                        if url.scheme == "orbita-tag" {
+                            let enc = String(url.absoluteString.dropFirst("orbita-tag:".count))
+                            onOpenTag(enc.removingPercentEncoding ?? enc)
+                            return .handled
+                        }
+                        systemOpenURL(url)
+                        return .handled
+                    })
                     .contentShape(Rectangle())
                     .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() } }
             }

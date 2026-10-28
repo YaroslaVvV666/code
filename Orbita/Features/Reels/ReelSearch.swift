@@ -41,6 +41,7 @@ extension ExtrasAPI {
 
 struct ReelSearchView: View {
     let onClose: () -> Void
+    var initialQuery: String = ""         // открыли по нажатию на #хэштег — сразу ищем
 
     @EnvironmentObject private var session: AppSession
     @EnvironmentObject private var flow: AuthFlow
@@ -73,6 +74,8 @@ struct ReelSearchView: View {
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .task {
+            let tag = initialQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            if tag.count >= 2 { search(tag) }
             popular = await session.extras.reelPopular()
             try? await Task.sleep(nanoseconds: 250_000_000)
             if phase == .idle { focused = true }
