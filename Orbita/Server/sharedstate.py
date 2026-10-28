@@ -87,6 +87,21 @@ class MemoryShared:
         self.vers = {}             # ключ -> int — счётчик версий для инвалидации кэша
         self.pending = {}          # uid -> set(тем) — накопленные события для long-poll
         self.hub = _WaiterHub()
+        self.rates = {}            # ключ -> [счётчик, время_сброса] — ограничение частоты
+
+    # --- ограничение частоты (окно фиксированной длины) ---
+
+    def rate_ok(self, key, limit, window):
+        now = time.time()
+        with self._lock:
+            rec = self.rates.get(key)
+            if not rec or now >= rec[1]:
+                self.rates[key] = [1, now + window]
+                return True, 0
+            rec[0] += 1
+            if rec[0] > limit:
+                return False, int(rec[1] - now) + 1
+            return True, 0
 
     # --- шина событий (long-poll вместо постоянного опроса) ---
 
@@ -341,6 +356,18 @@ class RedisShared:
         v = self.r.incr("ver:" + key)
         self.r.expire("ver:" + key, 86400)
         return int(v)
+
+    # --- ограничение частоты (окно фиксированной длины, общее для всех воркеров) ---
+
+    def rate_ok(self, key, limit, window):
+        k = "rl:" + key
+        n = self.r.incr(k)
+        if n == 1:
+            self.r.expire(k, int(window))
+        if n > limit:
+            ttl = self.r.ttl(k)
+            return False, ttl if ttl and ttl > 0 else int(window)
+        return True, 0
 
     # ключи
     @staticmethod

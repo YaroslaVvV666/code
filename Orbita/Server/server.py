@@ -463,6 +463,20 @@ def run(sql, args=()):
         return DB.execute(sql, args)
 
 
+RATELIMIT = os.environ.get("ORBITA_RATELIMIT", "1") != "0"
+
+
+def rate_limit(key, limit, window):
+    """Не больше `limit` действий за `window` секунд по ключу (например per-user или per-IP).
+    Защита от злоупотреблений и случайного «залипания»: грубый per-IP лимит ставится в nginx, а тут —
+    осмысленные лимиты по пользователю и по действию (nginx не знает, кто это). Общие для всех воркеров (Redis)."""
+    if not RATELIMIT:
+        return
+    ok, retry = SHARED.rate_ok(key, limit, window)
+    if not ok:
+        raise ApiError(429, "too_many_requests", retry_after=retry)
+
+
 # ---------- шифрование полей ----------
 
 def enc(uid, scope, column, rid, text):
@@ -1175,6 +1189,7 @@ def ping(req, me):
 
 @route("POST", r"/v1/session", auth=False)
 def create_session(req, me):
+    rate_limit("session:" + req.client_ip(), 30, 3600)     # не больше 30 новых аккаунтов в час с одного IP
     data = req.body_json()
     try:
         uid = str(uuid.UUID(str(data.get("user_id", "")))).lower()
@@ -1802,6 +1817,7 @@ def qr_approve(req, me, qid):
 
 @route("POST", r"/v1/media")
 def upload_media(req, me):
+    rate_limit("upload:" + me["id"], 120, 60)              # до 120 загрузок файлов в минуту на пользователя
     params = req.query()
     kind = params.get("kind", "")
     mime = (req.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -4417,6 +4433,7 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
 @route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/messages")
 def send_message(req, me, peer):
     uid = me["id"]
+    rate_limit("msg:" + uid, 300, 60)                      # защита от спама: до 300 сообщений в минуту
     d = req.body_json()
     send_at = d.get("send_at")
     if is_group(peer):
@@ -4938,6 +4955,7 @@ def reap_calls():
 @route("POST", r"/v1/calls")
 def start_call(req, me):
     uid = me["id"]
+    rate_limit("call:" + uid, 30, 60)                      # до 30 исходящих звонков в минуту
     d = req.body_json()
     to = str(d.get("to", ""))
     target = q1("SELECT * FROM users WHERE id = ?", (to,))
@@ -5648,6 +5666,7 @@ def notify_group(g, sender, text, mentioned=frozenset()):
 
 def group_send(req, me, gid):
     uid = me["id"]
+    rate_limit("msg:" + uid, 300, 60)                      # тот же лимит сообщений, что и в личных
     g = group_row(gid)
     mem = member_row(gid, uid) if g else None
     if not mem:
@@ -5839,6 +5858,7 @@ def apply_settings(d, current=None):
 @route("POST", r"/v1/groups")
 def create_group(req, me):
     uid = me["id"]
+    rate_limit("group:" + uid, 30, 3600)                   # до 30 новых групп/каналов в час
     d = req.body_json()
     title = clean_line(d.get("title"), 64)
     if not title:
