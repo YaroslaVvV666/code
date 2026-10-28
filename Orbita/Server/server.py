@@ -119,6 +119,11 @@ SHARED = sharedstate.make_shared()
 STORE = blobstore.make_blobstore(MEDIA_DIR)
 # Кэш проверки токена: каждый запрос иначе делает JOIN sessions+users. Короткий TTL + сброс при выходе/смене профиля.
 AUTH_CACHE_TTL = float(os.environ.get("ORBITA_AUTH_CACHE_TTL", "15") or "0")
+# Комплаенс: токен администратора для выгрузки данных по законному запросу. Пусто — ручки выгрузки выключены (404).
+ADMIN_TOKEN = os.environ.get("ORBITA_ADMIN_TOKEN", "").strip()
+# Срок хранения (дни) для справки/выгрузки. 0 — не ограничиваем (хранить, пока есть). Реальную «ретенцию после
+# удаления пользователем» включать отдельной политикой — по умолчанию удаление остаётся настоящим удалением.
+RETENTION_DAYS = int(os.environ.get("ORBITA_RETENTION_DAYS", "0") or "0")
 
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
 SCHEMA = """
@@ -347,6 +352,10 @@ ensure_column("groups", "perms", "perms TEXT")
 DB.execute("CREATE TABLE IF NOT EXISTS group_writers(group_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(group_id, user_id))")
 DB.execute("CREATE TABLE IF NOT EXISTS group_restricted(group_id TEXT NOT NULL, user_id TEXT NOT NULL, until REAL NOT NULL, "
            "by_user TEXT, created_at REAL NOT NULL, PRIMARY KEY(group_id, user_id))")
+# Журнал доступа администратора/комплаенса к данным (подотчётность: кто, когда, к чьим данным обращался)
+DB.execute("CREATE TABLE IF NOT EXISTS admin_access_log(id TEXT PRIMARY KEY, label TEXT NOT NULL, action TEXT NOT NULL, "
+           "target TEXT, ip TEXT, at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_admin_access ON admin_access_log(at)")
 # Статистика каналов и групп: вступили / вышли, просмотры постов (откуда пришли, язык), пересылки
 DB.execute("CREATE TABLE IF NOT EXISTS group_events(group_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_gevents ON group_events(group_id, at)")
@@ -475,6 +484,22 @@ def rate_limit(key, limit, window):
     ok, retry = SHARED.rate_ok(key, limit, window)
     if not ok:
         raise ApiError(429, "too_many_requests", retry_after=retry)
+
+
+def require_admin(req):
+    """Доступ к комплаенс-ручкам только по токену администратора (отдельному от пользовательского).
+    Пока токен не задан в окружении — ручки недоступны (404), чтобы случайно не оставить их открытыми.
+    Каждый вызов записывается в журнал доступа (кто/когда/к чему)."""
+    if not ADMIN_TOKEN:
+        raise ApiError(404, "not_found")
+    sent = req.headers.get("X-Admin-Token", "")
+    if not (sent and hmac.compare_digest(sent, ADMIN_TOKEN)):
+        raise ApiError(403, "forbidden")
+
+
+def admin_audit(req, action, target=None):
+    run("INSERT INTO admin_access_log(id, label, action, target, ip, at) VALUES (?,?,?,?,?,?)",
+        (uuid.uuid4().hex, req.headers.get("X-Admin-Label", "admin")[:64], action, target, req.client_ip(), time.time()))
 
 
 # ---------- шифрование полей ----------
@@ -1185,6 +1210,104 @@ class Handler(BaseHTTPRequestHandler):
 @route("GET", r"/v1/ping", auth=False)
 def ping(req, me):
     req.send_json(200, {"ok": True, "name": "Orbita Server", "version": 5, "push": push.configured(), "otp": {"sms": otp.configured("sms"), "email": otp.configured("email"), "dev": OTP_DEV}, "encrypted": True})
+
+
+# ---------- комплаенс: выгрузка данных по законному запросу (только по токену администратора) ----------
+# Легальная «передача данных»: оператор отвечает на письменный запрос органа, выгружая то, что реально есть в базе,
+# в структурированном виде, и каждый такой доступ протоколируется. Скрытого/автоматического канала тут нет.
+
+def _dec_try(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _time_range(req):
+    def num(name):
+        v = req.query().get(name)
+        try:
+            return float(v) if v not in (None, "") else None
+        except ValueError:
+            return None
+    return num("from"), num("to")
+
+
+@route("GET", r"/v1/admin/export/([A-Za-z0-9\-]+)", auth=False)
+def admin_export_user(req, me, target):
+    require_admin(req)
+    uid = target.lower()
+    u = q1("SELECT * FROM users WHERE id = ?", (uid,))
+    if not u:
+        admin_audit(req, "export_user_notfound", uid)
+        raise ApiError(404, "not_found")
+    frm, to = _time_range(req)
+
+    def in_range(t):
+        return (frm is None or t >= frm) and (to is None or t <= to)
+
+    first, last, full = names(u)
+    profile = {
+        "id": u["id"], "name": full,
+        "username": _dec_try(lambda: dec_profile(u, "username_enc", COL["username"])),
+        "phone": _dec_try(lambda: dec_profile(u, "phone_enc", COL["phone"])),
+        "bio": _dec_try(lambda: dec_profile(u, "bio_enc", COL["bio"])),
+        "created_at": u["created_at"],
+    }
+    # личная переписка (и отправленные, и полученные), расшифрованная
+    msgs = []
+    for m in q("SELECT * FROM messages WHERE sender = ? OR recipient = ? ORDER BY created_at", (uid, uid)):
+        if not in_range(m["created_at"]):
+            continue
+        msgs.append({
+            "id": m["id"], "from": m["sender"], "to": m["recipient"],
+            "text": _dec_try(lambda m=m: dec(m["sender"], "messages", COL["msg_text"], m["id"], m["text_enc"])) or "",
+            "created_at": m["created_at"], "read_at": m["read_at"],
+            "attachments": _dec_try(lambda m=m: attachments_of(m)) or [],
+        })
+    # звонки — только метаданные (содержание сквозных звонков на сервере отсутствует физически)
+    calls = [{"id": c["id"], "from": c["caller"], "to": c["callee"], "video": bool(c["video"]),
+              "status": c["status"], "created_at": c["created_at"], "duration": c["duration"]}
+             for c in q("SELECT * FROM call_log WHERE caller = ? OR callee = ? ORDER BY created_at", (uid, uid))
+             if in_range(c["created_at"])]
+    groups = [{"group_id": g["group_id"], "role": g["role"], "joined_at": g["joined_at"]}
+              for g in q("SELECT * FROM group_members WHERE user_id = ?", (uid,))]
+    media = [{"id": x["id"], "kind": x["kind"], "mime": x["mime"], "size": x["size"], "created_at": x["created_at"]}
+             for x in q("SELECT * FROM media WHERE owner = ?", (uid,)) if in_range(x["created_at"])]
+
+    admin_audit(req, "export_user", uid)
+    req.send_json(200, {
+        "generated_at": time.time(), "subject": uid, "range": {"from": frm, "to": to},
+        "profile": profile, "messages": msgs, "calls_metadata": calls,
+        "groups": groups, "media_metadata": media,
+        "note": "Содержание звонков недоступно: звонки сквозные (ключи только на устройствах). "
+                "Файлы медиа выгружаются отдельно по id через /v1/admin/media/<id>.",
+    })
+
+
+@route("GET", r"/v1/admin/media/([A-Za-z0-9]+)", auth=False)
+def admin_media(req, me, mid):
+    require_admin(req)
+    row = q1("SELECT * FROM media WHERE id = ?", (mid,))
+    if not row or not STORE.exists(mid):
+        raise ApiError(404, "not_found")
+    admin_audit(req, "export_media", mid)
+    size = row["size"]
+    req.send_response(200)
+    req.send_header("Content-Type", row["mime"] if row["kind"] != "file" else "application/octet-stream")
+    req.send_header("Content-Length", str(size))
+    req.end_headers()
+    with STORE.reader(mid, size) as f:
+        for piece in decrypt_range(media_key(row["owner"], mid), mid, f, size, 0, size - 1):
+            req.wfile.write(piece)
+
+
+@route("GET", r"/v1/admin/access-log", auth=False)
+def admin_access_log(req, me):
+    require_admin(req)
+    rows = q("SELECT * FROM admin_access_log ORDER BY at DESC LIMIT 500")
+    req.send_json(200, {"log": [{"label": r["label"], "action": r["action"], "target": r["target"],
+                                 "ip": r["ip"], "at": r["at"]} for r in rows]})
 
 
 @route("POST", r"/v1/session", auth=False)
