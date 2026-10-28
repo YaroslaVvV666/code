@@ -110,10 +110,13 @@ if POSTGRES:
     INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
 
 import pickle
+import blobstore
 import sharedstate
 # Эфемерное состояние реального времени (звонки, набор, QR): в памяти (по умолчанию) или в Redis (REDIS_URL).
 # Для нескольких воркеров нужен Redis, иначе это состояние у каждого воркера своё.
 SHARED = sharedstate.make_shared()
+# Медиа-файлы (уже зашифрованные): на диске (по умолчанию) или в объектном хранилище S3 (ORBITA_S3_BUCKET).
+STORE = blobstore.make_blobstore(MEDIA_DIR)
 # Кэш проверки токена: каждый запрос иначе делает JOIN sessions+users. Короткий TTL + сброс при выходе/смене профиля.
 AUTH_CACHE_TTL = float(os.environ.get("ORBITA_AUTH_CACHE_TTL", "15") or "0")
 
@@ -1291,7 +1294,7 @@ def update_me(req, me):
 def delete_me(req, me):
     for m in q("SELECT id FROM media WHERE owner = ?", (me["id"],)):
         try:
-            os.remove(os.path.join(MEDIA_DIR, m["id"]))
+            STORE.remove(m["id"])
         except OSError:
             pass
     run("DELETE FROM media WHERE owner = ?", (me["id"],))
@@ -1517,7 +1520,7 @@ def delete_avatar(req, me, aid):
     run("DELETE FROM avatars WHERE id = ?", (aid,))
     run("DELETE FROM media WHERE id = ? AND owner = ?", (a["media_id"], uid))
     try:
-        os.remove(os.path.join(MEDIA_DIR, a["media_id"]))
+        STORE.remove(a["media_id"])
     except OSError:
         pass
     sync_avatar(uid)
@@ -1822,7 +1825,7 @@ def upload_media(req, me):
 
     mid = uuid.uuid4().hex
     os.makedirs(MEDIA_DIR, exist_ok=True)
-    path = os.path.join(MEDIA_DIR, mid)
+    path = STORE.stage(mid)            # куда писать зашифрованные байты (диск — сразу на место, S3 — во временный файл)
     # проверка нейросетью: пока файл шифруется, копия открытых байт кладётся во временный файл
     scan = moderation.enabled() and kind in ("image", "video")
     scan_path, scan_file, digest = path + ".scan", None, hashlib.sha256()
@@ -1840,7 +1843,7 @@ def upload_media(req, me):
             with open(path, "wb") as f:
                 encrypt_stream(media_key(me["id"], mid), mid, read, length, f.write)
         except EOFError:
-            os.remove(path)
+            STORE.discard(mid)
             req.close_connection = True
             raise ApiError(400, "incomplete")
         verdict, detail = "ok", {}
@@ -1858,7 +1861,7 @@ def upload_media(req, me):
                 if verdict == "block":
                     run("INSERT OR IGNORE INTO media_blocked(hash, created_at) VALUES (?,?)", (h, time.time()))
             if verdict in ("block", "error"):
-                os.remove(path)
+                STORE.discard(mid)
                 if verdict == "block":
                     raise ApiError(422, "content_blocked")
                 raise ApiError(503, "moderation_unavailable")
@@ -1867,6 +1870,7 @@ def upload_media(req, me):
             scan_file.close()
         if scan and os.path.exists(scan_path):
             os.remove(scan_path)
+    STORE.commit(mid)                  # все проверки пройдены — фиксируем файл (на S3 — заливаем в бакет)
 
     def to_int(v):
         try:
@@ -1891,8 +1895,7 @@ def upload_media(req, me):
 @route("GET", r"/media/([A-Za-z0-9]+)", auth=False)
 def get_media(req, me, mid):
     row = q1("SELECT * FROM media WHERE id = ?", (mid,))
-    path = os.path.join(MEDIA_DIR, mid)
-    if not row or not os.path.isfile(path):
+    if not row or not STORE.exists(mid):
         raise ApiError(404, "not_found")
     size = row["size"]                     # длина открытого файла
     start, end, status = 0, size - 1, 200
@@ -1927,7 +1930,7 @@ def get_media(req, me, mid):
     if status == 206:
         req.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
     req.end_headers()
-    with open(path, "rb") as f:
+    with STORE.reader(mid, size) as f:
         for piece in decrypt_range(media_key(row["owner"], mid), mid, f, size, start, end):
             req.wfile.write(piece)
 
@@ -2112,13 +2115,12 @@ def get_media_cover(req, me, mid):
         found = _COVER_CACHE[mid]
     else:
         row = q1("SELECT * FROM media WHERE id = ?", (mid,))
-        path = os.path.join(MEDIA_DIR, mid)
-        if not row or row["kind"] not in ("audio", "file") or not os.path.isfile(path):
+        if not row or row["kind"] not in ("audio", "file") or not STORE.exists(mid):
             raise ApiError(404, "not_found")
         size = row["size"]
         found = None
         try:
-            with open(path, "rb") as f:
+            with STORE.reader(mid, size) as f:
                 head = b"".join(decrypt_range(media_key(row["owner"], mid), mid, f, size, 0, min(size, 10) - 1))
                 if head[:3] == b"ID3" and len(head) >= 10:
                     n = min(size, 10 + _synchsafe(head[6:10]), 8 * 1024 * 1024)
@@ -2827,7 +2829,7 @@ def drop_orphan_media(owner, ids):
             continue
         run("DELETE FROM media WHERE id = ? AND owner = ?", (mid, owner))
         try:
-            os.remove(os.path.join(MEDIA_DIR, mid))
+            STORE.remove(mid)
         except OSError:
             pass
 
@@ -3807,7 +3809,7 @@ def drop_message_media(m):
             if media_id:
                 run("DELETE FROM media WHERE id = ? AND owner = ?", (media_id, m["sender"]))
                 try:
-                    os.remove(os.path.join(MEDIA_DIR, media_id))
+                    STORE.remove(media_id)
                 except OSError:
                     pass
 
@@ -3886,11 +3888,11 @@ def fwd_of(m):
 def clone_media(media_id, new_owner):
     """Копия файла вложения для пересылающего: оригинал можно удалить, пересланное останется"""
     src = q1("SELECT * FROM media WHERE id = ?", (media_id,))
-    if not src or not os.path.isfile(os.path.join(MEDIA_DIR, media_id)):
+    if not src or not STORE.exists(media_id):
         return None
     nid = uuid.uuid4().hex
     size = src["size"]
-    with open(os.path.join(MEDIA_DIR, media_id), "rb") as f, open(os.path.join(MEDIA_DIR, nid), "wb") as out:
+    with STORE.reader(media_id, size) as f, open(STORE.stage(nid), "wb") as out:
         gen = decrypt_range(media_key(src["owner"], media_id), media_id, f, size, 0, size - 1)
         buf = bytearray()
 
@@ -3905,6 +3907,7 @@ def clone_media(media_id, new_owner):
             return piece
 
         encrypt_stream(media_key(new_owner, nid), nid, read, size, out.write)
+    STORE.commit(nid)
     thumb = clone_media(src["thumb"], new_owner) if src["thumb"] else None
     run("INSERT INTO media(id, owner, kind, mime, width, height, duration, thumb, size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (nid, new_owner, src["kind"], src["mime"], src["width"], src["height"], src["duration"], thumb, size, time.time()))
@@ -4489,7 +4492,7 @@ def cancel_scheduled(req, me, sid):
             if media_id:
                 run("DELETE FROM media WHERE id = ? AND owner = ?", (media_id, me["id"]))
                 try:
-                    os.remove(os.path.join(MEDIA_DIR, media_id))
+                    STORE.remove(media_id)
                 except OSError:
                     pass
     req.send_json(200, {"ok": True})
@@ -4531,7 +4534,7 @@ def drop_story(st):
     run("DELETE FROM stories WHERE id = ?", (st["id"],))
     run("DELETE FROM media WHERE id = ? AND owner = ?", (st["media_id"], st["author"]))
     try:
-        os.remove(os.path.join(MEDIA_DIR, st["media_id"]))
+        STORE.remove(st["media_id"])
     except OSError:
         pass
 
@@ -6324,7 +6327,7 @@ def copy_media(src, new_owner, kind, mime):
     """Копия файла для другого владельца (файлы шифруются ключом владельца, поэтому перешифровываем)"""
     nid = uuid.uuid4().hex
     size = src["size"]
-    with open(os.path.join(MEDIA_DIR, src["id"]), "rb") as f, open(os.path.join(MEDIA_DIR, nid), "wb") as out:
+    with STORE.reader(src["id"], size) as f, open(STORE.stage(nid), "wb") as out:
         gen = decrypt_range(media_key(src["owner"], src["id"]), src["id"], f, size, 0, size - 1)
         buf = bytearray()
 
@@ -6339,6 +6342,7 @@ def copy_media(src, new_owner, kind, mime):
             return piece
 
         encrypt_stream(media_key(new_owner, nid), nid, read, size, out.write)
+    STORE.commit(nid)
     run("INSERT INTO media(id, owner, kind, mime, width, height, duration, thumb, size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (nid, new_owner, kind, mime, 0, 0, src["duration"] or 0, None, size, time.time()))
     return nid
@@ -6359,7 +6363,7 @@ def add_track_from_chat(req, me):
     if not att:
         raise ApiError(404, "not_found")
     src = q1("SELECT * FROM media WHERE id = ?", (att["media_id"],))
-    if not src or not os.path.isfile(os.path.join(MEDIA_DIR, src["id"])):
+    if not src or not STORE.exists(src["id"]):
         raise ApiError(404, "not_found")
     ext = (att.get("name") or "").rsplit(".", 1)[-1].lower()
     mime = src["mime"] if src["mime"] in ALLOWED_MIME and src["mime"].startswith("audio/") else AUDIO_EXT_MIME.get(ext)
@@ -6389,7 +6393,7 @@ def add_track_from_sound(req, me):
             and not q1("SELECT 1 FROM tracks WHERE media_id = ? LIMIT 1", (media_id,)):
         raise ApiError(404, "not_found")
     src = q1("SELECT * FROM media WHERE id = ?", (media_id,))
-    if not src or not os.path.isfile(os.path.join(MEDIA_DIR, src["id"])):
+    if not src or not STORE.exists(src["id"]):
         raise ApiError(404, "not_found")
     mime = src["mime"] if src["mime"] in ALLOWED_MIME and src["mime"].startswith("audio/") else None
     if not mime:
