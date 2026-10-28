@@ -276,6 +276,10 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     var elapsed: TimeInterval { startedAt.map { Date().timeIntervalSince($0) } ?? 0 }
 
     private let output = AVCaptureMovieFileOutput()
+    /// Ловит жесты рукой во время записи — по ним вылетают эмодзи-эффекты
+    let gestures = HandGestureDetector()
+    private let dataOutput = AVCaptureVideoDataOutput()
+    private let gestureQueue = DispatchQueue(label: "orbita.hands")
     private let queue = DispatchQueue(label: "orbita.circle.session")
     private var requestedAt: Date?
     private var observers: [NSObjectProtocol] = []
@@ -312,6 +316,10 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                     }
                     if session.canAddOutput(output) { session.addOutput(output) }
                     output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
+                    // параллельный выход кадров для распознавания жестов (Vision)
+                    self.dataOutput.alwaysDiscardsLateVideoFrames = true
+                    self.dataOutput.setSampleBufferDelegate(self.gestures, queue: self.gestureQueue)
+                    if session.canAddOutput(self.dataOutput) { session.addOutput(self.dataOutput) }
                     session.commitConfiguration()
                 }
                 // микрофон мог быть снят после неудачной записи — возвращаем
@@ -449,6 +457,7 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
         output.startRecording(to: file, recordingDelegate: self)
         isRecording = true
+        gestures.active = true          // эффекты по жестам ловим только во время записи
     }
 
     /// Останавливает запись и возвращает файл (nil — не получилось)
@@ -472,6 +481,7 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         queue.async { if session.isRunning { session.stopRunning() } }
         ready = false
         isRecording = false
+        gestures.active = false
         startRequested = false
         stopWhenStarted = false
         isFront = true
@@ -506,6 +516,7 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
             }
             self.lastErrorCode = usable ? nil : code
             self.isRecording = false
+            self.gestures.active = false
             self.startRequested = false
             self.stopWhenStarted = false
             if let finishing = self.finishing {

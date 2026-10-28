@@ -13,6 +13,8 @@ struct PrivacyScreen: View {
     @State private var errorText: String?
     /// «Учитывать мои действия»: nil — ещё не узнали у сервера (по умолчанию включено)
     @State private var learnFromActivity: Bool?
+    /// Эффекты по жестам в кружочках (локальная настройка устройства)
+    @State private var gestureFX = GestureEffects.enabled
 
     private var s: Strings { Strings(lang: lang) }
     private var privacy: PrivacySettings { store.profile?.privacy ?? PrivacySettings() }
@@ -151,6 +153,35 @@ struct PrivacyScreen: View {
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 30)
+            }
+
+            // Эффекты по жестам в кружочках
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "hand.wave.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.teal, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Эффекты по жестам", "Gesture effects")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { gestureFX },
+                            set: { on in gestureFX = on; GestureEffects.enabled = on }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Во время записи видеосообщения (кружочка) жесты рукой запускают эффекты: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Распознавание идёт на устройстве, камера никуда не передаётся.",
+                         "While recording a video message, hand gestures trigger effects: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Recognition runs on-device; the camera is not sent anywhere."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Кто видит

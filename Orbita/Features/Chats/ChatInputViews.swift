@@ -678,6 +678,10 @@ struct ChatInputBar: View {
                     }
                     .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
                     .allowsHitTesting(false)
+                // эффекты по жестам рукой: вылетают поверх кружка (👌→✅, 🫰→💸, ✌️→😎, 🔫→🔫, ❤️→❤️)
+                GestureBurstOverlay(detector: circle.gestures)
+                    .frame(width: side, height: side)
+                    .allowsHitTesting(false)
                 if locked {
                     Button { Haptics.impact(.light); circle.flipCamera() } label: {
                         Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
