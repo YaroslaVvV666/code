@@ -65,6 +65,8 @@ struct MessageActionOverlay: View {
     var onTranslate: (() -> Void)? = nil
     /// Своя заметка к сообщению — видна только тебе
     var onNote: (() -> Void)? = nil
+    /// Пожаловаться на чужое сообщение (модерация)
+    var onReport: (() -> Void)? = nil
     /// Где сообщение стоит на экране (экранные координаты): копия встаёт ровно туда же, как в Telegram
     var sourceFrame: CGRect? = nil
 
@@ -419,6 +421,10 @@ struct MessageActionOverlay: View {
             }
             divider
             row("checkmark.circle", s.t("Выбрать", "Select")) { dismiss(onSelect) }
+            if onReport != nil, !message.mine, message.system == nil, !message.text.hasPrefix("\u{200B}call:") {
+                divider
+                row("exclamationmark.bubble", s.t("Пожаловаться", "Report")) { dismiss { onReport?() } }
+            }
             divider
             row("trash", s.delete, danger: true) {
                 Haptics.impact(.light)

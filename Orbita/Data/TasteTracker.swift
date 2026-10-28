@@ -148,6 +148,24 @@ extension ExtrasAPI {
         _ = try await api.request("POST", "/v1/posts/\(id)/report", body: ServerAPI.json(["reason": reason]))
     }
 
+    /// Пожаловаться на сообщение (личное или в группе)
+    func reportMessage(id: String, reason: String, note: String = "") async throws {
+        _ = try await api.request("POST", "/v1/messages/\(id)/report",
+                                  body: ServerAPI.json(["reason": reason, "note": note]))
+    }
+
+    /// Пожаловаться на профиль пользователя
+    func reportUser(id: String, reason: String, note: String = "") async throws {
+        _ = try await api.request("POST", "/v1/users/\(id)/report",
+                                  body: ServerAPI.json(["reason": reason, "note": note]))
+    }
+
+    /// Мои жалобы со статусом рассмотрения
+    func myReports() async throws -> [MyReport] {
+        let data = try await api.request("GET", "/v1/reports/mine")
+        return try decodeAPI(MyReportListDTO.self, from: data).reports
+    }
+
     /// Репост шортса к себе на страницу / отмена репоста
     @discardableResult
     func setReposted(id: String, on: Bool) async throws -> (count: Int, mine: Bool)? {
@@ -189,3 +207,32 @@ extension ExtrasAPI {
         return obj["state"] as? String
     }
 }
+
+/// Жалоба, поданная мной, со статусом рассмотрения
+struct MyReport: Identifiable, Decodable, Equatable {
+    let id: String
+    let kind: String            // message | user | post | chat
+    let reason: String
+    let note: String
+    let status: String          // open | resolved | dismissed
+    let resolution: String
+    let createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, reason, note, status, resolution
+        case createdAt = "created_at"
+    }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = (try? c.decode(String.self, forKey: .kind)) ?? "other"
+        reason = (try? c.decode(String.self, forKey: .reason)) ?? "other"
+        note = (try? c.decode(String.self, forKey: .note)) ?? ""
+        status = (try? c.decode(String.self, forKey: .status)) ?? "open"
+        resolution = (try? c.decode(String.self, forKey: .resolution)) ?? ""
+        createdAt = (try? c.decode(Double.self, forKey: .createdAt)) ?? 0
+    }
+}
+
+struct MyReportListDTO: Decodable { let reports: [MyReport] }

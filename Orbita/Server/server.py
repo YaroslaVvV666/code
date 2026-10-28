@@ -398,6 +398,14 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_saves_user ON post_saves(user_id)")
 # жалобы на публикации: одна от человека на публикацию (повторная обновляет причину)
 DB.execute("CREATE TABLE IF NOT EXISTS post_reports(post_id TEXT NOT NULL, reporter TEXT NOT NULL, reason TEXT NOT NULL, "
            "created_at REAL NOT NULL, PRIMARY KEY(post_id, reporter))")
+# единая очередь жалоб на модерацию: сообщения, профили, чаты и публикации
+DB.execute("CREATE TABLE IF NOT EXISTS reports("
+           "id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_id TEXT NOT NULL, target_owner TEXT, "
+           "reporter TEXT NOT NULL, reason TEXT NOT NULL, note TEXT, context TEXT, "
+           "created_at REAL NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+           "resolution TEXT, handled_by TEXT, handled_at REAL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter, created_at)")
 # индексы под самые частые выборки (лента «для вас», непрочитанные, скрытые сообщения групп)
 DB.execute("CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_reel ON posts(reel, created_at DESC)")
@@ -3136,7 +3144,34 @@ def save_post(req, me, pid):
     req.send_json(200, {"ok": True, "saves": q1("SELECT COUNT(*) c FROM post_saves WHERE post_id = ?", (pid,))["c"]})
 
 
-REPORT_REASONS = {"spam", "violence", "adult", "illegal", "copyright", "other"}
+REPORT_REASONS = {"spam", "violence", "adult", "child_abuse", "extremism",
+                  "illegal", "fraud", "copyright", "other"}
+
+
+def file_report(me, kind, target_id, reason, note="", context="", target_owner=None):
+    """Кладёт жалобу в единую очередь модерации. Повторная открытая жалоба того же
+    человека на тот же объект обновляется, а не плодит дубликаты."""
+    reason = reason if reason in REPORT_REASONS else "other"
+    note = (str(note) if note else "")[:1000]
+    context = (str(context) if context else "")[:300]
+    ex = q1("SELECT id FROM reports WHERE reporter = ? AND kind = ? AND target_id = ? AND status = 'open'",
+            (me["id"], kind, target_id))
+    if ex:
+        run("UPDATE reports SET reason = ?, note = ?, created_at = ? WHERE id = ?",
+            (reason, note, time.time(), ex["id"]))
+        return ex["id"]
+    rid = uuid.uuid4().hex
+    run("INSERT INTO reports(id, kind, target_id, target_owner, reporter, reason, note, context, created_at, status) "
+        "VALUES (?,?,?,?,?,?,?,?,?, 'open')",
+        (rid, kind, target_id, target_owner, me["id"], reason, note, context, time.time()))
+    return rid
+
+
+def report_json(r):
+    return {"id": r["id"], "kind": r["kind"], "target_id": r["target_id"], "target_owner": r["target_owner"],
+            "reporter": r["reporter"], "reason": r["reason"], "note": r["note"] or "", "context": r["context"] or "",
+            "created_at": r["created_at"], "status": r["status"], "resolution": r["resolution"] or "",
+            "handled_at": r["handled_at"]}
 
 
 @route("POST", r"/v1/posts/([a-f0-9]+)/report")
@@ -3150,7 +3185,80 @@ def report_post(req, me, pid):
         reason = "other"
     run("INSERT OR REPLACE INTO post_reports(post_id, reporter, reason, created_at) VALUES (?,?,?,?)",
         (pid, me["id"], reason, time.time()))
+    note = str(req.body_json().get("note", ""))
+    file_report(me, "post", pid, reason, note, "feed", p["author"])          # в общую очередь модерации
     taste_event(me["id"], q1("SELECT * FROM posts WHERE id = ?", (pid,)), "dislike")      # такое больше не показываем
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/messages/([A-Za-z0-9\-]+)/report")
+def report_message(req, me, mid):
+    """Пожаловаться на сообщение (личное или в группе)"""
+    owner, context = None, ""
+    m = q1("SELECT sender, recipient FROM messages WHERE id = ?", (mid,))
+    if m:
+        if me["id"] not in (m["sender"], m["recipient"]):
+            raise ApiError(403, "forbidden")
+        owner, context = m["sender"], "dm"
+    else:
+        gm = q1("SELECT group_id, sender FROM group_messages WHERE id = ?", (mid,))
+        if not gm:
+            raise ApiError(404, "not_found")
+        owner, context = gm["sender"], "group:" + str(gm["group_id"])
+    body = req.body_json()
+    rid = file_report(me, "message", mid, str(body.get("reason", "other")), body.get("note", ""), context, owner)
+    req.send_json(200, {"ok": True, "id": rid})
+
+
+@route("POST", r"/v1/users/([A-Za-z0-9\-]+)/report")
+def report_user(req, me, uid):
+    """Пожаловаться на профиль пользователя"""
+    uid = uid.lower()
+    if uid == me["id"]:
+        raise ApiError(400, "self")
+    if not q1("SELECT 1 FROM users WHERE id = ?", (uid,)):
+        raise ApiError(404, "not_found")
+    body = req.body_json()
+    rid = file_report(me, "user", uid, str(body.get("reason", "other")), body.get("note", ""), "profile", uid)
+    req.send_json(200, {"ok": True, "id": rid})
+
+
+@route("GET", r"/v1/reports/mine")
+def my_reports(req, me):
+    """Жалобы, которые подал я — со статусом рассмотрения"""
+    rows = q("SELECT * FROM reports WHERE reporter = ? ORDER BY created_at DESC LIMIT 200", (me["id"],))
+    req.send_json(200, {"reports": [report_json(r) for r in rows]})
+
+
+@route("GET", r"/v1/admin/reports", auth=False)
+def admin_reports(req, me):
+    """Очередь модерации (бэк-офис): ?status=open|resolved|dismissed|all"""
+    require_admin(req)
+    status = req.query().get("status", "open")
+    if status == "all":
+        rows = q("SELECT * FROM reports ORDER BY created_at DESC LIMIT 500")
+    else:
+        if status not in ("open", "resolved", "dismissed"):
+            status = "open"
+        rows = q("SELECT * FROM reports WHERE status = ? ORDER BY created_at ASC LIMIT 500", (status,))
+    counts = {row["status"]: row["c"] for row in q("SELECT status, COUNT(*) c FROM reports GROUP BY status")}
+    req.send_json(200, {"reports": [report_json(r) for r in rows], "counts": counts})
+
+
+@route("POST", r"/v1/admin/reports/([a-f0-9]+)/resolve", auth=False)
+def admin_resolve_report(req, me, rid):
+    """Закрыть жалобу: resolution = removed|warned|banned|dismissed|noted"""
+    require_admin(req)
+    r = q1("SELECT id FROM reports WHERE id = ?", (rid,))
+    if not r:
+        raise ApiError(404, "not_found")
+    body = req.body_json()
+    resolution = str(body.get("resolution", "noted"))[:64]
+    status = "dismissed" if resolution == "dismissed" else "resolved"
+    label = req.headers.get("X-Admin-Label", "admin")[:64]
+    run("UPDATE reports SET status = ?, resolution = ?, handled_by = ?, handled_at = ? WHERE id = ?",
+        (status, resolution, label, time.time(), rid))
+    admin_audit(req, "resolve_report:" + resolution, rid)
     req.send_json(200, {"ok": True})
 
 

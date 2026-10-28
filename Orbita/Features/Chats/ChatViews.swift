@@ -817,6 +817,7 @@ struct ChatScreen: View {
     @State private var profileID: String?
     @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
     @State private var noteTarget: ChatMessage?             // своя заметка к сообщению: добавить / изменить
+    @State private var reportTarget: ChatMessage?           // пожаловаться на чужое сообщение
     @State private var showPollCreate = false
     @State private var postLinkID: String?
     @State private var storyRoute: ChatStoryRoute?
@@ -907,6 +908,7 @@ struct ChatScreen: View {
                     onInfo: { infoMessage = target },
                     onTranslate: { translateText = target.text },
                     onNote: { noteTarget = target },
+                    onReport: { reportTarget = target },
                     sourceFrame: messageFrames.frames[target.id])
                     // в своём окне нет окружения экрана чата — передаём всё, что нужно пузырю сообщения
                     .environment(\.theme, theme)
@@ -1096,6 +1098,14 @@ struct ChatScreen: View {
                 .presentationBackground(theme.sheet)
         }
         .environment(\.editMessageNote, { id in noteTarget = model.messages.first { $0.id == id } })
+        .sheet(item: $reportTarget) { m in
+            ReportSheet(title: s.t("Пожаловаться на сообщение", "Report message")) { reason, note in
+                Task { try? await session.extras.reportMessage(id: m.id, reason: reason, note: note) }
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.height(440), .large])
+            .presentationBackground(theme.sheet)
+        }
         .sheet(item: $entitySheet) { e in
             EntityInfoSheet(entity: e, onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
                 .environmentObject(session)

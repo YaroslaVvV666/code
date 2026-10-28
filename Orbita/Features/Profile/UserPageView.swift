@@ -279,6 +279,12 @@ final class UserPageModel: ObservableObject {
         }
     }
 
+    func report(reason: String, note: String) {
+        guard let id = profile?.id else { return }
+        let extras = extras
+        Task { try? await extras.reportUser(id: id, reason: reason, note: note) }
+    }
+
     // MARK: Плейлист
 
     private func tracksChanged() async { await ownStore?.load() }
@@ -355,6 +361,7 @@ struct UserPageView: View {
     @State private var editingPost: Post?
     @State private var commentsPost: Post?
     @State private var confirmBlock = false
+    @State private var showReport = false
     @State private var showContact = false
     /// Ступень шапки: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран (как в Telegram)
     @State private var stage = 0
@@ -637,6 +644,14 @@ struct UserPageView: View {
         } message: {
             Text(s.blockHint)
         }
+        .sheet(isPresented: $showReport) {
+            ReportSheet(title: s.t("Пожаловаться на профиль", "Report profile")) { reason, note in
+                model.report(reason: reason, note: note)
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.height(440), .large])
+            .presentationBackground(theme.sheet)
+        }
     }
 
     // MARK: Шапка
@@ -844,6 +859,8 @@ struct UserPageView: View {
                     showContact = true
                 }
                 .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+                rowButton(icon: "exclamationmark.bubble.fill", title: s.t("Пожаловаться", "Report")) { showReport = true }
+                    .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
                 rowButton(icon: "hand.raised.fill", title: s.blockUser, danger: true) { confirmBlock = true }
                     .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
             }

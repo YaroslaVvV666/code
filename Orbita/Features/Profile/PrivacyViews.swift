@@ -15,6 +15,7 @@ struct PrivacyScreen: View {
     @State private var learnFromActivity: Bool?
     /// Эффекты по жестам в кружочках (локальная настройка устройства)
     @State private var gestureFX = GestureEffects.enabled
+    @State private var showMyReports = false
 
     private var s: Strings { Strings(lang: lang) }
     private var privacy: PrivacySettings { store.profile?.privacy ?? PrivacySettings() }
@@ -34,6 +35,11 @@ struct PrivacyScreen: View {
                 SettingsRow(icon: "hand.raised.slash.fill", tint: .red, title: s.blacklist,
                             value: s.blockedCount(blockedCount), showsChevron: true) {
                     session.profileRoute = .blacklist
+                }
+                SettingsDivider()
+                SettingsRow(icon: "exclamationmark.bubble.fill", tint: .orange,
+                            title: s.t("Мои жалобы", "My reports"), showsChevron: true) {
+                    showMyReports = true
                 }
                 SettingsDivider()
                 SettingsRow(icon: "lock.shield.fill", tint: .teal, title: s.twoFATitle,
@@ -223,6 +229,13 @@ struct PrivacyScreen: View {
         }
         .task {
             blockedCount = (try? await session.socialRepo.blocks().count) ?? 0
+        }
+        .sheet(isPresented: $showMyReports) {
+            NavigationStack { MyReportsView() }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+                .presentationBackground(theme.sheet)
         }
     }
 
