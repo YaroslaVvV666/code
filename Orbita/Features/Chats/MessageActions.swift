@@ -302,8 +302,8 @@ struct MessageActionOverlay: View {
     /// Как в Telegram: первые эмодзи и кнопка-стрелка, по ней — панель со всеми
     private var compactBar: some View {
         HStack(spacing: 2) {
-            ForEach(Array(Self.emojis.prefix(Self.visibleCount).enumerated()), id: \.element) { index, e in
-                emojiButton(e, index: index)
+            ForEach(Array(AnimatedEmoji.popular.prefix(Self.visibleCount).enumerated()), id: \.element) { index, e in
+                emojiButton(e, index: index)                         // быстрый ряд — самые популярные реакции
             }
             Button {
                 Haptics.impact(.light)
