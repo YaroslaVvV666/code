@@ -13,6 +13,7 @@ import sqlite3
 # Таблицы с INSERT OR REPLACE: колонки первичного ключа (для перевода в ON CONFLICT ... DO UPDATE)
 REPLACE_KEYS = {
     "call_log": ["id"],
+    "chat_ttl": ["chat_key"],
     "group_restricted": ["group_id", "user_id"],
     "imported_contacts": ["owner", "phone_idx"],
     "media_review": ["media_id"],

@@ -302,6 +302,10 @@ ensure_column("stories", "permanent", "permanent INTEGER NOT NULL DEFAULT 0")
 ensure_column("messages", "kind", "kind TEXT")
 ensure_column("messages", "fwd_enc", "fwd_enc BLOB")
 ensure_column("group_messages", "fwd_enc", "fwd_enc BLOB")
+ensure_column("messages", "expires_at", "expires_at REAL")                           # исчезающие сообщения: когда удалить
+# Таймер исчезающих сообщений на чат (личные): ttl в секундах, 0/нет записи — выключено
+DB.execute("CREATE TABLE IF NOT EXISTS chat_ttl(chat_key TEXT PRIMARY KEY, ttl INTEGER NOT NULL, set_by TEXT, set_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_msg_expires ON messages(expires_at)")
 DB.executescript("""CREATE TABLE IF NOT EXISTS polls(
   message_id TEXT PRIMARY KEY, creator TEXT NOT NULL, multiple INTEGER NOT NULL DEFAULT 0,
   anonymous INTEGER NOT NULL DEFAULT 1, closed INTEGER NOT NULL DEFAULT 0);
@@ -4031,6 +4035,7 @@ def message_json(m, me_id):
         "reactions": reactions_of(mid, me_id),
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
+        **({"expires_at": m["expires_at"]} if m["expires_at"] else {}),
         **fwd_fields(m, me_id),
     }
 
@@ -4374,6 +4379,16 @@ def dm_key(a, b):
     return "d:" + ":".join(sorted((a, b)))
 
 
+# Разрешённые значения таймера исчезающих сообщений (секунды). 0 — выключено.
+DISAPPEAR_TTLS = {0, 5, 60, 3600, 86400, 7 * 86400, 30 * 86400}
+
+
+def dm_ttl(key):
+    """Таймер исчезающих сообщений для чата (секунды) или 0, если выключен"""
+    r = q1("SELECT ttl FROM chat_ttl WHERE chat_key = ?", (key,))
+    return int(r["ttl"]) if r and r["ttl"] else 0
+
+
 def pinned_of(chat_key, me_id, group=False):
     out = []
     for p in q("SELECT message_id FROM pins WHERE chat_key = ? ORDER BY created_at DESC LIMIT 20", (chat_key,)):
@@ -4565,7 +4580,37 @@ def chat_messages(req, me, peer):
                         "peer": {**profile_json(pr, uid), "name": contact_name(uid, peer) or names(pr)[2]},
                         "typing": typing_action(peer, uid),
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
+                        "ttl": dm_ttl(dm_key(uid, peer)),
                         "can_write": not either_blocked(uid, peer)})
+
+
+@route("GET", r"/v1/chats/([A-Za-z0-9_\-]+)/ttl")
+def get_chat_ttl(req, me, peer):
+    if is_group(peer):
+        raise ApiError(400, "bad_value")
+    req.send_json(200, {"ttl": dm_ttl(dm_key(me["id"], peer))})
+
+
+@route("PUT", r"/v1/chats/([A-Za-z0-9_\-]+)/ttl")
+def set_chat_ttl(req, me, peer):
+    uid = me["id"]
+    if is_group(peer):
+        raise ApiError(400, "bad_value")      # пока только личные чаты
+    try:
+        ttl = int(req.body_json().get("ttl", 0))
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    if ttl not in DISAPPEAR_TTLS:
+        raise ApiError(400, "bad_value")
+    key = dm_key(uid, peer)
+    if ttl:
+        run("INSERT OR REPLACE INTO chat_ttl(chat_key, ttl, set_by, set_at) VALUES (?,?,?,?)", (key, ttl, uid, time.time()))
+    else:
+        run("DELETE FROM chat_ttl WHERE chat_key = ?", (key,))
+    if peer != uid:                            # собеседник сразу видит новый таймер
+        SHARED.ver_bump("uver:" + peer)
+        SHARED.events_publish(peer, "dm")
+    req.send_json(200, {"ttl": ttl})
 
 
 def record_dm_mention(peer, sender, mid, text, now):
@@ -4584,13 +4629,15 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     """Кладёт личное сообщение в базу. peer == uid — «Избранное» (сообщение сразу прочитано)."""
     mid = uuid.uuid4().hex
     now = time.time()
-    run("INSERT INTO messages(id, sender, recipient, text_enc, entities_enc, reply_to, created_at, read_at, attachments_enc, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ttl = dm_ttl(dm_key(uid, peer))                    # исчезающие сообщения: таймер чата
+    expires_at = now + ttl if ttl else None
+    run("INSERT INTO messages(id, sender, recipient, text_enc, entities_enc, reply_to, created_at, read_at, attachments_enc, kind, expires_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (mid, uid, peer, enc(uid, "messages", COL["msg_text"], mid, text),
          enc(uid, "messages", COL["msg_entities"], mid, json.dumps(entities, ensure_ascii=False)), reply_to, now,
          now if peer == uid else None,
          enc(uid, "messages", COL["msg_attach"], mid, json.dumps(attachments)) if attachments else None,
-         "poll" if poll else None))
+         "poll" if poll else None, expires_at))
     if poll:
         create_poll(mid, uid, poll)
     if story:
@@ -4606,6 +4653,31 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     if peer != uid and not silent:
         notify_message(uid, peer, summary_of(row, 150))
     return row
+
+
+def purge_dm(m):
+    """Полностью стереть личное сообщение и всё, что к нему привязано (для исчезающих сообщений)."""
+    mid = m["id"]
+    for a in (attachments_of(m) or []):
+        for media_id in (a.get("media_id"), a.get("thumb")):
+            if media_id:
+                run("DELETE FROM media WHERE id = ? AND owner = ?", (media_id, m["sender"]))
+                STORE.remove(media_id)
+    for t in ("reactions", "message_notes", "poll_votes", "poll_options", "polls"):
+        run("DELETE FROM %s WHERE message_id = ?" % t, (mid,))
+    run("DELETE FROM pins WHERE message_id = ?", (mid,))
+    run("DELETE FROM messages WHERE id = ?", (mid,))
+
+
+def reap_disappearing():
+    """Удаляет личные сообщения, у которых вышел таймер исчезновения."""
+    now = time.time()
+    rows = q("SELECT * FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 300", (now,))
+    for m in rows:
+        purge_dm(m)
+        SHARED.ver_bump("uver:" + m["recipient"])
+        SHARED.ver_bump("uver:" + m["sender"])
+        SHARED.events_publish(m["recipient"], "dm")
 
 
 @route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/messages")
@@ -4701,6 +4773,10 @@ def scheduler_loop():
             reap_calls()        # добиваем брошенные звонки (клиент пропал), даже если его собеседник не опрашивает
         except Exception as e:
             print("reap_calls: %s" % e.__class__.__name__)
+        try:
+            reap_disappearing()  # удаляем личные сообщения с истёкшим таймером исчезновения
+        except Exception as e:
+            print("reap_disappearing: %s" % e.__class__.__name__)
         try:
             for r in q("SELECT * FROM scheduled WHERE send_at <= ? ORDER BY send_at LIMIT 50", (time.time(),)):
                 run("DELETE FROM scheduled WHERE id = ?", (r["id"],))
