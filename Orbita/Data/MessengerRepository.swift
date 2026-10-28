@@ -384,6 +384,7 @@ struct ChatThread {
     var pinned: [ChatMessage] = []
     var firstUnread: String? = nil  // первое непрочитанное при входе — для плашки «Новые сообщения»
     var isPreview = false           // открытый канал/группа просматривается без вступления
+    var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
 }
 
 struct Sticker: Identifiable, Equatable, Hashable {
@@ -461,6 +462,7 @@ protocol MessengerRepository: Sendable {
     func react(messageID: String, emoji: String?) async throws -> ChatMessage
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
     func setNote(messageID: String, text: String) async throws -> ChatMessage
+    func setChatTTL(peerID: String, seconds: Int) async throws -> Int
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
               replyTo: String?, silent: Bool) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
@@ -901,6 +903,7 @@ private struct ThreadDTO: Decodable {
     let pinned: [MessageDTO]?
     let preview: Bool?
     let firstUnread: String?
+    let ttl: Int?
 }
 
 private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
@@ -986,7 +989,14 @@ struct RemoteMessengerRepository: MessengerRepository {
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
-                          isPreview: dto.preview ?? false)
+                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0)
+    }
+
+    func setChatTTL(peerID: String, seconds: Int) async throws -> Int {
+        let data = try await api.request("PUT", "/v1/chats/\(peerID)/ttl",
+                                         body: ServerAPI.json(["ttl": seconds]))
+        struct R: Decodable { let ttl: Int }
+        return (try? decodeAPI(R.self, from: data))?.ttl ?? seconds
     }
 
     static func entityJSON(_ entities: [TextEntity]) -> [[String: Any]] {

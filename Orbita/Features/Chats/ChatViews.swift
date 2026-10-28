@@ -1204,10 +1204,16 @@ struct ChatScreen: View {
 
             Button { if !isSaved { showInfo = true } } label: {
                 VStack(spacing: 1) {
-                    Text(isSaved ? s.t("Избранное", "Saved messages") : model.peer.name)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1).minimumScaleFactor(0.8)
+                    HStack(spacing: 4) {
+                        if model.ttl > 0 {                      // включены исчезающие сообщения
+                            Image(systemName: "timer").font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(theme.accentColor)
+                        }
+                        Text(isSaved ? s.t("Избранное", "Saved messages") : model.peer.name)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                    }
                     Group {
                         if isSaved {
                             Text(s.t("Ваши заметки", "Your notes")).foregroundStyle(theme.textSecondary)

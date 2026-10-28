@@ -429,12 +429,52 @@ struct ChatInfoView: View {
                       model.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
                     showContact = true
                 }
+                ttlMenu
                 dmRow(profile?.blockedByMe == true ? "hand.raised.slash" : "hand.raised.fill",
                       profile?.blockedByMe == true ? s.unblockUser : s.blockUser, danger: profile?.blockedByMe != true) {
                     if profile?.blockedByMe == true { setBlocked(false) } else { confirmBlock = true }
                 }
             }
             .padding(.horizontal, 16)
+        }
+    }
+
+    /// Варианты таймера исчезающих сообщений (секунды) и подписи
+    private static let ttlOptions: [Int] = [0, 5, 60, 3600, 86400, 7 * 86400, 30 * 86400]
+
+    private func ttlLabel(_ sec: Int) -> String {
+        switch sec {
+        case 0: return s.t("Выключено", "Off")
+        case 5: return s.t("5 секунд", "5 seconds")
+        case 60: return s.t("1 минута", "1 minute")
+        case 3600: return s.t("1 час", "1 hour")
+        case 86400: return s.t("24 часа", "24 hours")
+        case 7 * 86400: return s.t("7 дней", "7 days")
+        case 30 * 86400: return s.t("30 дней", "30 days")
+        default: return "\(sec)"
+        }
+    }
+
+    private var ttlMenu: some View {
+        Menu {
+            ForEach(Self.ttlOptions, id: \.self) { sec in
+                Button {
+                    Task { await model.setTTL(sec) }
+                } label: {
+                    if model.ttl == sec { Label(ttlLabel(sec), systemImage: "checkmark") } else { Text(ttlLabel(sec)) }
+                }
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "timer").font(.system(size: 17)).frame(width: 24)
+                Text(s.t("Исчезающие сообщения", "Disappearing messages")).font(.system(size: 17))
+                Spacer()
+                Text(model.ttl == 0 ? s.t("Выкл", "Off") : ttlLabel(model.ttl))
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+            }
+            .foregroundStyle(theme.accentColor)
+            .padding(.horizontal, 16).frame(height: 52)
+            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
         }
     }
 

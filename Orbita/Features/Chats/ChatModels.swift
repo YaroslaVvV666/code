@@ -259,6 +259,7 @@ final class ChatModel: ObservableObject {
     @Published private(set) var realName: String?
     @Published private(set) var pinned: [ChatMessage] = []
     @Published private(set) var isPreview = false
+    @Published private(set) var ttl = 0            // таймер исчезающих сообщений (секунды), 0 — выкл
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
@@ -330,6 +331,7 @@ final class ChatModel: ObservableObject {
             if realName != thread.realName { realName = thread.realName }
             if thread.pinned != pinned { pinned = thread.pinned }
             if isPreview != thread.isPreview { isPreview = thread.isPreview }
+            if ttl != thread.ttl { ttl = thread.ttl }
             if !loaded { firstUnreadID = thread.firstUnread }
             if !loaded { loaded = true }
             refreshedOnce = true
@@ -345,6 +347,15 @@ final class ChatModel: ObservableObject {
         defer { joining = false }
         do { group = try await repo.joinGroup(id: peerID) } catch let e as APIError { error = e } catch {}
         await refresh()
+    }
+
+    /// Таймер исчезающих сообщений для этого чата (секунды; 0 — выключить)
+    func setTTL(_ seconds: Int) async {
+        let before = ttl
+        ttl = seconds                               // сразу в UI, без ожидания сети
+        do { ttl = try await repo.setChatTTL(peerID: peerID, seconds: seconds) }
+        catch let e as APIError { error = e; ttl = before }
+        catch { ttl = before }
     }
 
     // MARK: Реакции и закреп
