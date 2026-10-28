@@ -474,6 +474,23 @@ def run(sql, args=()):
 
 RATELIMIT = os.environ.get("ORBITA_RATELIMIT", "1") != "0"
 
+# Метрики процесса (для /metrics, формат Prometheus). Каждый воркер отдаёт свои — Prometheus опрашивает все.
+METRICS_LOCK = threading.Lock()
+METRICS = {"requests": 0, "errors": 0, "s2xx": 0, "s3xx": 0, "s4xx": 0, "s5xx": 0, "longpoll": 0}
+
+
+def metric_status(code):
+    with METRICS_LOCK:
+        METRICS["requests"] += 1
+        METRICS["s%dxx" % (code // 100)] = METRICS.get("s%dxx" % (code // 100), 0) + 1
+        if code >= 500:
+            METRICS["errors"] += 1
+
+
+def metric_longpoll(delta):
+    with METRICS_LOCK:
+        METRICS["longpoll"] += delta
+
 
 def rate_limit(key, limit, window):
     """Не больше `limit` действий за `window` секунд по ключу (например per-user или per-IP).
@@ -1057,6 +1074,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
 
+    def send_response(self, code, message=None):
+        metric_status(code)                 # учитываем КАЖДЫЙ ответ (json, медиа, диапазоны) для /metrics
+        return super().send_response(code, message)
+
     def send_json(self, status, obj):
         body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
         key = getattr(self, "_cache_key", None)
@@ -1210,6 +1231,40 @@ class Handler(BaseHTTPRequestHandler):
 @route("GET", r"/v1/ping", auth=False)
 def ping(req, me):
     req.send_json(200, {"ok": True, "name": "Orbita Server", "version": 5, "push": push.configured(), "otp": {"sms": otp.configured("sms"), "email": otp.configured("email"), "dev": OTP_DEV}, "encrypted": True})
+
+
+@route("GET", r"/metrics", auth=False)
+def metrics(req, me):
+    """Метрики процесса в формате Prometheus. Каждый воркер отдаёт свои — Prometheus опрашивает все порты.
+    За nginx закрывать allowlist'ом (внутренний доступ)."""
+    with METRICS_LOCK:
+        m = dict(METRICS)
+    lines = [
+        "# HELP orbita_up Воркер жив",
+        "# TYPE orbita_up gauge",
+        'orbita_up{worker="%d"} 1' % WORKER_INDEX,
+        "# HELP orbita_requests_total Всего ответов",
+        "# TYPE orbita_requests_total counter",
+        "orbita_requests_total %d" % m["requests"],
+        "# HELP orbita_responses_total Ответы по классу статуса",
+        "# TYPE orbita_responses_total counter",
+        'orbita_responses_total{class="2xx"} %d' % m.get("s2xx", 0),
+        'orbita_responses_total{class="3xx"} %d' % m.get("s3xx", 0),
+        'orbita_responses_total{class="4xx"} %d' % m.get("s4xx", 0),
+        'orbita_responses_total{class="5xx"} %d' % m.get("s5xx", 0),
+        "# HELP orbita_errors_total Ответы 5xx",
+        "# TYPE orbita_errors_total counter",
+        "orbita_errors_total %d" % m["errors"],
+        "# HELP orbita_longpoll_active Сейчас висящих long-poll запросов",
+        "# TYPE orbita_longpoll_active gauge",
+        "orbita_longpoll_active %d" % m["longpoll"],
+    ]
+    body = ("\n".join(lines) + "\n").encode()
+    req.send_response(200)
+    req.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+    req.send_header("Content-Length", str(len(body)))
+    req.end_headers()
+    req.wfile.write(body)
 
 
 # ---------- комплаенс: выгрузка данных по законному запросу (только по токену администратора) ----------
@@ -5177,7 +5232,11 @@ def events_wait(req, me):
         timeout = min(50, max(1, int(req.query().get("timeout", "25"))))
     except (TypeError, ValueError):
         timeout = 25
-    topics = SHARED.events_wait(me["id"], timeout)
+    metric_longpoll(1)
+    try:
+        topics = SHARED.events_wait(me["id"], timeout)
+    finally:
+        metric_longpoll(-1)
     req.send_json(200, {"topics": topics})
 
 
