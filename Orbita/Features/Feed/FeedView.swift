@@ -510,9 +510,11 @@ struct PostCard: View {
             }
 
             if !post.media.isEmpty {
-                MediaGrid(media: post.media, autoplay: autoplay) { viewer = ViewerRoute(index: $0) }
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+                SensitiveGate(sensitive: post.sensitive) {
+                    MediaGrid(media: post.media, autoplay: autoplay) { viewer = ViewerRoute(index: $0) }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.stroke, lineWidth: 1))
             }
 
             HStack(spacing: 8) {

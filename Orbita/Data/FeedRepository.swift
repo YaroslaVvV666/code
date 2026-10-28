@@ -60,6 +60,7 @@ struct PostDTO: Decodable {
     let repostedByMe: Bool?
     let isRepost: Bool?
     let allowRepost: Bool?
+    let sensitive: Bool?
     let repostFriends: [AuthorDTO]?
     let origin: AuthorDTO?
     let music: MusicDTO?
@@ -76,6 +77,7 @@ struct PostDTO: Decodable {
              reposts: reposts ?? 0, repostedByMe: repostedByMe ?? false,
              music: music.map { PostMusic(title: $0.title, artist: $0.artist, mediaID: $0.media) },
              isRepost: isRepost ?? false, allowRepost: allowRepost ?? true,
+             sensitive: sensitive ?? false,
              repostFriends: (repostFriends ?? []).map(\.model), origin: origin?.model)
     }
 }
@@ -157,6 +159,7 @@ struct RemoteFeedRepository: FeedRepository {
         if options.commentsOff { body["comments_off"] = true }
         if options.noRepost { body["no_repost"] = true }
         if options.wallOnly { body["wall_only"] = true }
+        if options.sensitive { body["sensitive"] = true }
         return ServerAPI.json(body)
     }
 

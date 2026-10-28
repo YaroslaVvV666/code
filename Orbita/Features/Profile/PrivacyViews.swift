@@ -15,6 +15,7 @@ struct PrivacyScreen: View {
     @State private var learnFromActivity: Bool?
     /// Эффекты по жестам в кружочках (локальная настройка устройства)
     @State private var gestureFX = GestureEffects.enabled
+    @State private var showSensitive = SensitiveContent.alwaysShow
     @State private var showMyReports = false
 
     private var s: Strings { Strings(lang: lang) }
@@ -184,6 +185,35 @@ struct PrivacyScreen: View {
                 }
                 Text(s.t("Во время записи видеосообщения (кружочка) жесты рукой запускают эффекты: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Распознавание идёт на устройстве, камера никуда не передаётся.",
                          "While recording a video message, hand gestures trigger effects: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Recognition runs on-device; the camera is not sent anywhere."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Чувствительный контент (18+)
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "eye.trianglebadge.exclamationmark.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Показывать чувствительный контент", "Show sensitive content")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { showSensitive },
+                            set: { on in showSensitive = on; SensitiveContent.alwaysShow = on }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Контент с пометкой 18+ по умолчанию скрыт под размытием. Включите, чтобы всегда показывать его без предупреждения.",
+                         "Content marked 18+ is blurred by default. Turn this on to always reveal it without a warning."))
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 30)

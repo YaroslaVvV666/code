@@ -992,14 +992,16 @@ struct ReelPage: View {
 
     @ViewBuilder
     private var videoLayer: some View {
-        ZStack {
-            if let v = video {
-                if !ready {
-                    RemoteImage(id: v.thumbID ?? v.id, fill: fill, backdrop: .black)
-                }
-                if let player {
-                    PlayerLayerView(player: player, gravity: fill ? .resizeAspectFill : .resizeAspect)
-                        .opacity(ready ? 1 : 0)
+        SensitiveGate(sensitive: post.sensitive) {
+            ZStack {
+                if let v = video {
+                    if !ready {
+                        RemoteImage(id: v.thumbID ?? v.id, fill: fill, backdrop: .black)
+                    }
+                    if let player {
+                        PlayerLayerView(player: player, gravity: fill ? .resizeAspectFill : .resizeAspect)
+                            .opacity(ready ? 1 : 0)
+                    }
                 }
             }
         }

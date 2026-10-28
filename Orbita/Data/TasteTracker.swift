@@ -188,6 +188,7 @@ extension ExtrasAPI {
         if let musicTrack { body["music_track"] = musicTrack }
         if options.commentsOff { body["comments_off"] = true }
         if options.noRepost { body["no_repost"] = true }
+        if options.sensitive { body["sensitive"] = true }
         let data = try await api.request("POST", "/v1/posts", body: ServerAPI.json(body))
         return try decodeAPI(PostDTO.self, from: data).model
     }

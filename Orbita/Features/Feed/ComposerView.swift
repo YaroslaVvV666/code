@@ -372,6 +372,12 @@ struct PostOptionsCard: View {
                                                    : s.t("Друзья смогут репостнуть к себе на страницу", "People can repost it to their page"),
                         isOn: Binding(get: { !options.noRepost }, set: { options.noRepost = !$0 }))
                 }
+                Divider().padding(.leading, 52)
+                row(icon: "eye.trianglebadge.exclamationmark.fill", tint: .orange,
+                    title: s.t("Чувствительный контент (18+)", "Sensitive content (18+)"),
+                    subtitle: options.sensitive ? s.t("Будет скрыт под размытием, пока не нажмут «Показать»", "Shown blurred until viewers tap to reveal")
+                                                : s.t("Отметьте, если контент для взрослых", "Mark it if the content is for adults"),
+                    isOn: Binding(get: { options.sensitive }, set: { options.sensitive = $0 }))
                 if !hashtags.isEmpty {
                     Divider().padding(.leading, 16)
                     VStack(alignment: .leading, spacing: 8) {

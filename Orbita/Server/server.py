@@ -391,6 +391,7 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author, created
 DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
 ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
 ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
+ensure_column("posts", "sensitive", "sensitive INTEGER NOT NULL DEFAULT 0")          # 18+/чувствительный контент — показывается с размытием
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of, author)")
 DB.execute("CREATE TABLE IF NOT EXISTS post_saves(post_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(post_id, user_id))")
@@ -882,7 +883,7 @@ def post_json(p, me_id):
         "views": (q1("SELECT views FROM post_stats WHERE post_id = ?", (pid,)) or {"views": 0})["views"],
         "comments": comments, "mine": author == me_id, "edited_at": p["edited_at"],
         "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
-        "allow_repost": not p["no_repost"],
+        "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
     }
 
 
@@ -939,7 +940,7 @@ def posts_json(rows, me_id):
             "likes": p["likes_seed"] + likes.get(pid, 0), "liked_by_me": pid in liked, "views": views.get(pid, 0),
             "comments": comments.get(pid, 0), "mine": author == me_id, "edited_at": p["edited_at"],
             "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
-            "allow_repost": not p["no_repost"],
+            "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
         })
     return out
 
@@ -3066,11 +3067,11 @@ def create_post(req, me):
         run("BEGIN")
         try:
             run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, music_media, music_key, "
-                "comments_off, no_repost, wall_only) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "comments_off, no_repost, wall_only, sensitive) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (pid, uid, enc(uid, "posts", COL["post_text"], pid, text),
                  enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
                  music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
-                 1 if (not reel and body.get("wall_only")) else 0))
+                 1 if (not reel and body.get("wall_only")) else 0, 1 if body.get("sensitive") else 0))
             write_post_media(pid, items)
             run("COMMIT")
         except Exception:
@@ -3256,6 +3257,13 @@ def admin_resolve_report(req, me, rid):
     resolution = str(body.get("resolution", "noted"))[:64]
     status = "dismissed" if resolution == "dismissed" else "resolved"
     label = req.headers.get("X-Admin-Label", "admin")[:64]
+    full = q1("SELECT kind, target_id FROM reports WHERE id = ?", (rid,))
+    # действие модерации: удалить публикацию или пометить её как 18+/чувствительную
+    if full and full["kind"] == "post":
+        if resolution == "removed":
+            run("DELETE FROM posts WHERE id = ?", (full["target_id"],))
+        elif resolution == "sensitive":
+            run("UPDATE posts SET sensitive = 1 WHERE id = ?", (full["target_id"],))
     run("UPDATE reports SET status = ?, resolution = ?, handled_by = ?, handled_at = ? WHERE id = ?",
         (status, resolution, label, time.time(), rid))
     admin_audit(req, "resolve_report:" + resolution, rid)
