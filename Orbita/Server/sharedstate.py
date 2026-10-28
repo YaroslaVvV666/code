@@ -24,6 +24,53 @@ def make_shared():
     return MemoryShared()
 
 
+class _WaiterHub:
+    """Реестр ждущих long-poll-запросов в пределах одного процесса: по uid — условная переменная.
+    Создаётся при ожидании и удаляется, когда ждущих не осталось (не растёт бесконечно)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._conds = {}       # uid -> [Condition, число ждущих]
+
+    def _acquire(self, uid):
+        with self._lock:
+            rec = self._conds.get(uid)
+            if rec is None:
+                rec = [threading.Condition(), 0]
+                self._conds[uid] = rec
+            rec[1] += 1
+            return rec[0]
+
+    def _release(self, uid):
+        with self._lock:
+            rec = self._conds.get(uid)
+            if rec:
+                rec[1] -= 1
+                if rec[1] <= 0:
+                    del self._conds[uid]
+
+    def signal(self, uid):
+        with self._lock:
+            rec = self._conds.get(uid)
+            cond = rec[0] if rec else None
+        if cond:
+            with cond:
+                cond.notify_all()
+
+    def wait(self, uid, timeout, drain):
+        """Ждать событий для uid не дольше timeout. drain() возвращает накопленные темы (или пусто)."""
+        cond = self._acquire(uid)
+        try:
+            with cond:
+                t = drain()
+                if t:
+                    return t
+                cond.wait(timeout)
+            return drain()
+        finally:
+            self._release(uid)
+
+
 # ======================= в памяти (один воркер) =======================
 
 class MemoryShared:
@@ -38,6 +85,23 @@ class MemoryShared:
         self.qr = {}               # qid -> запись (dict)
         self.blob = {}             # ключ -> (срок, bytes) — кэш (сессии, ленты)
         self.vers = {}             # ключ -> int — счётчик версий для инвалидации кэша
+        self.pending = {}          # uid -> set(тем) — накопленные события для long-poll
+        self.hub = _WaiterHub()
+
+    # --- шина событий (long-poll вместо постоянного опроса) ---
+
+    def events_publish(self, uid, topic):
+        with self._lock:
+            self.pending.setdefault(uid, set()).add(topic)
+        self.hub.signal(uid)
+
+    def _drain(self, uid):
+        with self._lock:
+            t = self.pending.pop(uid, None)
+        return list(t) if t else []
+
+    def events_wait(self, uid, timeout):
+        return self.hub.wait(uid, timeout, lambda: self._drain(uid))
 
     # --- кэш: двоичные значения с TTL + счётчики версий ---
 
@@ -207,6 +271,56 @@ class RedisShared:
         self.rb = redis.Redis.from_url(url, decode_responses=False)   # для двоичного кэша (pickle/тела ответов)
         self.r.ping()
         self._tls = threading.local()
+        self.hub = _WaiterHub()
+        self._listener_started = False
+        self._listener_lock = threading.Lock()
+
+    # --- шина событий (long-poll): накопление тем в Redis-множестве + побудка через pub/sub ---
+
+    WAKE_CHANNEL = "orbita:wake"
+
+    def _ensure_listener(self):
+        # фоновый подписчик на канал побудки запускается лениво — только в воркере, который реально кого-то ждёт
+        if self._listener_started:
+            return
+        with self._listener_lock:
+            if self._listener_started:
+                return
+            self._listener_started = True
+            t = threading.Thread(target=self._listen, daemon=True)
+            t.start()
+
+    def _listen(self):
+        import redis
+        while True:
+            try:
+                sub = self.r.pubsub(ignore_subscribe_messages=True)
+                sub.subscribe(self.WAKE_CHANNEL)
+                for msg in sub.listen():
+                    if msg.get("type") == "message":
+                        uid = msg.get("data")
+                        if uid:
+                            self.hub.signal(uid)
+            except Exception:
+                time.sleep(1)      # соединение упало — переподключаемся
+
+    def events_publish(self, uid, topic):
+        key = "ev:" + uid
+        p = self.r.pipeline()
+        p.sadd(key, topic)
+        p.expire(key, 90)
+        p.publish(self.WAKE_CHANNEL, uid)
+        p.execute()
+
+    def _drain(self, uid):
+        vals = self.r.spop("ev:" + uid, 100)
+        if not vals:
+            return []
+        return list(vals) if not isinstance(vals, str) else [vals]
+
+    def events_wait(self, uid, timeout):
+        self._ensure_listener()
+        return self.hub.wait(uid, timeout, lambda: self._drain(uid))
 
     # --- кэш: двоичные значения с TTL + счётчики версий ---
 

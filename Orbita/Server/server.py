@@ -4401,6 +4401,8 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
             (enc(uid, "messages", COL["msg_entities"], mid + ":fwd", json.dumps({"story": story}, ensure_ascii=False)), mid))
     SHARED.typing_clear(uid, peer)
     SHARED.ver_bump("uver:" + peer)                    # у получателя список чатов обновится сразу
+    if peer != uid:
+        SHARED.events_publish(peer, "dm")              # разбудить long-poll получателя — сообщение придёт сразу
     row = q1("SELECT * FROM messages WHERE id = ?", (mid,))
     if peer != uid:
         record_dm_mention(peer, uid, mid, text, now)
@@ -4800,6 +4802,8 @@ def chat_typing(req, me, peer):
     action = str(req.body_json().get("action", "typing"))
     action = action if action in ("typing", "voice", "video", "photo", "file") else "typing"
     SHARED.typing_set(me["id"], peer, action, TYPING_TTL)
+    if not is_group(peer):
+        SHARED.events_publish(peer, "typing")
     req.send_json(200, {"ok": True})
 
 
@@ -4898,6 +4902,7 @@ def finish_call(cid, status, by=None):
         SHARED.user_call_clear(u, cid)
         if u != by:
             SHARED.signals_push(u, {"call": cid, "kind": "end", "data": status})
+            SHARED.events_publish(u, "call")
     dur = time.time() - c["answered"] if c.get("answered") else 0
     run("INSERT OR REPLACE INTO call_log(id, caller, callee, video, status, created_at, duration) VALUES (?,?,?,?,?,?,?)",
         (cid, c["caller"], c["callee"], 1 if c["video"] else 0, status, c["created"], dur))
@@ -4950,6 +4955,7 @@ def start_call(req, me):
     call = {"caller": uid, "callee": to, "video": bool(d.get("video")), "state": "ringing",
             "created": now, "answered": None, "seen": {uid: now, to: now}}
     SHARED.call_put(cid, call)
+    SHARED.events_publish(to, "call")                  # разбудить вызываемого — звонок появится мгновенно
     call_push(call, uid)
     req.send_json(201, {"id": cid, "ice": ice_servers()})
 
@@ -4990,6 +4996,7 @@ def call_signal(req, me, cid):
         raise ApiError(400, "bad_value")
     other = c["callee"] if me["id"] == c["caller"] else c["caller"]
     SHARED.signals_push(other, {"call": cid, "kind": kind, "data": data})
+    SHARED.events_publish(other, "call")
     req.send_json(200, {"ok": True})
 
 
@@ -5002,6 +5009,7 @@ def call_answer(req, me, cid):
     SHARED.call_update(cid, {"state": "active", "answered": now,
                              "seen": {c["caller"]: now, c["callee"]: now}})
     SHARED.signals_push(c["caller"], {"call": cid, "kind": "accepted", "data": ""})
+    SHARED.events_publish(c["caller"], "call")
     req.send_json(200, {"ok": True, "ice": ice_servers(), "video": c["video"]})
 
 
@@ -5014,6 +5022,19 @@ def call_end(req, me, cid):
         status = "ended"
     finish_call(cid, status, by=me["id"])
     req.send_json(200, {"ok": True})
+
+
+@route("GET", r"/v1/events/wait")
+def events_wait(req, me):
+    """Long-poll: запрос «висит» до события для пользователя (или до таймаута), вместо частого опроса.
+    Возвращает список тем, что изменилось: dm | group | call | typing. Клиент по ним обновляет нужное.
+    Полностью совместимо со старым опросом: кто не использует этот эндпоинт, продолжает опрашивать как раньше."""
+    try:
+        timeout = min(50, max(1, int(req.query().get("timeout", "25"))))
+    except (TypeError, ValueError):
+        timeout = 25
+    topics = SHARED.events_wait(me["id"], timeout)
+    req.send_json(200, {"topics": topics})
 
 
 @route("GET", r"/v1/calls/history")
@@ -5661,6 +5682,9 @@ def group_send(req, me, gid):
     SHARED.typing_clear(uid, gid)
     row = q1("SELECT * FROM group_messages WHERE id = ?", (mid,))
     tagged = record_mentions(g, uid, mid, text, now)
+    if g["type"] == "group":                           # разбудить участников группового чата (у каналов — лента)
+        for mrow in q("SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?", (gid, uid)):
+            SHARED.events_publish(mrow["user_id"], "group")
     if not d.get("silent"):
         notify_group(g, uid, summary_of(row, 150), tagged)
     if g["type"] == "channel" and g["discussion"]:
@@ -6671,6 +6695,11 @@ WORKER_INDEX = int(os.environ.get("ORBITA_WORKER_INDEX", "0"))
 def run_worker():
     # Каждый воркер слушает свой порт (PORT + индекс), чтобы nginx мог «липко» направлять пользователя всегда
     # в один и тот же воркер (иначе ломаются вход по коду, 2FA и мастер-бот, живущие в памяти воркера).
+    # Long-poll держит по потоку на ждущего клиента — уменьшаем стек потока, чтобы их влезало больше.
+    try:
+        threading.stack_size(512 * 1024)
+    except (ValueError, RuntimeError):
+        pass
     port = PORT + WORKER_INDEX
     ThreadingHTTPServer.request_queue_size = 128          # больше ожидающих соединений — пики не отбиваются
     httpd = ThreadingHTTPServer((HOST, port), Handler)
