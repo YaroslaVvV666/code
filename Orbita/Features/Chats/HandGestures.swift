@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreML
 import Vision
 
 /// Жесты рукой, которые ловим во время записи кружка, и эмодзи-эффект, который «вылетает».
@@ -35,6 +36,64 @@ enum GestureEffects {
     }
 }
 
+/// Обёртка над обученной моделью жестов (Create ML → Hand Pose Classifier).
+///
+/// Если в бандл приложения положить обученную модель `HandGestureClassifier.mlmodel`
+/// (Xcode компилирует её в `HandGestureClassifier.mlmodelc`), то одиночные жесты
+/// распознаёт она — точнее и «понимает» разные варианты одной позы. Если модели нет,
+/// код спокойно собирается и работает на старой эвристике (`classify` ниже).
+///
+/// Модель — классификатор ОДНОЙ руки: вход — массив ключевых точек [3×21]
+/// (`VNHumanHandPoseObservation.keypointsMultiArray()`), выход — метка + вероятности.
+/// Метки должны называться так же, как значения `HandGesture` (`ok`, `fingerHeart`,
+/// `peace`, `fingerGun`) плюс отдельный класс `none` для «нет жеста».
+final class GestureClassifierModel {
+    static let shared = GestureClassifierModel()
+
+    private let model: MLModel?
+    private let inputName: String?
+    private let labelName: String?
+    private let probName: String?
+
+    /// Ниже этой уверенности предсказание игнорируем — лучше промолчать, чем ошибиться.
+    private let threshold = 0.80
+
+    var isLoaded: Bool { model != nil && inputName != nil }
+
+    private init() {
+        // Ищем скомпилированную модель в бандле. Пусто — значит её не клали, работаем без неё.
+        guard let url = Bundle.main.url(forResource: "HandGestureClassifier", withExtension: "mlmodelc"),
+              let m = try? MLModel(contentsOf: url) else {
+            model = nil; inputName = nil; labelName = nil; probName = nil
+            return
+        }
+        model = m
+        let desc = m.modelDescription
+        // Единственный вход-массив — его имя (у Create ML обычно "poses").
+        inputName = desc.inputDescriptionsByName.first(where: { $0.value.type == .multiArray })?.key
+            ?? desc.inputDescriptionsByName.keys.first
+        labelName = desc.predictedFeatureName
+        probName = desc.predictedProbabilitiesName
+    }
+
+    /// Классифицировать одну руку. Возвращает жест, если модель уверена; иначе nil.
+    func classify(_ obs: VNHumanHandPoseObservation) -> HandGesture? {
+        guard let model, let inputName,
+              let array = try? obs.keypointsMultiArray() else { return nil }
+        let provider = try? MLDictionaryFeatureProvider(dictionary: [inputName: MLFeatureValue(multiArray: array)])
+        guard let provider, let out = try? model.prediction(from: provider) else { return nil }
+
+        // Берём метку и, если доступны, её вероятность.
+        guard let label = labelName.flatMap({ out.featureValue(for: $0)?.stringValue }) else { return nil }
+        if let probName,
+           let probs = out.featureValue(for: probName)?.dictionaryValue,
+           let p = probs[label as NSObject] as? Double, p < threshold {
+            return nil
+        }
+        return HandGesture(rawValue: label)   // "none" и всё незнакомое -> nil
+    }
+}
+
 /// Ловит жесты руки по кадрам камеры (Vision) во время записи кружка.
 /// Пороги распознавания подбираются на устройстве — тут консервативные значения.
 final class HandGestureDetector: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -53,6 +112,8 @@ final class HandGestureDetector: NSObject, ObservableObject, AVCaptureVideoDataO
     private var lastFire = Date.distantPast
     private var lastKind: HandGesture?
     private var frameSkip = 0
+    /// Обученная модель жестов, если её положили в бандл; иначе используется эвристика.
+    private let model = GestureClassifierModel.shared
 
     /// Не чаще одного эффекта в ~2.2 c, чтобы не частило
     private let cooldown: TimeInterval = 2.2
@@ -69,7 +130,7 @@ final class HandGestureDetector: NSObject, ObservableObject, AVCaptureVideoDataO
             return
         }
         guard let hands = request.results, !hands.isEmpty else { return }
-        guard let kind = Self.classify(hands) else { return }
+        guard let kind = Self.classify(hands, model: model) else { return }
         let now = Date()
         if now.timeIntervalSince(lastFire) < cooldown && kind == lastKind { return }
         if now.timeIntervalSince(lastFire) < 0.8 { return }    // минимальный зазор между любыми эффектами
@@ -103,8 +164,10 @@ final class HandGestureDetector: NSObject, ObservableObject, AVCaptureVideoDataO
         return dist(tip, wrist) > dist(pip, wrist) * 1.05
     }
 
-    private static func classify(_ hands: [VNHumanHandPoseObservation]) -> HandGesture? {
-        // Сердечко двумя руками: две ладони, кончики указательных рядом сверху
+    private static func classify(_ hands: [VNHumanHandPoseObservation],
+                                 model: GestureClassifierModel) -> HandGesture? {
+        // Сердечко двумя руками: две ладони, кончики указательных рядом сверху.
+        // Это всегда эвристика — классификатор обучен на одной руке.
         if hands.count >= 2 {
             let a = points(hands[0]), b = points(hands[1])
             if let ia = a[.indexTip], let ib = b[.indexTip], let ta = a[.thumbTip], let tb = b[.thumbTip] {
@@ -112,6 +175,12 @@ final class HandGestureDetector: NSObject, ObservableObject, AVCaptureVideoDataO
             }
         }
         guard let obs = hands.first else { return nil }
+
+        // Одиночный жест: если есть обученная модель — доверяем ей, иначе эвристика ниже.
+        if model.isLoaded {
+            return model.classify(obs)
+        }
+
         let p = points(obs)
         let wrist = p[.wrist]
         let indexExt  = extended(p[.indexTip], p[.indexPIP], wrist)
