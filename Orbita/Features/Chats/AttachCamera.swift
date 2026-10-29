@@ -233,6 +233,8 @@ struct CameraCaptureView: View {
                 }
                 .padding(.horizontal, 10)
                 Spacer()
+                zoomPills
+                    .padding(.bottom, 14)
                 HStack {
                     Color.clear.frame(width: 70, height: 70)
                     Spacer()
@@ -270,6 +272,32 @@ struct CameraCaptureView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden()
+    }
+
+    /// Пилюли зума как в системной камере: 1×, 2×, 3× (в пределах возможностей объектива)
+    private var zoomLevels: [CGFloat] { [1, 2, 3].filter { $0 <= camera.maxZoom + 0.01 } }
+
+    private var zoomPills: some View {
+        HStack(spacing: 8) {
+            ForEach(zoomLevels, id: \.self) { level in
+                let active = abs(camera.zoom - level) < 0.15
+                Button {
+                    Haptics.select()
+                    camera.setZoom(level)
+                    base = level
+                } label: {
+                    Text(active ? String(format: "%g×", Double(level)) : String(format: "%g", Double(level)))
+                        .font(.system(size: active ? 15 : 13, weight: .semibold))
+                        .foregroundStyle(active ? .yellow : .white)
+                        .frame(width: active ? 42 : 36, height: active ? 42 : 36)
+                        .background(.black.opacity(0.4), in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(.black.opacity(0.25), in: Capsule())
+        .opacity(zoomLevels.count > 1 ? 1 : 0)
     }
 }
 

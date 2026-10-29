@@ -63,21 +63,12 @@ struct AttachSheet: View {
         .onAppear { camera.start() }
         .onDisappear { camera.stop() }
         .fullScreenCover(isPresented: $showCamera, onDismiss: { if !leaving { camera.start() } }) {
-            if false {
-                SystemCameraView(onImage: { data in
-                    leaving = true; showCamera = false; dismiss(); onPhoto(data)
-                }, onVideo: { url in
-                    leaving = true; showCamera = false; dismiss(); onVideo(url)
-                }, onCancel: { showCamera = false })
-                .ignoresSafeArea()
-                .overlay { CameraLaunchCover() }
-            } else {
-                CameraCaptureView(camera: camera, onPhoto: { data in
-                    leaving = true; showCamera = false; dismiss(); onPhoto(data)
-                }, onVideo: { url in
-                    leaving = true; showCamera = false; dismiss(); onVideo(url)
-                }, onClose: { camera.setZoom(1); showCamera = false })
-            }
+            // собственная камера на уже работающей сессии плитки: открывается мгновенно, без долгой загрузки системной
+            CameraCaptureView(camera: camera, onPhoto: { data in
+                leaving = true; showCamera = false; dismiss(); onPhoto(data)
+            }, onVideo: { url in
+                leaving = true; showCamera = false; dismiss(); onVideo(url)
+            }, onClose: { camera.setZoom(1); showCamera = false })
         }
         .task {
             if status == .notDetermined {

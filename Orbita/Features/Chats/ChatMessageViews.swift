@@ -488,15 +488,18 @@ struct MessageRow: View {
     private var bubble: some View {
         let textColor = mine ? colors.outgoingText : colors.incomingText
         let secondary = mine ? colors.outgoingSecondary : colors.incomingSecondary
-        // место под время/галочки/просмотры: оценка ширины в «узких пробелах» (по 8 пт), чтобы не оставалось лишнего отступа
-        let metaWidth: CGFloat = 32 + (mine ? 16 : 0) + (message.editedAt != nil ? 44 : 0)
+        // место под время/галочки/просмотры: ширина самой метки + небольшой гарантированный зазор между текстом и временем.
+        // Короткому сообщению не добавляем лишнего, длинному — время не наезжает на текст.
+        let metaGap: CGFloat = 10                              // обязательный зазор «текст ↔ время»
+        let metaWidth: CGFloat = 24 + (mine ? 14 : 0) + (message.editedAt != nil ? 44 : 0)
             + (message.note.map { n in 16 + CGFloat(MessageNoteChip.short(n).count) * 5.8 } ?? 0)
             + (message.views.map { v -> CGFloat in
                 // глаз + число + «·» + три зазора; число считаем так же, как рисует MessageMeta
                 let text = v >= 1000 ? String(format: "%.1fK", Double(v) / 1000) : "\(v)"
                 return 30 + CGFloat(text.count) * 6.8
-            } ?? 0) + 12
-        let filler = String(repeating: "\u{2007}", count: Int((metaWidth / 8.5).rounded(.up)))  // неразрывные: хвост не «висит» и время не наезжает на последнюю строку
+            } ?? 0) + metaGap
+        // figure space (U+2007) неразрывный и шириной с цифру (~9.1 пт на 16): хвост не «висит» и время не наезжает
+        let filler = String(repeating: "\u{2007}", count: Int((metaWidth / 9.1).rounded(.up)))
 
         return VStack(alignment: .leading, spacing: 0) {
             if showSender, !mine, isFirst, let sender = message.sender {
