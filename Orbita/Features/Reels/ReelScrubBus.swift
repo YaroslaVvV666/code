@@ -29,3 +29,22 @@ final class ReelScrubBus: ObservableObject {
         active = false
     }
 }
+
+/// Запоминает, на каком моменте остановили каждый ролик: ушёл в поиск/на «Главную»/снимать видео —
+/// вернулся и продолжил с той же секунды. Живёт, пока открыто приложение.
+final class ReelResume {
+    static let shared = ReelResume()
+    private var times: [String: Double] = [:]
+
+    /// Сохранить позицию ролика (кроме самого начала и конца — там продолжать нечего)
+    func save(_ id: String, seconds: Double, duration: Double) {
+        if seconds > 1, !(duration > 0 && seconds > duration - 0.6) {
+            times[id] = seconds
+        } else {
+            times[id] = nil
+        }
+    }
+
+    /// С какой секунды продолжить этот ролик (0 — с начала)
+    func time(_ id: String) -> Double { times[id] ?? 0 }
+}

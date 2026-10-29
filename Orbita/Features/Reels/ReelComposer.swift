@@ -361,6 +361,10 @@ struct ReelComposerView: View {
         prepared = media ?? original
         music = track
         showEditor = false
+        // система сама распознаёт «взрослый» контент по обложке — включаем размытие (можно выключить вручную)
+        if let thumb = prepared?.thumbnail, !options.sensitive {
+            Task { if await SensitiveScanner.isSensitive(imageDatas: [thumb]) { options.sensitive = true } }
+        }
     }
 
     private func discard() {

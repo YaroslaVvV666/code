@@ -1044,7 +1044,12 @@ struct ReelPage: View {
             if active, !userPaused { p.play() }
         }
         player = p
-        if active, !userPaused { p.play(); startClock() }
+        if active {
+            // новый плеер после возврата во вкладку — сразу ставим на запомненную секунду
+            let resume = ReelResume.shared.time(post.id)
+            if resume > 0 { p.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+            if !userPaused { p.play(); startClock() }
+        }
     }
 
     private func destroyPlayer() {
@@ -1062,13 +1067,16 @@ struct ReelPage: View {
         watched = 0
         playingSince = nil
         userPaused = false
-        player?.seek(to: .zero)
+        // продолжаем с той секунды, на которой остановились (ушли в поиск/на «Главную»/снимать видео)
+        let resume = ReelResume.shared.time(post.id)
+        player?.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         player?.play()
         startClock()
     }
 
     private func deactivate() {
         pauseClock()
+        saveResume()
         let seconds = watched
         watched = 0
         player?.pause()
@@ -1076,6 +1084,12 @@ struct ReelPage: View {
             let ratio = duration > 0 ? seconds / duration : 0
             session.taste.reelEnded(post.id, seconds: seconds, ratio: ratio)
         }
+    }
+
+    /// Запомнить текущий момент ролика — чтобы продолжить с него при возвращении
+    private func saveResume() {
+        guard let t = player?.currentTime().seconds, t.isFinite else { return }
+        ReelResume.shared.save(post.id, seconds: t, duration: duration)
     }
 
     private func startClock() { if playingSince == nil { playingSince = Date(); playing = true } }

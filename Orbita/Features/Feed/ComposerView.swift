@@ -285,6 +285,15 @@ struct ComposerView: View {
             }
         }
         preparing = false
+        await autoDetectSensitive()
+    }
+
+    /// Система сама распознала «взрослый» контент — включаем размытие (пользователь может выключить вручную)
+    private func autoDetectSensitive() async {
+        guard !options.sensitive, !picked.isEmpty else { return }
+        if await SensitiveScanner.isSensitive(imageDatas: picked.map(\.thumbnail)) {
+            options.sensitive = true
+        }
     }
 
     /// Стикер уходит как обычная картинка (PNG с прозрачностью)
