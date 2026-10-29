@@ -259,7 +259,7 @@ final class VoicePlayer: ObservableObject {
 // MARK: - Запись «кружка» (видеосообщения)
 
 @MainActor
-final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
+final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCapturePhotoCaptureDelegate {
     let session = AVCaptureSession()
     @Published private(set) var isRecording = false
     @Published private(set) var ready = false
@@ -276,6 +276,8 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     var elapsed: TimeInterval { startedAt.map { Date().timeIntervalSince($0) } ?? 0 }
 
     private let output = AVCaptureMovieFileOutput()
+    private let photoCapture = AVCapturePhotoOutput()
+    private var onPhoto: ((Data) -> Void)?
     /// Ловит жесты рукой во время записи — по ним вылетают эмодзи-эффекты
     let gestures = HandGestureDetector()
     private let dataOutput = AVCaptureVideoDataOutput()
@@ -315,6 +317,7 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                         session.addInput(micInput)
                     }
                     if session.canAddOutput(output) { session.addOutput(output) }
+                    if session.canAddOutput(self.photoCapture) { session.addOutput(self.photoCapture) }   // режим «Фото» в шортсах
                     output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
                     // параллельный выход кадров для распознавания жестов (Vision)
                     self.dataOutput.alwaysDiscardsLateVideoFrames = true
@@ -454,6 +457,22 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
             c.automaticallyAdjustsVideoMirroring = false
             c.isVideoMirrored = isFront
         }
+    }
+
+    /// Режим «Фото» в шортсах: один снимок текущим кадром (зеркально для фронталки, как в превью).
+    func capturePhoto(_ done: @escaping (Data) -> Void) {
+        guard ready, onPhoto == nil else { return }
+        onPhoto = done
+        if let c = photoCapture.connection(with: .video) {
+            if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+            if c.isVideoMirroringSupported { c.automaticallyAdjustsVideoMirroring = false; c.isVideoMirrored = isFront }
+        }
+        photoCapture.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let data = (error == nil) ? photo.fileDataRepresentation() : nil
+        DispatchQueue.main.async { self.onPhoto?(data ?? Data()); self.onPhoto = nil }
     }
 
     func startRecording() {

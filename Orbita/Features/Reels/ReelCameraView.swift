@@ -11,9 +11,21 @@ struct ReelCameraView: View {
     var onGallery: () -> Void
     /// Получает снятый файл, возвращает, удалось ли его подготовить
     var onRecorded: (URL) async -> Bool
+    /// Получает снятое фото (JPEG), возвращает, удалось ли подготовить
+    var onPhoto: (Data) async -> Bool = { _ in false }
+    @Binding var music: Track?
+    var tracks: [Track] = []
 
     @Environment(\.lang) private var lang
     @StateObject private var recorder = CircleRecorder()
+
+    /// Тип съёмки: по умолчанию фото, либо видео 15/60 секунд
+    enum ShotMode: Hashable { case photo, video15, video60
+        var limit: Double { self == .video15 ? 15 : 60 }
+        var isVideo: Bool { self != .photo }
+    }
+    @State private var mode: ShotMode = .photo
+    @State private var showMusic = false
 
     private enum Phase { case idle, countdown, recording, review }
     @State private var phase: Phase = .idle
@@ -77,6 +89,12 @@ struct ReelCameraView: View {
             if let text = notice ?? error { ToastView(text: text).padding(.top, TopInset.value + 12).transition(.opacity) }
         }
         .animation(.easeOut(duration: 0.2), value: notice)
+        .sheet(isPresented: $showMusic) {
+            ReelCameraMusicSheet(tracks: tracks, selected: music) { picked in music = picked }
+                .environment(\.lang, lang)
+                .preferredColorScheme(.dark)
+                .presentationDetents([.medium, .large])
+        }
         .task { await loadGalleryThumb() }
         .task {
             let ok = await recorder.prepare()
@@ -96,6 +114,10 @@ struct ReelCameraView: View {
     private func overlays(areaH: CGFloat) -> some View {
         // закрыть / сбросить снятое
         VStack {
+            ZStack(alignment: .top) {
+                if phase == .idle {
+                    musicBar.padding(.top, 16)          // плашка с музыкой сверху по центру
+                }
             HStack(alignment: .top) {
                 if phase != .recording && phase != .countdown {
                     roundTool(phase == .review ? "chevron.left" : "xmark", size: 40) {
@@ -128,6 +150,7 @@ struct ReelCameraView: View {
                 }
             }
             .padding(.horizontal, 14).padding(.top, 14)
+            }
             Spacer()
         }
 
@@ -189,22 +212,47 @@ struct ReelCameraView: View {
     }
 
     private var modeRow: some View {
-        HStack(spacing: 8) {
-            ForEach([15.0, 60.0], id: \.self) { value in
-                Button {
-                    Haptics.select()
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { limit = value }
-                } label: {
-                    Text(s.t("\(Int(value)) с", "\(Int(value)) s"))
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(limit == value ? Color.black : Color.white)
-                        .padding(.horizontal, 15).frame(height: 32)
-                        .background(limit == value ? Color.white : Color.clear, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
+        HStack(spacing: 6) {
+            modePill(s.t("60 с", "60 s"), active: mode == .video60) { select(.video60) }
+            modePill(s.t("15 с", "15 s"), active: mode == .video15) { select(.video15) }
+            modePill(s.t("ФОТО", "PHOTO"), active: mode == .photo) { select(.photo) }
         }
         .transition(.opacity)
+    }
+
+    private var musicBar: some View {
+        Button { Haptics.impact(.light); showMusic = true } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "music.note").font(.system(size: 14, weight: .semibold))
+                Text(music?.display ?? s.t("Добавить музыку", "Add music"))
+                    .font(.system(size: 15, weight: .semibold)).lineLimit(1)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).frame(height: 40)
+            .frame(maxWidth: 230)
+            .background(.black.opacity(0.4), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func modePill(_ title: String, active: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(active ? Color.black : Color.white)
+                .padding(.horizontal, 15).frame(height: 32)
+                .background(active ? Color.white : Color.clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func select(_ m: ShotMode) {
+        guard mode != m else { return }
+        Haptics.select()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            mode = m
+            if m.isVideo { limit = m.limit }
+        }
     }
 
     // MARK: Кнопка записи
@@ -342,9 +390,23 @@ struct ReelCameraView: View {
         return String(format: "%d:%02d", n / 60, n % 60)
     }
 
+    private func takePhoto() {
+        guard !sending else { return }
+        Haptics.impact(.medium)
+        sending = true
+        recorder.capturePhoto { data in
+            Task { @MainActor in
+                sending = false
+                guard !data.isEmpty else { flash(s.t("Не удалось снять фото", "Couldn't take the photo")); return }
+                if await onPhoto(data) == false { flash(s.t("Не удалось подготовить фото", "Couldn't prepare the photo")) }
+            }
+        }
+    }
+
     private func recordTapped() {
         switch phase {
         case .idle:
+            if mode == .photo { takePhoto(); return }
             Haptics.impact(.medium)
             if timerSetting > 0 { startCountdown() } else { begin() }
         case .countdown:
@@ -490,4 +552,66 @@ struct ReelCameraView: View {
 
 private extension Double {
     var nonNaN: Double? { isFinite ? self : nil }
+}
+
+/// Выбор музыки из плейлиста профиля для шортса (с экрана камеры)
+struct ReelCameraMusicSheet: View {
+    let tracks: [Track]
+    let selected: Track?
+    let onPick: (Track?) -> Void
+
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if tracks.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "music.note.list").font(.system(size: 34, weight: .light)).foregroundStyle(.white.opacity(0.7))
+                        Text(s.t("Добавьте треки в плейлист профиля, чтобы ставить их в шортсы.",
+                                 "Add tracks to your profile playlist to use them in shorts."))
+                            .font(.system(size: 14)).foregroundStyle(.white.opacity(0.7))
+                            .multilineTextAlignment(.center).padding(.horizontal, 30)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            row(title: s.t("Без музыки", "No music"), subtitle: "", track: nil, isSelected: selected == nil)
+                            ForEach(tracks) { t in
+                                Divider().overlay(Color.white.opacity(0.08)).padding(.leading, 16)
+                                row(title: t.title, subtitle: t.artist, track: t, isSelected: selected?.id == t.id)
+                            }
+                        }
+                    }
+                }
+            }
+            .background(Color(white: 0.08).ignoresSafeArea())
+            .navigationTitle(s.t("Музыка", "Music"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(s.close) { dismiss() } } }
+        }
+    }
+
+    private func row(title: String, subtitle: String, track: Track?, isSelected: Bool) -> some View {
+        Button {
+            Haptics.select(); onPick(track); dismiss()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: track == nil ? "speaker.slash" : "music.note")
+                    .font(.system(size: 16)).foregroundStyle(.white.opacity(0.8)).frame(width: 36, height: 36)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    if !subtitle.isEmpty { Text(subtitle).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1) }
+                }
+                Spacer()
+                if isSelected { Image(systemName: "checkmark").font(.system(size: 15, weight: .bold)).foregroundStyle(.white) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 11).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }

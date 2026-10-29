@@ -23,6 +23,7 @@ struct ReelComposerView: View {
     @State private var errorText: String?
     @State private var tracks: [Track] = []
     @State private var music: Track?
+    @State private var cameraMusic: Track?          // музыка, выбранная на экране камеры (подставляется в редактор)
     @State private var options = PostOptions()
     @FocusState private var focused: Bool
 
@@ -67,7 +68,9 @@ struct ReelComposerView: View {
         .overlay {
             if cameraVisible {
                 ReelCameraView(error: errorText, onClose: { dismiss() }, onGallery: { errorText = nil; showPicker = true },
-                               onRecorded: { url in await loadRecorded(url) })
+                               onRecorded: { url in await loadRecorded(url) },
+                               onPhoto: { data in await loadPhoto(data) },
+                               music: $cameraMusic, tracks: tracks)
                     .transition(.opacity)
             }
         }
@@ -325,13 +328,28 @@ struct ReelComposerView: View {
             guard case .video(let url) = media.source else { return false }
             original = media
             prepared = media
-            editModel = ReelEditModel(video: url)
+            let em = ReelEditModel(video: url)
+            editModel = em
+            if let m = cameraMusic { await em.setMusic(m) }        // музыка, выбранная на камере
             Haptics.impact(.light)
             showEditor = true
             return true
         } catch {
             return false
         }
+    }
+
+    /// Фото, снятое камерой в режиме «Фото»: как одиночное фото из галереи
+    private func loadPhoto(_ data: Data) async -> Bool {
+        errorText = nil
+        discard()
+        guard let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) else { return false }
+        let em = ReelEditModel(photos: [image])
+        editModel = em
+        if let m = cameraMusic { await em.setMusic(m) }
+        Haptics.impact(.light)
+        showEditor = true
+        return true
     }
 
     private func editorFinished(_ media: PreparedMedia?, _ track: Track?) {
