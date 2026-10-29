@@ -1,6 +1,46 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Тон аватарки для фона QR
+
+enum AvatarTone {
+    /// Средний цвет аватарки — его ставим на фон за QR-кодом.
+    static func load(_ avatarID: String?) async -> Color? {
+        guard let id = avatarID, let url = ServerConfig.mediaURL(id),
+              let image = await ImageCache.shared.load(url: url, maxPixel: 60, persistKey: id),
+              let cg = image.cgImage else { return nil }
+        let w = 10, h = 10
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+        for i in stride(from: 0, to: px.count, by: 4) where px[i + 3] > 10 {
+            r += Double(px[i]); g += Double(px[i + 1]); b += Double(px[i + 2]); n += 1
+        }
+        guard n > 0 else { return nil }
+        return Color(red: r / n / 255, green: g / n / 255, blue: b / n / 255)
+    }
+
+    /// Градиент фона из тона аватарки: тёмная тема — глубже и насыщеннее, светлая — мягче.
+    static func gradient(_ base: Color, dark: Bool) -> [Color] {
+        let ui = UIColor(base)
+        var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
+        ui.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
+        sat = min(1, max(0.12, sat) * 1.15)
+        if dark {
+            let top = UIColor(hue: hue, saturation: sat, brightness: max(0.08, bri * 0.32), alpha: 1)
+            let bottom = UIColor(hue: hue, saturation: min(1, sat * 1.1), brightness: max(0.16, bri * 0.5), alpha: 1)
+            return [Color(top), Color(bottom)]
+        } else {
+            let top = UIColor(hue: hue, saturation: sat * 0.5, brightness: min(1, bri * 0.9 + 0.28), alpha: 1)
+            let bottom = UIColor(hue: hue, saturation: sat * 0.6, brightness: min(1, bri * 0.85 + 0.2), alpha: 1)
+            return [Color(top), Color(bottom)]
+        }
+    }
+}
+
 // MARK: - Узор из эмодзи на фоне
 
 private struct EmojiPattern: View {
@@ -61,6 +101,12 @@ private struct QRShareCard: View {
     let avatarID: String?
     let dark: Bool
     let style: QRBackdropStyle
+    var tone: Color? = nil          // тон аватарки — на фон за QR
+
+    private var backgroundColors: [Color] {
+        if let tone { return AvatarTone.gradient(tone, dark: dark) }
+        return dark ? style.dark : style.light
+    }
 
     private var cardColor: Color { dark ? Color(red: 0.11, green: 0.115, blue: 0.16) : .white }
     private var qrColors: [Color] {
@@ -70,7 +116,8 @@ private struct QRShareCard: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: dark ? style.dark : style.light, startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: backgroundColors, startPoint: .top, endPoint: .bottom)
+                .animation(.easeInOut(duration: 0.35), value: tone)
             EmojiPattern(emoji: style.emoji, dark: dark)
 
             VStack(spacing: 0) {
@@ -120,16 +167,21 @@ struct ProfileQRScreen: View {
     @State private var shareItems: ShareItems?
     @State private var showScanner = false
     @State private var didInit = false
+    @State private var tone: Color?
 
     private var s: Strings { Strings(lang: lang) }
     private var style: QRBackdropStyle { QRBackdropStyle.all[0] }
+    private var screenBackground: Color {
+        if let tone { return AvatarTone.gradient(tone, dark: dark)[0] }
+        return dark ? style.dark[0] : style.light[0]
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            QRShareCard(link: link, name: name, username: username, avatarID: avatarID, dark: dark, style: style)
+            QRShareCard(link: link, name: name, username: username, avatarID: avatarID, dark: dark, style: style, tone: tone)
                 .environment(\.theme, Theme(dark: dark))
                 .padding(.bottom, 240)
-                .background { (dark ? style.dark[0] : style.light[0]).ignoresSafeArea() }
+                .background { screenBackground.ignoresSafeArea() }
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.3), value: dark)
 
@@ -137,6 +189,7 @@ struct ProfileQRScreen: View {
         }
         .preferredColorScheme(theme.dark ? .dark : .light)
         .onAppear { if !didInit { didInit = true; dark = theme.dark } }
+        .task { tone = await AvatarTone.load(avatarID) }
         .sheet(item: $shareItems) { ActivitySheet(items: $0.items).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showScanner) {
             QRScannerScreen(onApproved: { showScanner = false })
@@ -192,7 +245,7 @@ struct ProfileQRScreen: View {
     /// Рисуем карточку в картинку и отдаём в «Поделиться»
     @MainActor
     private func share() {
-        let card = QRShareCard(link: link, name: name, username: username, avatarID: avatarID, dark: dark, style: style)
+        let card = QRShareCard(link: link, name: name, username: username, avatarID: avatarID, dark: dark, style: style, tone: tone)
             .environment(\.theme, Theme(dark: dark))
             .frame(width: 390, height: 640)
         let renderer = ImageRenderer(content: card)

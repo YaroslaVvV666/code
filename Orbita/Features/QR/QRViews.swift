@@ -6,10 +6,11 @@ import CoreImage.CIFilterBuiltins
 
 enum QRMatrix {
     /// Квадратная матрица модулей (true — тёмный). Тихую зону рисует тот, кто показывает код.
-    static func make(_ text: String) -> [[Bool]] {
+    /// correction: L/M/Q/H — чем выше, тем надёжнее читается с логотипом/вырезом в центре.
+    static func make(_ text: String, correction: String = "Q") -> [[Bool]] {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
-        filter.correctionLevel = "Q"
+        filter.correctionLevel = ["L", "M", "Q", "H"].contains(correction) ? correction : "Q"
         guard let image = filter.outputImage,
               let cg = CIContext().createCGImage(image, from: image.extent) else { return [] }
 
@@ -45,9 +46,10 @@ struct QRCodeView: View {
     var clearRadius: CGFloat = 0            // доля стороны: круг в центре без модулей (под логотип)
     private let matrix: [[Bool]]
 
-    init(text: String, colors: [Color]? = nil, clearRadius: CGFloat = 0) {
+    init(text: String, colors: [Color]? = nil, clearRadius: CGFloat = 0, correction: String? = nil) {
         self.text = text
-        self.matrix = QRMatrix.make(text)
+        // с логотипом/вырезом в центре берём максимальную коррекцию ошибок, иначе — обычную
+        self.matrix = QRMatrix.make(text, correction: correction ?? (clearRadius > 0 ? "H" : "Q"))
         if let colors { self.colors = colors }
         self.clearRadius = clearRadius
     }
