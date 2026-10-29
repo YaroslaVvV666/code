@@ -365,6 +365,7 @@ struct UserPageView: View {
     @State private var showContact = false
     /// Ступень шапки: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран (как в Telegram)
     @State private var stage = 0
+    @State private var showBigViewer = false        // полноэкранный просмотр аватарки (3-е положение) — отдельно от морфинга
     @State private var stageForward = true
     @State private var avatarTop: CGFloat = 0          // верх аватарки в координатах страницы
     @State private var pullArmed = true
@@ -489,15 +490,15 @@ struct UserPageView: View {
         .environmentObject(tracker)
         .overlay(alignment: .topLeading) {
             if let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe { avatarStage(profile) }
-            if stage == 2, let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe {
+            if showBigViewer, let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe {
                 Group {
                     if model.isMe {
                         AvatarViewer(name: profile.name, photos: profile.avatars, start: page,
                                      onReorder: { ids in Task { _ = await session.profile.reorderPhotos(ids) } },
                                      onDelete: { id in Task { _ = await session.profile.removePhoto(id) } },
-                                     onClose: { setStage(0) })
+                                     onClose: { exitAvatar() })
                     } else {
-                        AvatarViewer(name: profile.name, photos: profile.avatars, start: page, onClose: { setStage(0) })
+                        AvatarViewer(name: profile.name, photos: profile.avatars, start: page, onClose: { exitAvatar() })
                     }
                 }
                 .padding(.top, pageTop)                     // кнопки — под статус-баром
@@ -681,7 +682,16 @@ struct UserPageView: View {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             stage = n
             if n == 0 { page = 0 }
+            showBigViewer = (n == 2)          // полноэкранный просмотр — только в 3-м положении
         }
+    }
+
+    /// Выход из полноэкранного просмотра (3-е положение) в маленькую аватарку.
+    /// Вьюер плавно тает, а маленькая аватарка уже на своём месте под ним — без «прилёта не туда» и рывка.
+    private func exitAvatar() {
+        withAnimation(.easeOut(duration: 0.22)) { showBigViewer = false }
+        stage = 0                              // без морфинга: аватарка сразу в первом положении
+        page = 0
     }
 
     private func stepPhoto(_ delta: Int, count: Int) {

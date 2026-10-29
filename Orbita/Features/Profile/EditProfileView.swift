@@ -33,6 +33,7 @@ struct EditProfileView: View {
     @State private var saving = false
     @State private var errorText: String?
     @State private var showBirthday = false
+    @State private var showUnsaved = false
 
     private var s: Strings { Strings(lang: lang) }
     private var profile: UserProfile? { store.profile }
@@ -86,7 +87,7 @@ struct EditProfileView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(s.cancel) { dismiss() }
+                    Button(s.cancel) { if changed && valid { showUnsaved = true } else { dismiss() } }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: save) {
@@ -126,6 +127,12 @@ struct EditProfileView: View {
                 photoToDelete = nil
             }
             Button(s.cancel, role: .cancel) { photoToDelete = nil }
+        }
+        .confirmationDialog(s.t("Вы не сохранили изменения", "You have unsaved changes"),
+                            isPresented: $showUnsaved, titleVisibility: .visible) {
+            Button(s.t("Сохранить", "Save")) { save() }
+            Button(s.t("Сбросить", "Discard"), role: .destructive) { dismiss() }
+            Button(s.cancel, role: .cancel) {}
         }
     }
 

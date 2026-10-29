@@ -129,6 +129,7 @@ struct ProfileStyleScreen: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
+    @ObservedObject private var leaveGuard = LeaveGuard.shared
     @State private var color: Int?
     @State private var emoji: String?
     @State private var showEmoji = false
@@ -198,6 +199,10 @@ struct ProfileStyleScreen: View {
             .presentationDetents([.medium, .large])
             .presentationBackground(theme.sheet)
         }
+        // предупреждение «вы не сохранили»: пока есть несохранённые изменения — помечаем экран «грязным»
+        .onChange(of: changed) { _, v in leaveGuard.dirty = v }
+        .onChange(of: leaveGuard.saveSignal) { _, _ in apply() }   // «Сохранить» в предупреждении
+        .onDisappear { LeaveGuard.shared.dirty = false }
     }
 
     /// Высота превью — по содержимому (аватарка, имя, «в сети»), без пустой полосы до цветов

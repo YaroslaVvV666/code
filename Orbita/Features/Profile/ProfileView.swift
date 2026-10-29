@@ -359,9 +359,6 @@ struct ProfileView: View {
                     SettingsRow(icon: "at", tint: .blue, title: s.usernameLabel, value: usernameText,
                                 showsChevron: true) { route = .username }
                     SettingsDivider()
-                    SettingsRow(icon: "person.fill", tint: .indigo, title: s.myName, value: name,
-                                showsChevron: true) { showEdit = true }
-                    SettingsDivider()
                     SettingsRow(icon: "text.alignleft", tint: .orange, title: s.bioLabel, value: bioText,
                                 showsChevron: true) { route = .bio }
                 }

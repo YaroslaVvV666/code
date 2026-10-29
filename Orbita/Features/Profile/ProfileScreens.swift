@@ -10,8 +10,19 @@ struct ProfileSubScreen: View {
     @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @ObservedObject private var leave = LeaveGuard.shared
+    @State private var showUnsaved = false
 
     private var s: Strings { Strings(lang: lang) }
+
+    private func doLeave() {
+        leave.dirty = false
+        if let parent { session.profileRoute = parent } else { back() }
+    }
+
+    private func attemptLeave() {
+        if leave.dirty { showUnsaved = true } else { doLeave() }
+    }
 
     private var title: String {
         switch route {
@@ -82,7 +93,7 @@ struct ProfileSubScreen: View {
         VStack(spacing: 0) {
             HStack {
                 Button {
-                    if let parent { session.profileRoute = parent } else { back() }
+                    attemptLeave()
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .semibold))
@@ -113,7 +124,13 @@ struct ProfileSubScreen: View {
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.interactively)
         }
-        .edgeSwipeBack { if let parent { session.profileRoute = parent } else { back() } }
+        .edgeSwipeBack { attemptLeave() }
+        .confirmationDialog(s.t("Вы не сохранили изменения", "You have unsaved changes"),
+                            isPresented: $showUnsaved, titleVisibility: .visible) {
+            Button(s.t("Сохранить", "Save")) { leave.saveSignal += 1 }
+            Button(s.t("Сбросить", "Discard"), role: .destructive) { doLeave() }
+            Button(s.cancel, role: .cancel) {}
+        }
     }
 
     @ViewBuilder
