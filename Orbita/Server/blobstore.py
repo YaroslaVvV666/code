@@ -144,17 +144,23 @@ def _make_pool(cfg, media_dir):
 
 
 class PooledBlobStore:
-    """Маршрутизатор по нескольким хранилищам. Новые файлы пишутся в активный пул (по умолчанию последний),
-    старые читаются из того пула, где лежат — поэтому можно добавлять хранилища по мере заполнения, не трогая
-    уже загруженное. Интерфейс тот же (mid), сервер ничего не меняет. Где лежит каждый файл — помнит локатор
-    (таблица в основной БД), привязывается через bind_locator() на старте. Неизвестный файл (загружен до
-    пулов) читается из первого пула — им делают исходное хранилище, так что миграция не нужна.
+    """Маршрутизатор по нескольким хранилищам. Новые файлы пишутся в активный пул, старые читаются из того
+    пула, где лежат — поэтому можно добавлять хранилища по мере заполнения, не трогая уже загруженное.
+    Интерфейс тот же (mid), сервер ничего не меняет.
 
-    Пример ORBITA_POOLS:
-      [{"id":"p0","type":"s3","bucket":"orbita-1","endpoint":"https://storage.yandexcloud.net","region":"ru-central1"},
-       {"id":"p1","type":"s3","bucket":"orbita-2","endpoint":"https://storage.yandexcloud.net","region":"ru-central1"},
+    Активный пул выбирается АВТОМАТИЧЕСКИ: пулы заполняются по очереди — берём первый по списку, у которого
+    ещё есть место (использовано < limit). Когда он упирается в лимит, новые файлы сами идут в следующий.
+    У кого лимит не задан — считается бездонным (им обычно делают последний пул / свой ЦОД).
+    Принудительно зафиксировать активный пул можно переменной ORBITA_ACTIVE_POOL=<id>.
+
+    Где лежит каждый файл и его размер — помнит локатор (таблица в основной БД), привязывается через
+    bind_locator() на старте. Неизвестный файл (загружен до пулов) читается из первого пула — им делают
+    исходное хранилище, так что миграция не нужна.
+
+    Пример ORBITA_POOLS (limit_gb — предел пула в ГБ; у последнего можно не задавать):
+      [{"id":"p0","type":"s3","bucket":"orbita-1","endpoint":"https://storage.yandexcloud.net","region":"ru-central1","limit_gb":1000},
+       {"id":"p1","type":"s3","bucket":"orbita-2","endpoint":"https://storage.yandexcloud.net","region":"ru-central1","limit_gb":1000},
        {"id":"dc0","type":"local","dir":"/mnt/dc1/media"}]
-    Активный пул — последний, либо ORBITA_ACTIVE_POOL=<id>.
     """
     backend = "pooled"
 
@@ -162,24 +168,44 @@ class PooledBlobStore:
         cfgs = json.loads(pools_json)
         if not cfgs:
             raise ValueError("ORBITA_POOLS пуст")
-        self.pools, self.order = {}, []
+        self.pools, self.order, self.limit = {}, [], {}
         for c in cfgs:
             pid = str(c["id"])
             self.pools[pid] = _make_pool(c, media_dir)
             self.order.append(pid)
-        active = os.environ.get("ORBITA_ACTIVE_POOL", "").strip()
-        self.active_id = active if active in self.pools else self.order[-1]
-        # до bind_locator (на старте, до приёма запросов) — временная память
+            gb = c.get("limit_gb")
+            self.limit[pid] = int(float(gb) * 1024 ** 3) if gb else 0     # 0 — без лимита
+        self.pinned = os.environ.get("ORBITA_ACTIVE_POOL", "").strip() or None
+        self._pending = {}            # mid -> (pool_id, staged_path) между stage и commit/discard
+        self._cache = (None, 0.0)     # (выбранный пул, до какого времени кэш валиден)
+        # локатор; до bind_locator (на старте, до приёма запросов) — временная память
         mem = {}
-        self._get = mem.get
-        self._set = lambda mid, pool: mem.__setitem__(mid, pool)
-        self._del = lambda mid: mem.pop(mid, None)
+        self._loc_get = lambda mid: (mem.get(mid) or (None, 0))[0]
+        self._loc_record = lambda mid, pool, size: mem.__setitem__(mid, (pool, size))
+        self._loc_forget = lambda mid: mem.pop(mid, None)
+        self._pool_used = lambda pool: sum(s for p, s in mem.values() if p == pool)
 
-    def bind_locator(self, get, set_, delete):
-        self._get, self._set, self._del = get, set_, delete
+    def bind_locator(self, get, record, forget, used):
+        self._loc_get, self._loc_record, self._loc_forget, self._pool_used = get, record, forget, used
+
+    def _active(self):
+        if self.pinned and self.pinned in self.pools:
+            return self.pinned
+        import time
+        pick, exp = self._cache
+        if pick and time.time() < exp:
+            return pick
+        chosen = self.order[-1]                    # если все полны — льём в последний (отказывать в загрузке нельзя)
+        for pid in self.order:
+            lim = self.limit.get(pid)
+            if not lim or self._pool_used(pid) < lim:
+                chosen = pid
+                break
+        self._cache = (chosen, time.time() + 10)   # не считаем сумму на каждую загрузку — кэш на 10 c
+        return chosen
 
     def _pool_for(self, mid):
-        return self.pools.get(self._get(mid)) or self.pools[self.order[0]]
+        return self.pools.get(self._loc_get(mid)) or self.pools[self.order[0]]
 
     def exists(self, mid):
         return self._pool_for(mid).exists(mid)
@@ -189,17 +215,27 @@ class PooledBlobStore:
 
     def remove(self, mid):
         self._pool_for(mid).remove(mid)
-        self._del(mid)
+        self._loc_forget(mid)
 
     def stage(self, mid):
-        return self.pools[self.active_id].stage(mid)
+        pid = self._active()
+        path = self.pools[pid].stage(mid)
+        self._pending[mid] = (pid, path)
+        return path
 
     def commit(self, mid):
-        self.pools[self.active_id].commit(mid)
-        self._set(mid, self.active_id)          # запоминаем пул именно после успешной заливки
+        pid, path = self._pending.pop(mid, (self._active(), None))
+        try:
+            size = os.path.getsize(path) if path else 0        # размер снимаем до commit: S3 удалит временный файл
+        except OSError:
+            size = 0
+        self.pools[pid].commit(mid)
+        self._loc_record(mid, pid, size)           # запоминаем пул и размер после успешной заливки
+        self._cache = (None, 0.0)                   # заполнение изменилось — пересчитать активный пул
 
     def discard(self, mid):
-        self.pools[self.active_id].discard(mid)
+        pid, _ = self._pending.pop(mid, (self._active(), None))
+        self.pools[pid].discard(mid)
 
 
 class _S3Reader:

@@ -521,19 +521,24 @@ def run(sql, args=()):
 # Индекс «какой файл в каком пуле хранилища» (для PooledBlobStore). Храним в основной БД — общий для всех
 # воркеров. Привязываем локатор к STORE только если он — пул (у обычного одиночного хранилища метода нет).
 if hasattr(STORE, "bind_locator"):
-    DB.execute("CREATE TABLE IF NOT EXISTS blob_pool(mid TEXT PRIMARY KEY, pool TEXT NOT NULL)")
+    DB.execute("CREATE TABLE IF NOT EXISTS blob_pool(mid TEXT PRIMARY KEY, pool TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0)")
+    DB.execute("CREATE INDEX IF NOT EXISTS idx_blob_pool_pool ON blob_pool(pool)")
 
     def _blob_pool_get(mid):
         r = q1("SELECT pool FROM blob_pool WHERE mid = ?", (mid,))
         return r["pool"] if r else None
 
-    def _blob_pool_set(mid, pool):
-        run("INSERT OR REPLACE INTO blob_pool(mid, pool) VALUES (?, ?)", (mid, pool))
+    def _blob_pool_record(mid, pool, size):
+        run("INSERT OR REPLACE INTO blob_pool(mid, pool, size) VALUES (?, ?, ?)", (mid, pool, int(size)))
 
-    def _blob_pool_del(mid):
+    def _blob_pool_forget(mid):
         run("DELETE FROM blob_pool WHERE mid = ?", (mid,))
 
-    STORE.bind_locator(_blob_pool_get, _blob_pool_set, _blob_pool_del)
+    def _blob_pool_used(pool):
+        r = q1("SELECT COALESCE(SUM(size), 0) AS u FROM blob_pool WHERE pool = ?", (pool,))
+        return int(r["u"]) if r else 0
+
+    STORE.bind_locator(_blob_pool_get, _blob_pool_record, _blob_pool_forget, _blob_pool_used)
 
 
 RATELIMIT = os.environ.get("ORBITA_RATELIMIT", "1") != "0"
