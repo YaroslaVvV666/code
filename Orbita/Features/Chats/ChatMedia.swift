@@ -585,6 +585,9 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 /// Живое изображение с камеры
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
+    /// Явное зеркало превью: true — отражать (фронталка «как в зеркале»), nil — автоповедение системы.
+    /// Нужно, чтобы живое превью совпадало с тем, как записывается кружок.
+    var mirrored: Bool? = nil
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
@@ -595,10 +598,17 @@ struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
+        applyMirror(view)
         return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIView(_ uiView: PreviewView, context: Context) { applyMirror(uiView) }
+
+    private func applyMirror(_ view: PreviewView) {
+        guard let mirrored, let c = view.previewLayer.connection, c.isVideoMirroringSupported else { return }
+        c.automaticallyAdjustsVideoMirroring = false
+        c.isVideoMirrored = mirrored
+    }
 }
 
 /// Видео в круге/прямоугольнике (воспроизведение кружков)

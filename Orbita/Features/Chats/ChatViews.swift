@@ -1247,7 +1247,10 @@ struct ChatScreen: View {
             .padding(.horizontal, 14).frame(height: 44)
             .glassCapsule()
             Button(s.t("Отмена", "Cancel")) { endSearch() }
+                .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(theme.accentColor)
+                .padding(.horizontal, 16).frame(height: 44)
+                .glassCapsule(interactive: true)       // тот же тёмный стеклянный фон, что у поля
         }
         .padding(.horizontal, 12)
             searchFilters
@@ -1299,15 +1302,19 @@ struct ChatScreen: View {
             .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private func chipLabel(_ title: String, icon: String?, on: Bool) -> some View {
-        HStack(spacing: 5) {
+        let content = HStack(spacing: 5) {
             if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)) }
             Text(title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
         }
         .foregroundStyle(on ? Color.white : theme.text)
-        .padding(.horizontal, 12).frame(height: 32)
-        .background(on ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
-        .overlay(Capsule().stroke(theme.stroke, lineWidth: on ? 0 : 0.5))
+        .padding(.horizontal, 14).frame(height: 36)
+        if on {
+            content.background(theme.accent, in: Capsule())
+        } else {
+            content.glassCapsule(interactive: true)   // тот же тёмный стеклянный фон, что у поля и «Отмена»
+        }
     }
 
     private var searchNavBar: some View {

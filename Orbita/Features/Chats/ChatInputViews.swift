@@ -674,10 +674,9 @@ struct ChatInputBar: View {
             let screenH = UIScreen.main.bounds.height
             let side: CGFloat = 288
             ZStack {
-                CameraPreview(session: circle.session)
+                CameraPreview(session: circle.session, mirrored: circle.isFront)   // фронталка — зеркало, как и в записи
                     .frame(width: side, height: side)
                     .clipShape(Circle())
-                    .scaleEffect(x: circle.isFront ? -1 : 1, y: 1)       // фронталка — зеркало
                     .overlay {
                         // кольцо-таймер: заполняется за 60 секунд и «дышит» — запись на замке выглядит живой
                         CircleRing(color: willCancel ? theme.danger : theme.accentColor,
