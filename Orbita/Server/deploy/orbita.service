@@ -10,6 +10,16 @@ Environment=ORBITA_PORT=8080
 Environment=ORBITA_DATA=/var/lib/orbita
 Environment=ORBITA_MASTER_KEY_FILE=/etc/orbita.key
 Environment=ORBITA_DEMO=0
+# --- Настоящие push-уведомления Apple (APNs) ---
+# Включатся автоматически, как только будут заданы все 4 значения и положен файл ключа.
+# Нужен платный Apple Developer Program: developer.apple.com → Keys → «+» → Apple Push Notifications service (APNs) → скачать AuthKey_XXXXXXXXXX.p8
+# Положите ключ в /etc/orbita-apns.p8 (chmod 600, chown orbita) и раскомментируйте строки ниже:
+#Environment=ORBITA_APNS_KEY_FILE=/etc/orbita-apns.p8
+#Environment=ORBITA_APNS_KEY_ID=XXXXXXXXXX
+#Environment=ORBITA_APNS_TEAM_ID=XXXXXXXXXX
+#Environment=ORBITA_APNS_TOPIC=com.yourcompany.Orbita
+# Показывать текст сообщения в уведомлении (0 — скрыть, только «Новое сообщение»):
+#Environment=ORBITA_PUSH_PREVIEW=1
 ExecStart=/opt/orbita/venv/bin/python server.py
 Restart=always
 RestartSec=2
