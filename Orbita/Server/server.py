@@ -43,6 +43,12 @@ from orbita_crypto import (COL, HEADER, KeyRing, decrypt_range, encrypt_stream, 
 
 HOST = os.environ.get("ORBITA_HOST", "0.0.0.0")
 PORT = int(os.environ.get("ORBITA_PORT", "8080"))
+# Сколько доверенных обратных прокси перед сервером (для настоящего IP клиента из X-Forwarded-For).
+# По умолчанию 1 — деплой за Caddy/nginx. Если сервер смотрит в интернет напрямую — поставьте 0.
+try:
+    TRUSTED_PROXIES = max(0, int(os.environ.get("ORBITA_TRUSTED_PROXIES", "1")))
+except ValueError:
+    TRUSTED_PROXIES = 1
 BASE = os.path.dirname(os.path.abspath(__file__))
 # Данные и ключ живут ВНЕ папки проекта (~/.orbita), чтобы замена папки на новую версию их не стирала.
 STATE_DIR = os.environ.get("ORBITA_HOME", os.path.join(os.path.expanduser("~"), ".orbita"))
@@ -110,7 +116,6 @@ if POSTGRES:
     import psycopg2 as _psycopg2
     INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
 
-import pickle
 import blobstore
 import sharedstate
 # Эфемерное состояние реального времени (звонки, набор, QR): в памяти (по умолчанию) или в Redis (REDIS_URL).
@@ -449,6 +454,25 @@ def u16len(s):
 
 def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# Сериализация кэша авторизации — JSON вместо pickle: даже если во внешний кэш (Redis)
+# кто-то запишет мусор, при загрузке не выполнится чужой код (pickle умеет исполнять, JSON — нет).
+# Байтовые поля (зашифрованные BLOB) переносим через base64 с явным маркером.
+def cache_dumps(r):
+    def pack(v):
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            return {"__b64__": base64.b64encode(bytes(v)).decode()}
+        return v
+    return json.dumps({k: pack(v) for k, v in r.items()}).encode()
+
+
+def cache_loads(blob):
+    def unpack(v):
+        if isinstance(v, dict) and "__b64__" in v:
+            return base64.b64decode(v["__b64__"])
+        return v
+    return {k: unpack(v) for k, v in json.loads(blob.decode()).items()}
 
 
 # Кэш в пределах одного запроса (на поток): одни и те же блокировки, приватность и имена в контактах
@@ -1137,8 +1161,14 @@ class Handler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
     def client_ip(self):
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return (forwarded or self.client_address[0])[:45]
+        # X-Forwarded-For клиент может подделать (левый край — его значение), поэтому НЕ берём первый элемент.
+        # За обратным прокси (Caddy/nginx) настоящий IP — тот, что подставил НАШ прокси: N-й справа,
+        # где N = число доверенных прокси (ORBITA_TRUSTED_PROXIES, по умолчанию 1). Напрямую (N=0) — только сокет.
+        if TRUSTED_PROXIES > 0:
+            parts = [p.strip() for p in self.headers.get("X-Forwarded-For", "").split(",") if p.strip()]
+            if parts:
+                return parts[-min(TRUSTED_PROXIES, len(parts))][:45]
+        return self.client_address[0][:45]
 
     def current_user(self):
         header = self.headers.get("Authorization", "")
@@ -1150,7 +1180,7 @@ class Handler(BaseHTTPRequestHandler):
             blob = SHARED.cache_get(ckey)
             if blob is not None:
                 try:
-                    r = pickle.loads(blob)
+                    r = cache_loads(blob)
                 except Exception:
                     r = None
                 # кэш действителен, только если пользователь ничего не менял с момента кэширования:
@@ -1160,7 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
                         now = time.time()
                         run("UPDATE sessions SET last_active = ? WHERE id = ?", (now, r["session_id"]))
                         r["session_last"] = now
-                        SHARED.cache_set(ckey, pickle.dumps(r), AUTH_CACHE_TTL)
+                        SHARED.cache_set(ckey, cache_dumps(r), AUTH_CACHE_TTL)
                     return r
         r = q1("SELECT u.*, s.id AS session_id, s.last_active AS session_last FROM sessions s "
                "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (th,))
@@ -1173,7 +1203,7 @@ class Handler(BaseHTTPRequestHandler):
                 r["session_last"] = now
             if AUTH_CACHE_TTL:
                 r["_uver"] = SHARED.ver_get("uver:" + r["id"])
-                SHARED.cache_set(ckey, pickle.dumps(r), AUTH_CACHE_TTL)
+                SHARED.cache_set(ckey, cache_dumps(r), AUTH_CACHE_TTL)
         return r
 
     def dispatch(self, method):

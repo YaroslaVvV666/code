@@ -10,6 +10,9 @@ Environment=ORBITA_PORT=8080
 Environment=ORBITA_DATA=/var/lib/orbita
 Environment=ORBITA_MASTER_KEY_FILE=/etc/orbita.key
 Environment=ORBITA_DEMO=0
+# Сервер за одним обратным прокси (Caddy) — настоящий IP клиента берётся из X-Forwarded-For.
+# Если сервер смотрит в интернет напрямую (без Caddy) — поставьте 0, иначе IP можно подделать.
+Environment=ORBITA_TRUSTED_PROXIES=1
 # --- Настоящие push-уведомления Apple (APNs) ---
 # Включатся автоматически, как только будут заданы все 4 значения и положен файл ключа.
 # Нужен платный Apple Developer Program: developer.apple.com → Keys → «+» → Apple Push Notifications service (APNs) → скачать AuthKey_XXXXXXXXXX.p8

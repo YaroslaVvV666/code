@@ -283,7 +283,7 @@ class RedisShared:
     def __init__(self, url):
         import redis
         self.r = redis.Redis.from_url(url, decode_responses=True)
-        self.rb = redis.Redis.from_url(url, decode_responses=False)   # для двоичного кэша (pickle/тела ответов)
+        self.rb = redis.Redis.from_url(url, decode_responses=False)   # для двоичного кэша (JSON-блобы / тела ответов)
         self.r.ping()
         self._tls = threading.local()
         self.hub = _WaiterHub()
