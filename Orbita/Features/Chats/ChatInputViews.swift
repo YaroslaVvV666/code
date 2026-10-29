@@ -824,7 +824,7 @@ struct ChatInputBar: View {
 
     private func showPanel() {
         let panel = EmojiStickerPanel(
-            packs: model.packs,
+            packs: model.packs.filter { !$0.stickers.isEmpty },   // в панели отправки пустые наборы не показываем — только в редакторе наборов
             onEmoji: { controller.insert($0) },
             onBackspace: { controller.backspace() },
             onSticker: { sticker in

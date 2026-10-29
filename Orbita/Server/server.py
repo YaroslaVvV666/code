@@ -3753,7 +3753,9 @@ def list_stickers(req, me):
     """Встроенные наборы + свои и добавленные (в порядке добавления)"""
     rows = q("SELECT p.* FROM sticker_installs i JOIN user_sticker_packs p ON p.id = i.pack_id "
              "WHERE i.user_id = ? ORDER BY i.created_at DESC", (me["id"],))
-    mine = [j for j in (user_pack_json(r, me["id"]) for r in rows) if j["stickers"]]
+    # свои наборы показываем всегда — даже пустые (чтобы был виден новый набор и кнопка «+»);
+    # чужие добавленные — только если в них есть стикеры
+    mine = [j for j in (user_pack_json(r, me["id"]) for r in rows) if j["stickers"] or j["mine"]]
     req.send_json(200, {"packs": mine + STICKER_PACKS})
 
 
