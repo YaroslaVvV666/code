@@ -439,9 +439,20 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
             if !session.isRunning { session.startRunning() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 guard let self, self.startRequested, !output.isRecording else { return }
+                self.applyMirror()
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
                 output.startRecording(to: file, recordingDelegate: self)
             }
+        }
+    }
+
+    /// Кружок пишется зеркально (как видишь себя в превью) — иначе кадр «перевёрнут» и выглядит непривычно.
+    private func applyMirror() {
+        guard let c = output.connection(with: .video) else { return }
+        if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+        if c.isVideoMirroringSupported {
+            c.automaticallyAdjustsVideoMirroring = false
+            c.isVideoMirrored = isFront
         }
     }
 
@@ -454,6 +465,7 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         startedAt = nil
         requestedAt = Date()
         configureAudio()
+        applyMirror()
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
         output.startRecording(to: file, recordingDelegate: self)
         isRecording = true
