@@ -7,7 +7,7 @@ enum AvatarTone {
     /// Средний цвет аватарки — его ставим на фон за QR-кодом.
     static func load(_ avatarID: String?) async -> Color? {
         guard let id = avatarID, let url = ServerConfig.mediaURL(id),
-              let image = await ImageCache.shared.load(url: url, maxPixel: 60, persistKey: id),
+              let image = await ImageCache.shared.load(url, maxPixel: 60, persistKey: id),
               let cg = image.cgImage else { return nil }
         let w = 10, h = 10
         var px = [UInt8](repeating: 0, count: w * h * 4)
