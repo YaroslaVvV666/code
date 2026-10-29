@@ -621,13 +621,17 @@ struct ChatInputBar: View {
             } else {
                 Spacer()
                 HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                    Text(willCancel ? s.t("Отпустите — отмена", "Release to cancel") : s.slideToCancel)
+                    Image(systemName: "chevron.left").opacity(willCancel ? 0 : 1)
+                    Text(willCancel ? s.t("Отпусти", "Release") : s.slideToCancel)
+                        .contentTransition(.interpolate)
                 }
-                .font(.system(size: 15))
+                .font(.system(size: 15, weight: willCancel ? .semibold : .regular))
                 .foregroundStyle(willCancel ? theme.danger : theme.textSecondary)
+                .scaleEffect(willCancel ? 1.12 : 1, anchor: .trailing)
+                // пока не дотянул — текст едет за пальцем; дотянул — замирает и становится красным «Отпусти»
                 .offset(x: max(-60, min(0, slide / 3)))
                 .padding(.trailing, 14)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: willCancel)
             }
         }
         .padding(.leading, 14)
@@ -657,10 +661,14 @@ struct ChatInputBar: View {
             if locked {
                 cancelLockedButton
             } else {
-                Text(willCancel ? s.t("Отпустите — отмена", "Release to cancel") : s.slideToCancel)
-                    .font(.system(size: 15))
+                Text(willCancel ? s.t("Отпусти", "Release") : s.slideToCancel)
+                    .contentTransition(.interpolate)
+                    .font(.system(size: 15, weight: willCancel ? .semibold : .regular))
                     .foregroundStyle(willCancel ? theme.danger : theme.textSecondary)
+                    .scaleEffect(willCancel ? 1.12 : 1, anchor: .trailing)
+                    .offset(x: max(-60, min(0, slide / 3)))
                     .padding(.trailing, 14)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: willCancel)
             }
         }
         .padding(.leading, 14)
