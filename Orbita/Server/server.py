@@ -451,6 +451,27 @@ ensure_column("groups", "history", "history INTEGER NOT NULL DEFAULT 1")
 ensure_column("group_members", "muted", "muted INTEGER NOT NULL DEFAULT 0")
 DB.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_group_handle ON groups(handle)")
 
+# ---------- реклама: кабинет рекламодателя (этап 2) + вставка в ленту (этап 1) ----------
+DB.execute("""CREATE TABLE IF NOT EXISTS ad_wallet(
+  user_id TEXT PRIMARY KEY, balance_cents INTEGER NOT NULL DEFAULT 0)""")
+DB.execute("""CREATE TABLE IF NOT EXISTS ads(
+  id TEXT PRIMARY KEY, advertiser TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+  media_id TEXT, link TEXT, cta TEXT,
+  target_countries TEXT, target_interests TEXT,          -- JSON-списки; пусто = показывать всем
+  pricing TEXT NOT NULL,                                 -- 'cpm' (за 1000 показов) | 'cpc' (за клик)
+  rate_cents INTEGER NOT NULL,                           -- цена в копейках за 1000 показов / за клик
+  budget_cents INTEGER NOT NULL, spent_cents INTEGER NOT NULL DEFAULT 0,
+  daily_cap_cents INTEGER NOT NULL DEFAULT 0,            -- 0 = без дневного лимита
+  status TEXT NOT NULL DEFAULT 'pending',                -- pending|active|paused|rejected|depleted
+  impressions INTEGER NOT NULL DEFAULT 0, clicks INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL, start_at REAL, end_at REAL)""")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_ads_status ON ads(status)")
+DB.execute("""CREATE TABLE IF NOT EXISTS ad_spend(ad_id TEXT NOT NULL, day TEXT NOT NULL,
+  cents INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(ad_id, day))""")
+DB.execute("""CREATE TABLE IF NOT EXISTS ad_seen(user_id TEXT NOT NULL, ad_id TEXT NOT NULL,
+  seen INTEGER NOT NULL DEFAULT 0, last REAL NOT NULL DEFAULT 0, charged_at REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY(user_id, ad_id))""")
+
 
 # ---------- утилиты ----------
 
@@ -3074,7 +3095,8 @@ def list_posts(req, me):
              (before, me["id"], me["id"], me["id"], me["id"], 150 if params.get("sort") == "for_you" else limit))
     if params.get("sort") == "for_you":
         rows = ranked_feed(me, rows, limit)
-    req.send_json(200, {"posts": posts_json(rows, me["id"])})
+    posts = posts_json(rows, me["id"])
+    req.send_json(200, {"posts": posts, "ads": pick_feed_ads(me["id"], len(posts))})
 
 
 def parse_post_body(d, me):
@@ -3167,6 +3189,275 @@ def create_post(req, me):
             run("ROLLBACK")
             raise
     req.send_json(201, post_json(q1("SELECT * FROM posts WHERE id = ?", (pid,)), uid))
+
+
+# ======================= РЕКЛАМА =======================
+# Этап 1: реклама вставляется в ленту между постами, считаются показы/клики, маркировка «Реклама».
+# Этап 2: кабинет рекламодателя — создать кампанию, пополнить баланс, выбрать аудиторию/бюджет, списание за показы/клики.
+# Юр. примечание (в РФ): интернет-реклама подлежит маркировке через ОРД и передаче в ЕРИР (это вне кода, к юристу).
+
+AD_FIRST_SLOT = 3                 # первый рекламный слот — после 4-го поста
+AD_EVERY = 6                      # дальше каждые 6 постов
+AD_FREQ_WINDOW = 6 * 3600         # как часто один юзер может приносить платный показ одного объявления
+MAX_AD_BUDGET = 100_000_000       # потолок бюджета, копеек (защита от опечаток)
+
+
+def ad_day():
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def ad_balance(uid):
+    r = q1("SELECT balance_cents FROM ad_wallet WHERE user_id = ?", (uid,))
+    return r["balance_cents"] if r else 0
+
+
+def _json_list(s):
+    try:
+        v = json.loads(s) if s else []
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def ad_spent_today(ad_id):
+    r = q1("SELECT cents FROM ad_spend WHERE ad_id = ? AND day = ?", (ad_id, ad_day()))
+    return r["cents"] if r else 0
+
+
+def ad_eligible(uid, ad, interests):
+    if ad["status"] != "active":
+        return False
+    now = time.time()
+    if ad["start_at"] and now < ad["start_at"]:
+        return False
+    if ad["end_at"] and now > ad["end_at"]:
+        return False
+    if ad["spent_cents"] >= ad["budget_cents"] or ad_balance(ad["advertiser"]) <= 0:
+        return False
+    if ad["daily_cap_cents"] and ad_spent_today(ad["id"]) >= ad["daily_cap_cents"]:
+        return False
+    want = _json_list(ad["target_interests"])
+    if want and not (set(want) & interests):            # заданы интересы и ни один не совпал
+        return False
+    if uid == ad["advertiser"]:                         # свою рекламу себе не показываем
+        return False
+    return True
+
+
+def ad_public_json(ad):
+    """То, что видит зритель: карточка с бейджем «Реклама»."""
+    m = q1("SELECT * FROM media WHERE id = ?", (ad["media_id"],)) if ad["media_id"] else None
+    return {"ad_id": ad["id"], "title": ad["title"], "body": ad["body"] or "",
+            "media": media_json(m) if m else None, "link": ad["link"] or "", "cta": ad["cta"] or "",
+            "advertiser": user_brief(ad["advertiser"])}
+
+
+def pick_feed_ads(uid, n_posts):
+    """Выбирает объявления и позиции вставки для текущей страницы ленты."""
+    if n_posts < AD_FIRST_SLOT:
+        return []
+    slots = list(range(AD_FIRST_SLOT, n_posts, AD_EVERY))
+    if not slots:
+        return []
+    interests = set(interests_of(uid) or [])
+    cands = [a for a in q("SELECT * FROM ads WHERE status = 'active' ORDER BY created_at DESC LIMIT 200")
+             if ad_eligible(uid, a, interests)]
+    if not cands:
+        return []
+    # вес = ставка (кто больше платит — чаще показывается), плюс лёгкая случайность; без повторов в одной странице
+    out, used = [], set()
+    for slot in slots:
+        pool = [a for a in cands if a["id"] not in used]
+        if not pool:
+            break
+        weights = [max(1, a["rate_cents"]) * (0.7 + random.random() * 0.6) for a in pool]
+        pick = max(zip(pool, weights), key=lambda z: z[1])[0]
+        used.add(pick["id"])
+        j = ad_public_json(pick)
+        j["slot"] = slot                         # вставить после поста с этим индексом (0-based)
+        out.append(j)
+    return out
+
+
+def _charge_ad(ad, cents):
+    """Списать с бюджета кампании и с кошелька рекламодателя; выключить при исчерпании."""
+    cents = max(0, int(cents))
+    if cents == 0:
+        return
+    run("UPDATE ads SET spent_cents = spent_cents + ? WHERE id = ?", (cents, ad["id"]))
+    run("INSERT INTO ad_spend(ad_id, day, cents) VALUES (?,?,?) "
+        "ON CONFLICT(ad_id, day) DO UPDATE SET cents = cents + ?", (ad["id"], ad_day(), cents, cents))
+    run("INSERT INTO ad_wallet(user_id, balance_cents) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET balance_cents = balance_cents - ?", (ad["advertiser"], -cents, cents))
+    fresh = q1("SELECT spent_cents, budget_cents FROM ads WHERE id = ?", (ad["id"],))
+    if fresh and (fresh["spent_cents"] >= fresh["budget_cents"] or ad_balance(ad["advertiser"]) <= 0):
+        run("UPDATE ads SET status = 'depleted' WHERE id = ? AND status = 'active'", (ad["id"],))
+
+
+@route("POST", r"/v1/ads/([a-f0-9]+)/impression")
+def ad_impression(req, me, ad_id):
+    ad = q1("SELECT * FROM ads WHERE id = ?", (ad_id,))
+    if not ad:
+        raise ApiError(404, "not_found")
+    now = time.time()
+    with LOCK:
+        seen = q1("SELECT * FROM ad_seen WHERE user_id = ? AND ad_id = ?", (me["id"], ad_id))
+        run("INSERT INTO ad_seen(user_id, ad_id, seen, last) VALUES (?,?,1,?) "
+            "ON CONFLICT(user_id, ad_id) DO UPDATE SET seen = seen + 1, last = ?", (me["id"], ad_id, now, now))
+        run("UPDATE ads SET impressions = impressions + 1 WHERE id = ?", (ad_id,))
+        # платный показ не чаще раза в окно на пользователя (анти-накрутка), только для активной кампании и CPM
+        chargeable = ad["status"] == "active" and ad["pricing"] == "cpm" and (not seen or now - seen["charged_at"] >= AD_FREQ_WINDOW)
+        if chargeable:
+            run("UPDATE ad_seen SET charged_at = ? WHERE user_id = ? AND ad_id = ?", (now, me["id"], ad_id))
+            _charge_ad(ad, ad["rate_cents"] / 1000.0)
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/ads/([a-f0-9]+)/click")
+def ad_click(req, me, ad_id):
+    ad = q1("SELECT * FROM ads WHERE id = ?", (ad_id,))
+    if not ad:
+        raise ApiError(404, "not_found")
+    with LOCK:
+        run("UPDATE ads SET clicks = clicks + 1 WHERE id = ?", (ad_id,))
+        if ad["status"] == "active" and ad["pricing"] == "cpc":
+            _charge_ad(ad, ad["rate_cents"])
+    req.send_json(200, {"ok": True, "link": ad["link"] or ""})
+
+
+# ---------- кабинет рекламодателя (этап 2) ----------
+
+def ad_owner_json(ad):
+    j = ad_public_json(ad)
+    j.update({"status": ad["status"], "pricing": ad["pricing"], "rate_cents": ad["rate_cents"],
+              "budget_cents": ad["budget_cents"], "spent_cents": ad["spent_cents"],
+              "daily_cap_cents": ad["daily_cap_cents"], "impressions": ad["impressions"],
+              "clicks": ad["clicks"], "target_interests": _json_list(ad["target_interests"]),
+              "created_at": ad["created_at"]})
+    return j
+
+
+@route("POST", r"/v1/ads")
+def ad_create(req, me):
+    uid = me["id"]
+    rate_limit("ad:" + uid, 30, 3600)
+    d = req.body_json()
+    title = " ".join(str(d.get("title", "")).split())[:100]
+    if not title:
+        raise ApiError(400, "bad_value")
+    body = str(d.get("body", ""))[:600]
+    pricing = d.get("pricing") if d.get("pricing") in ("cpm", "cpc") else "cpm"
+    try:
+        rate = max(1, int(d.get("rate_cents", 0)))
+        budget = max(1, min(int(d.get("budget_cents", 0)), MAX_AD_BUDGET))
+        daily = max(0, min(int(d.get("daily_cap_cents", 0)), budget))
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    media_id = str(d.get("media_id", "")) or None
+    if media_id and not q1("SELECT 1 FROM media WHERE id = ? AND owner = ?", (media_id, uid)):
+        raise ApiError(400, "media_not_found")
+    link = str(d.get("link", ""))[:500]
+    if link and not link.startswith(("http://", "https://", "orbita://")):
+        raise ApiError(400, "bad_link")
+    cta = " ".join(str(d.get("cta", "")).split())[:30]
+    interests = [str(x)[:40] for x in d.get("target_interests", [])][:20] if isinstance(d.get("target_interests"), list) else []
+    pid = uuid.uuid4().hex
+    run("INSERT INTO ads(id, advertiser, title, body, media_id, link, cta, target_countries, target_interests, "
+        "pricing, rate_cents, budget_cents, daily_cap_cents, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (pid, uid, title, body, media_id, link, cta, None, json.dumps(interests, ensure_ascii=False),
+         pricing, rate, budget, daily, "pending", time.time()))        # на модерации до одобрения админом
+    req.send_json(201, ad_owner_json(q1("SELECT * FROM ads WHERE id = ?", (pid,))))
+
+
+@route("GET", r"/v1/ads/mine")
+def ad_mine(req, me):
+    rows = q("SELECT * FROM ads WHERE advertiser = ? ORDER BY created_at DESC LIMIT 100", (me["id"],))
+    req.send_json(200, {"ads": [ad_owner_json(a) for a in rows], "balance_cents": ad_balance(me["id"])})
+
+
+@route("POST", r"/v1/ads/([a-f0-9]+)/pause")
+def ad_pause(req, me, ad_id):
+    ad = q1("SELECT * FROM ads WHERE id = ? AND advertiser = ?", (ad_id, me["id"]))
+    if not ad:
+        raise ApiError(404, "not_found")
+    if ad["status"] == "active":
+        run("UPDATE ads SET status = 'paused' WHERE id = ?", (ad_id,))
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/ads/([a-f0-9]+)/resume")
+def ad_resume(req, me, ad_id):
+    ad = q1("SELECT * FROM ads WHERE id = ? AND advertiser = ?", (ad_id, me["id"]))
+    if not ad:
+        raise ApiError(404, "not_found")
+    if ad["status"] == "paused" and ad["spent_cents"] < ad["budget_cents"] and ad_balance(me["id"]) > 0:
+        run("UPDATE ads SET status = 'active' WHERE id = ?", (ad_id,))
+    req.send_json(200, {"ok": True})
+
+
+@route("DELETE", r"/v1/ads/([a-f0-9]+)")
+def ad_delete(req, me, ad_id):
+    run("DELETE FROM ads WHERE id = ? AND advertiser = ?", (ad_id, me["id"]))
+    req.send_json(200, {"ok": True})
+
+
+@route("GET", r"/v1/ads/wallet")
+def ad_wallet_get(req, me):
+    req.send_json(200, {"balance_cents": ad_balance(me["id"])})
+
+
+@route("POST", r"/v1/ads/wallet/topup")
+def ad_wallet_topup(req, me):
+    # ПЛЕЙСХОЛДЕР: в бою здесь должен быть платёжный провайдер (ЮKassa/Stripe), который подтверждает оплату,
+    # и только по его вебхуку начисляется баланс. Пока — прямое начисление (для теста/внутреннего использования).
+    try:
+        amount = max(1, min(int(req.body_json().get("amount_cents", 0)), MAX_AD_BUDGET))
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    run("INSERT INTO ad_wallet(user_id, balance_cents) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET balance_cents = balance_cents + ?", (me["id"], amount, amount))
+    req.send_json(200, {"balance_cents": ad_balance(me["id"])})
+
+
+# ---------- модерация рекламы (админ) ----------
+
+@route("GET", r"/v1/admin/ads", auth=False)
+def admin_ads(req, me):
+    require_admin(req)
+    status = req.query().get("status")
+    rows = (q("SELECT * FROM ads WHERE status = ? ORDER BY created_at DESC LIMIT 200", (status,)) if status
+            else q("SELECT * FROM ads ORDER BY created_at DESC LIMIT 200"))
+    req.send_json(200, {"ads": [ad_owner_json(a) for a in rows]})
+
+
+@route("POST", r"/v1/admin/ads/([a-f0-9]+)/approve", auth=False)
+def admin_ad_approve(req, me, ad_id):
+    require_admin(req)
+    run("UPDATE ads SET status = 'active' WHERE id = ? AND status IN ('pending','paused','rejected')", (ad_id,))
+    admin_audit(req, "ad_approve", ad_id)
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/admin/ads/([a-f0-9]+)/reject", auth=False)
+def admin_ad_reject(req, me, ad_id):
+    require_admin(req)
+    run("UPDATE ads SET status = 'rejected' WHERE id = ?", (ad_id,))
+    admin_audit(req, "ad_reject", ad_id)
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/admin/ads/credit/([A-Za-z0-9\-]+)", auth=False)
+def admin_ad_credit(req, me, uid):
+    require_admin(req)
+    try:
+        amount = int(req.body_json().get("amount_cents", 0))
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    run("INSERT INTO ad_wallet(user_id, balance_cents) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET balance_cents = balance_cents + ?", (uid, amount, amount))
+    admin_audit(req, "ad_credit:%d" % amount, uid)
+    req.send_json(200, {"balance_cents": ad_balance(uid)})
 
 
 @route("PUT", r"/v1/posts/([a-f0-9]+)")
