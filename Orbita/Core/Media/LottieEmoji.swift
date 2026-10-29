@@ -84,10 +84,12 @@ final class LottieSnapshots {
 final class EmojiFrames {
     static let shared = EmojiFrames()
     static let fps: Double = 30
-    /// Кадры рисуются под этот размер в точках (ряд реакций); для эмодзи меньше — уменьшаются
-    static let pointSize: CGFloat = 34
-    /// Эмодзи больше этого размера играют через Lottie: кадры под них были бы размытыми
-    static let maxSize: CGFloat = 48
+    /// Кадры рисуются под этот размер в точках. Берём с запасом, чтобы и крупные эмодзи-сообщения
+    /// (одиночный эмодзи — до ~140 pt) играли готовыми кадрами, а не тяжёлым Lottie вживую.
+    static let pointSize: CGFloat = 72
+    /// До этого размера эмодзи играют готовыми кадрами (быстро, без нагрузки на главный поток).
+    /// Крупнее — пришлось бы сильно растягивать, тогда уже Lottie. Одиночный эмодзи-сообщение (~140 pt) ещё внутри.
+    static let maxSize: CGFloat = 150
     /// Разжатие кадров — в фоне, на главный поток попадает готовая картинка
     static let decodeQueue = DispatchQueue(label: "orbita.emoji-frames", qos: .userInitiated, attributes: .concurrent)
 
