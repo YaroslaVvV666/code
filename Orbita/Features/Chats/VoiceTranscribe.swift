@@ -26,6 +26,9 @@ final class VoiceTranscriber: ObservableObject {
 
     func state(_ id: String) -> State? { states[id] }
 
+    /// Ошибка расшифровки с готовым текстом для показа (String сам по себе не Error)
+    private struct Fail: Error { let message: String }
+
     /// Нажатие на кнопку: запустить расшифровку или скрыть уже готовую
     func toggle(mediaID: String, lang: AppLanguage) {
         switch states[mediaID] {
@@ -57,15 +60,15 @@ final class VoiceTranscriber: ObservableObject {
         case .success(let body):
             let prefix = tags.isEmpty ? "" : tags.joined(separator: " · ") + "\n"
             return .done(prefix + body)
-        case .failure(let message):
+        case .failure(let fail):
             // речи нет, но что-то звучало (музыка/аплодисменты) — покажем хотя бы это
             if !tags.isEmpty { return .done(tags.joined(separator: " · ")) }
-            return .failed(message)
+            return .failed(fail.message)
         }
     }
 
-    /// Возвращает распознанный текст либо сообщение об ошибке
-    private static func transcribeText(url: URL, lang: AppLanguage, s: Strings) async -> Result<String, String> {
+    /// Возвращает распознанный текст либо ошибку с текстом для показа
+    private static func transcribeText(url: URL, lang: AppLanguage, s: Strings) async -> Result<String, Fail> {
         #if canImport(WhisperKit)
         if let whisperText = await whisper(url: url, lang: lang) {
             return .success(whisperText)
@@ -102,21 +105,21 @@ final class VoiceTranscriber: ObservableObject {
 
     // MARK: - Apple Speech (запасной движок)
 
-    private static func appleSpeech(url: URL, lang: AppLanguage, s: Strings) async -> Result<String, String> {
+    private static func appleSpeech(url: URL, lang: AppLanguage, s: Strings) async -> Result<String, Fail> {
         // без этого ключа в Info.plist iOS закрывает приложение при первом запросе доступа — проверяем заранее
         guard Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil else {
-            return .failure(s.t("Добавьте NSSpeechRecognitionUsageDescription в Info.plist проекта",
-                                "Add NSSpeechRecognitionUsageDescription to the project's Info.plist"))
+            return .failure(Fail(message: s.t("Добавьте NSSpeechRecognitionUsageDescription в Info.plist проекта",
+                                              "Add NSSpeechRecognitionUsageDescription to the project's Info.plist")))
         }
         let status = await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) }
         }
         guard status == .authorized else {
-            return .failure(s.t("Разрешите распознавание речи в Настройках", "Allow speech recognition in Settings"))
+            return .failure(Fail(message: s.t("Разрешите распознавание речи в Настройках", "Allow speech recognition in Settings")))
         }
         let locale = Locale(identifier: lang == .ru ? "ru-RU" : "en-US")
         guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
-            return .failure(s.t("Распознавание сейчас недоступно", "Speech recognition is unavailable"))
+            return .failure(Fail(message: s.t("Распознавание сейчас недоступно", "Speech recognition is unavailable")))
         }
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = false
@@ -124,7 +127,7 @@ final class VoiceTranscriber: ObservableObject {
         request.addsPunctuation = true
         if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
 
-        return await withCheckedContinuation { (c: CheckedContinuation<Result<String, String>, Never>) in
+        return await withCheckedContinuation { (c: CheckedContinuation<Result<String, Fail>, Never>) in
             var finished = false
             _ = recognizer.recognitionTask(with: request) { result, error in
                 guard !finished else { return }
@@ -132,11 +135,11 @@ final class VoiceTranscriber: ObservableObject {
                     finished = true
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                     c.resume(returning: text.isEmpty
-                             ? .failure(s.t("Речь не распознана", "No speech recognized"))
+                             ? .failure(Fail(message: s.t("Речь не распознана", "No speech recognized")))
                              : .success(text))
                 } else if error != nil {
                     finished = true
-                    c.resume(returning: .failure(s.t("Не удалось расшифровать", "Couldn't transcribe")))
+                    c.resume(returning: .failure(Fail(message: s.t("Не удалось расшифровать", "Couldn't transcribe"))))
                 }
             }
         }
