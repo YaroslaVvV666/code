@@ -200,54 +200,73 @@ struct ChatPeekOverlay: View {
 
 extension ChatPeer: Identifiable {}
 
-/// Строка списка чатов: короткое нажатие открывает, долгое — показывает карточку с перепиской
-/// Свайп строки влево открывает быстрые кнопки (закрепить, без звука, удалить), как в Telegram
+/// Строка списка чатов: короткое нажатие открывает, долгое — показывает карточку с перепиской.
+/// Свайп влево — быстрые кнопки справа (закрепить, без звука, удалить) с подписями, как в Telegram.
+/// Свайп вправо — одна кнопка слева (архив).
 struct SwipeActionsRow<Content: View>: View {
     struct Action: Identifiable {
         let id = UUID()
         let icon: String
+        var label: String = ""
         let tint: Color
         let run: () -> Void
     }
 
     let id: String
     @Binding var openID: String?
-    let actions: [Action]
+    var leading: Action? = nil
+    let actions: [Action]                       // кнопки справа (свайп влево)
     @ViewBuilder var content: () -> Content
 
     @State private var drag: CGFloat = 0
-    private let unit: CGFloat = 72
-    private var full: CGFloat { unit * CGFloat(actions.count) }
-    private var base: CGFloat { openID == id ? -full : 0 }
-    private var offset: CGFloat { max(-full - 24, min(0, base + drag)) }
+    @State private var side: Int = 0            // -1 открыто справа, +1 открыто слева, 0 закрыто
+    private let unit: CGFloat = 80
+    private var trailingFull: CGFloat { unit * CGFloat(actions.count) }
+    private var leadingFull: CGFloat { leading != nil ? unit : 0 }
 
-    var body: some View {
-        ZStack(alignment: .trailing) {
-            HStack(spacing: 0) {
-                ForEach(actions) { a in
-                    Button {
-                        Haptics.impact(.light)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil }
-                        a.run()
-                    } label: {
-                        Image(systemName: a.icon).font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
-                            .frame(width: unit).frame(maxHeight: .infinity).background(a.tint)
-                    }
-                    .buttonStyle(.plain)
+    private var base: CGFloat {
+        guard openID == id else { return 0 }
+        return side < 0 ? -trailingFull : (side > 0 ? leadingFull : 0)
+    }
+    private var offset: CGFloat { max(-trailingFull - 24, min(leadingFull + 24, base + drag)) }
+
+    private func button(_ a: Action) -> some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 }
+            a.run()
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: a.icon).font(.system(size: 20, weight: .semibold))
+                if !a.label.isEmpty {
+                    Text(a.label).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
-            .frame(width: full)
-            .mask(alignment: .trailing) { Rectangle().frame(width: max(0, -offset)) }      // видна только открытая часть
+            .foregroundStyle(.white)
+            .frame(width: unit).frame(maxHeight: .infinity).background(a.tint)
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        ZStack {
+            // кнопка слева (свайп вправо) — архив
+            if let leading {
+                HStack(spacing: 0) { button(leading); Spacer(minLength: 0) }
+                    .mask(alignment: .leading) { Rectangle().frame(width: max(0, offset)) }
+            }
+            // кнопки справа (свайп влево)
+            HStack(spacing: 0) { Spacer(minLength: 0); ForEach(actions) { button($0) } }
+                .mask(alignment: .trailing) { Rectangle().frame(width: max(0, -offset)) }
 
             content()
                 .background(Color.clear)
                 .offset(x: offset)
                 .allowsHitTesting(openID != id)
                 .overlay {
-                    // открытая строка: нажатие по ней закрывает кнопки
                     if openID == id {
                         Color.clear.contentShape(Rectangle()).offset(x: offset)
-                            .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil } }
+                            .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 } }
                     }
                 }
         }
@@ -256,23 +275,28 @@ struct SwipeActionsRow<Content: View>: View {
             DragGesture(minimumDistance: 18, coordinateSpace: .local)
                 .onChanged { v in
                     guard abs(v.translation.width) > abs(v.translation.height) * 1.6, v.startLocation.x > 30 else { return }
+                    // вправо тянем только если есть кнопка слева
+                    if v.translation.width > 0 && leading == nil && base == 0 { return }
                     drag = v.translation.width
                 }
                 .onEnded { v in
                     let horizontal = abs(v.translation.width) > abs(v.translation.height) * 1.6 && v.startLocation.x > 30
                     let final = base + (horizontal ? v.translation.width : 0)
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                        if horizontal, final < -full * 0.45 {
-                            if openID != id { Haptics.select() }
-                            openID = id
-                        } else if horizontal {
-                            openID = nil
+                        if horizontal, final < -trailingFull * 0.45 {
+                            if openID != id || side != -1 { Haptics.select() }
+                            openID = id; side = -1
+                        } else if horizontal, leading != nil, final > leadingFull * 0.5 {
+                            if openID != id || side != 1 { Haptics.select() }
+                            openID = id; side = 1
+                        } else {
+                            openID = nil; side = 0
                         }
                         drag = 0
                     }
                 }
         )
-        .onChange(of: openID) { _, new in if new != id { drag = 0 } }
+        .onChange(of: openID) { _, new in if new != id { drag = 0; side = 0 } }
     }
 }
 

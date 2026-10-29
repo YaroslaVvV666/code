@@ -415,6 +415,7 @@ struct StickerPack: Identifiable, Equatable {
     let title: String
     let icon: String
     let stickers: [Sticker]
+    var mine = false            // мой набор (можно редактировать/удалять)
 }
 
 /// Что загрузить на сервер перед отправкой
@@ -473,6 +474,10 @@ protocol MessengerRepository: Sendable {
     func stickers() async throws -> [StickerPack]
     func stickerPack(id: String) async throws -> CustomStickerPack
     func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack
+    func createStickerPack(title: String) async throws -> CustomStickerPack
+    func addSticker(packID: String, mediaID: String, emoji: String) async throws
+    func deleteSticker(packID: String, stickerID: String) async throws
+    func deleteStickerPack(id: String) async throws
 
     // контакты
     func contacts() async throws -> [Contact]
@@ -916,7 +921,8 @@ private struct PackDTO: Decodable {
     let mine: Bool?; let installed: Bool?
     var model: StickerPack {
         StickerPack(id: id, title: title, icon: icon,
-                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false, packID: id) })
+                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false, packID: id) },
+                    mine: mine ?? false)
     }
 }
 private struct PackListDTO: Decodable { let packs: [PackDTO] }
@@ -1093,6 +1099,26 @@ struct RemoteMessengerRepository: MessengerRepository {
     func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack {
         let dto = try decodeAPI(PackDTO.self, from: try await api.request(installed ? "PUT" : "DELETE", "/v1/stickers/packs/\(id)/install"))
         return CustomStickerPack(pack: dto.model, installed: dto.installed ?? installed, mine: dto.mine ?? false)
+    }
+
+    func createStickerPack(title: String) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request("POST", "/v1/stickers/packs",
+                                                                           body: ServerAPI.json(["title": title])))
+        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+    }
+
+    func addSticker(packID: String, mediaID: String, emoji: String) async throws {
+        _ = try await api.request("POST", "/v1/stickers/packs/\(packID)/stickers",
+                                  body: ServerAPI.json(["media_id": mediaID, "emoji": emoji]))
+    }
+
+    func deleteSticker(packID: String, stickerID: String) async throws {
+        let bare = stickerID.hasPrefix("u:") ? String(stickerID.dropFirst(2)) : stickerID
+        _ = try await api.request("DELETE", "/v1/stickers/packs/\(packID)/stickers/\(bare)")
+    }
+
+    func deleteStickerPack(id: String) async throws {
+        _ = try await api.request("DELETE", "/v1/stickers/packs/\(id)")
     }
 
     // MARK: Контакты

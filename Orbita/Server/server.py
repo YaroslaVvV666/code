@@ -3802,6 +3802,67 @@ def sticker_pack_uninstall(req, me, pid):
     req.send_json(200, user_pack_json(p, me["id"]) if p else {"ok": True})
 
 
+# --- создание/правка своих наборов прямо из приложения (без бота) ---
+
+@route("POST", r"/v1/stickers/packs")
+def create_sticker_pack(req, me):
+    """Создать свой набор стикеров"""
+    uid = me["id"]
+    if q1("SELECT COUNT(*) c FROM user_sticker_packs WHERE owner = ?", (uid,))["c"] >= MAX_USER_PACKS:
+        raise ApiError(400, "too_many_packs")
+    title = " ".join(str(req.body_json().get("title", "")).split())[:64]
+    if not title:
+        raise ApiError(400, "bad_value")
+    pid, now = uuid.uuid4().hex, time.time()
+    run("INSERT INTO user_sticker_packs(id, owner, title, created_at) VALUES (?,?,?,?)", (pid, uid, title, now))
+    run("INSERT OR IGNORE INTO sticker_installs(user_id, pack_id, created_at) VALUES (?,?,?)", (uid, pid, now))
+    req.send_json(201, user_pack_json(q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,)), uid))
+
+
+@route("POST", r"/v1/stickers/packs/u:([a-f0-9]+)/stickers")
+def add_user_sticker(req, me, pid):
+    """Добавить стикер (картинку или короткое видео) в свой набор. Файл уже загружен через /v1/media."""
+    uid = me["id"]
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, uid)):
+        raise ApiError(404, "not_found")
+    if q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (pid,))["c"] >= MAX_PACK_STICKERS:
+        raise ApiError(400, "pack_full")
+    body = req.body_json()
+    media_id = str(body.get("media_id", ""))
+    emoji = first_emoji(str(body.get("emoji", ""))) or "😀"
+    m = q1("SELECT * FROM media WHERE id = ? AND owner = ?", (media_id, uid))
+    if not m:
+        raise ApiError(400, "media_not_found")
+    mime = m["mime"] or ""
+    if not (mime.startswith("image/") or mime.startswith("video/")):
+        raise ApiError(415, "unsupported_media")
+    if mime.startswith("video/") and (m["duration"] or 0) > MAX_ANIMATED_SECONDS + 0.5:
+        raise ApiError(400, "too_long")
+    pos = q1("SELECT COALESCE(MAX(position), -1) + 1 p FROM user_stickers WHERE pack_id = ?", (pid,))["p"]
+    sid = uuid.uuid4().hex
+    run("INSERT INTO user_stickers(id, pack_id, media_id, emoji, position, created_at) VALUES (?,?,?,?,?,?)",
+        (sid, pid, media_id, emoji, pos, time.time()))
+    req.send_json(201, user_sticker_attachment(sid))
+
+
+@route("DELETE", r"/v1/stickers/packs/u:([a-f0-9]+)/stickers/([a-f0-9]+)")
+def delete_user_sticker(req, me, pid, sid):
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, me["id"])):
+        raise ApiError(404, "not_found")
+    run("DELETE FROM user_stickers WHERE id = ? AND pack_id = ?", (sid, pid))
+    req.send_json(200, {"ok": True})
+
+
+@route("DELETE", r"/v1/stickers/packs/u:([a-f0-9]+)")
+def delete_user_pack(req, me, pid):
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, me["id"])):
+        raise ApiError(404, "not_found")
+    run("DELETE FROM user_stickers WHERE pack_id = ?", (pid,))
+    run("DELETE FROM sticker_installs WHERE pack_id = ?", (pid,))
+    run("DELETE FROM user_sticker_packs WHERE id = ?", (pid,))
+    req.send_json(200, {"ok": True})
+
+
 def ensure_sticker_bot():
     """Бот @stickers: создаётся один раз при запуске сервера"""
     if q1("SELECT 1 FROM users WHERE id = ?", (STICKER_BOT_ID,)):

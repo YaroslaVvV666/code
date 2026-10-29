@@ -144,6 +144,7 @@ struct EmojiStickerPanel: View {
     let onEmoji: (String) -> Void
     let onBackspace: () -> Void
     let onSticker: (Sticker) -> Void
+    var onCreateStickers: () -> Void = {}
 
     private enum Tab: Hashable { case emoji, stickers }
 
@@ -209,7 +210,7 @@ struct EmojiStickerPanel: View {
     private var createStickersButton: some View {
         Button {
             Haptics.impact(.light)
-            PushManager.shared.openChat = ChatRoute(peer: StickerBot.peer)
+            onCreateStickers()
         } label: {
             Label(s.t("Создать свои стикеры", "Create your stickers"), systemImage: "plus.circle.fill")
                 .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
@@ -223,8 +224,11 @@ struct EmojiStickerPanel: View {
     private var stickerTab: some View {
         VStack(spacing: 0) {
             if packs.isEmpty {
-                Text(s.noStickers).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 14) {
+                    Text(s.noStickers).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                    createStickersButton
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {

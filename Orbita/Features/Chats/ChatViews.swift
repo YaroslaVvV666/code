@@ -456,15 +456,18 @@ struct ChatsListView: View {
     }
 
     private func row(_ chat: ChatSummary) -> some View {
-        SwipeActionsRow(id: chat.id, openID: $swipedOpen, actions: [
-            .init(icon: "archivebox.fill", tint: .gray) {
+        SwipeActionsRow(id: chat.id, openID: $swipedOpen,
+            leading: .init(icon: "archivebox.fill", label: s.t("В архив", "Archive"), tint: .gray) {
                 withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
             },
-            .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill", tint: .orange) {
+            actions: [
+            .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill",
+                  label: prefs.isPinned(chat.id) ? s.t("Открепить", "Unpin") : s.t("Закрепить", "Pin"), tint: .green) {
                 prefs.toggle(chat.id)
             },
-            .init(icon: isMuted(chat) ? "bell.fill" : "bell.slash.fill", tint: .indigo) { toggleMute(chat) },
-            .init(icon: "trash.fill", tint: .red) { deleting = chat },
+            .init(icon: isMuted(chat) ? "bell.fill" : "bell.slash.fill",
+                  label: isMuted(chat) ? s.t("Вкл. звук", "Unmute") : s.t("Откл. звук", "Mute"), tint: .orange) { toggleMute(chat) },
+            .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.95, green: 0.27, blue: 0.33)) { deleting = chat },
         ]) {
             rowBody(chat)
                 // закреплённые — на чуть более светлом фоне, как в Telegram
@@ -623,11 +626,12 @@ struct ArchivedChatsView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(chats) { chat in
-                            SwipeActionsRow(id: chat.id, openID: $swipedOpen, actions: [
-                                .init(icon: "tray.and.arrow.up.fill", tint: .green) {
+                            SwipeActionsRow(id: chat.id, openID: $swipedOpen,
+                                leading: .init(icon: "tray.and.arrow.up.fill", label: s.t("Из архива", "Unarchive"), tint: .green) {
                                     withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
                                 },
-                                .init(icon: "trash.fill", tint: .red) { onDelete(chat) },
+                                actions: [
+                                .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.95, green: 0.27, blue: 0.33)) { onDelete(chat) },
                             ]) {
                                 archiveRowBody(chat)
                             }

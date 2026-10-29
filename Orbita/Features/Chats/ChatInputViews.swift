@@ -39,6 +39,7 @@ struct ChatInputBar: View {
 
     @EnvironmentObject private var session: AppSession
     @State private var showSchedule = false
+    @State private var showStickerCreator = false
     @State private var kbVisible = false
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -134,6 +135,12 @@ struct ChatInputBar: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
                 .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showStickerCreator) {
+            StickerCreatorSheet(onChanged: { Task { await model.loadStickers() } })
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationBackground(theme.sheet)
         }
         .sheet(isPresented: $showAttach) {
             AttachSheet(canPoll: !model.peer.isChannel || model.group?.isAdmin == true,
@@ -817,7 +824,8 @@ struct ChatInputBar: View {
                 Haptics.impact(.light)
                 model.sendSticker(sticker)
                 onSent()
-            })
+            },
+            onCreateStickers: { showStickerCreator = true })
             .environment(\.theme, theme)
             .environment(\.lang, lang)
         controller.setInputPanel(panel)
