@@ -34,6 +34,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import media_safety
 import moderation
 import otp
 import push
@@ -2033,11 +2034,17 @@ def upload_media(req, me):
     mid = uuid.uuid4().hex
     os.makedirs(MEDIA_DIR, exist_ok=True)
     path = STORE.stage(mid)            # куда писать зашифрованные байты (диск — сразу на место, S3 — во временный файл)
-    # проверка нейросетью: пока файл шифруется, копия открытых байт кладётся во временный файл
-    scan = moderation.enabled() and kind in ("image", "video")
+    # верхний тип для проверки: image/video даже если прислано как «файл» с image/* или video/*
+    top = kind if kind in ("image", "video") else (mime.split("/")[0] if "/" in mime else "")
+    # структурная проверка «это и правда картинка/видео, а не замаскированный код» — для стикеров/эмодзи обязательна
+    safety = top in ("image", "video")
+    scan_mod = moderation.enabled() and kind in ("image", "video")
+    # пока файл шифруется, копия открытых байт кладётся во временный файл (для проверки типа и нейросети)
+    inspect = safety or scan_mod
+    verdict, detail = "ok", {}
     scan_path, scan_file, digest = path + ".scan", None, hashlib.sha256()
     read = req.rfile.read
-    if scan:
+    if inspect:
         scan_file = open(scan_path, "wb")
 
         def read(n, _r=req.rfile.read):
@@ -2053,29 +2060,40 @@ def upload_media(req, me):
             STORE.discard(mid)
             req.close_connection = True
             raise ApiError(400, "incomplete")
-        verdict, detail = "ok", {}
-        if scan:
+        if inspect:
             scan_file.close()
+            scan_file = None
             h = digest.hexdigest()
-            if q1("SELECT 1 FROM media_blocked WHERE hash = ?", (h,)):
-                verdict = "block"                          # этот файл уже отклоняли — модели не нужны
-            else:
-                try:
-                    dur = float(params.get("dur", 0) or 0)
-                except ValueError:
-                    dur = 0.0
-                verdict, detail = moderation.check(scan_path, kind, dur)
-                if verdict == "block":
+            already_blocked = q1("SELECT 1 FROM media_blocked WHERE hash = ?", (h,)) is not None
+            # 1) тип файла: действительно ли это заявленная картинка/видео (защита от кода в стикерах)
+            if safety:
+                ok, reason = (False, "blocked") if already_blocked else media_safety.sniff(scan_path, top, mime)
+                if not ok:
                     run("INSERT OR IGNORE INTO media_blocked(hash, created_at) VALUES (?,?)", (h, time.time()))
-            if verdict in ("block", "error"):
-                STORE.discard(mid)
-                if verdict == "block":
-                    raise ApiError(422, "content_blocked")
-                raise ApiError(503, "moderation_unavailable")
+                    STORE.discard(mid)
+                    sys.stderr.write("media rejected (%s): kind=%s mime=%s user=%s\n" % (reason, kind, mime, me["id"]))
+                    raise ApiError(415, "unsupported_media")
+            # 2) проверка содержимого нейросетью (обнажёнка и т.п.)
+            if scan_mod:
+                if already_blocked:
+                    verdict, detail = "block", {}
+                else:
+                    try:
+                        dur = float(params.get("dur", 0) or 0)
+                    except ValueError:
+                        dur = 0.0
+                    verdict, detail = moderation.check(scan_path, kind, dur)
+                    if verdict == "block":
+                        run("INSERT OR IGNORE INTO media_blocked(hash, created_at) VALUES (?,?)", (h, time.time()))
+                if verdict in ("block", "error"):
+                    STORE.discard(mid)
+                    if verdict == "block":
+                        raise ApiError(422, "content_blocked")
+                    raise ApiError(503, "moderation_unavailable")
     finally:
         if scan_file:
             scan_file.close()
-        if scan and os.path.exists(scan_path):
+        if inspect and os.path.exists(scan_path):
             os.remove(scan_path)
     STORE.commit(mid)                  # все проверки пройдены — фиксируем файл (на S3 — заливаем в бакет)
 

@@ -98,8 +98,13 @@ def main():
         ok("group stats", req("GET", "/v1/groups/%s/stats" % gid, ta)[0] == 200)
 
     # 6. медиа: загрузка -> скачивание байт-в-байт -> диапазон
-    blob = os.urandom(6000)
-    s, b, _ = req("POST", "/v1/media?kind=image&w=2&h=2", ta, raw=blob, ctype="image/jpeg")
+    # сервер проверяет, что это настоящая картинка (защита от кода в стикерах),
+    # поэтому берём валидный JPEG и дописываем «хвост» для проверки хранения байт-в-байт
+    import base64
+    jpeg = base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDlqKKK+NP1M//Z")
+    blob = jpeg + os.urandom(6000)          # валидный JPEG + хвост (Pillow игнорирует хвост, хранилище отдаёт байты как есть)
+    s, b, _ = req("POST", "/v1/media?kind=image&w=8&h=8", ta, raw=blob, ctype="image/jpeg")
     ok("media upload", s == 201)
     media_id = jbody(b).get("id") if s == 201 else None
     if media_id:
