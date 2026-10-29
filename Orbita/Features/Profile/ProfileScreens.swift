@@ -125,12 +125,14 @@ struct ProfileSubScreen: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .edgeSwipeBack { attemptLeave() }
-        .confirmationDialog(s.t("Вы не сохранили изменения", "You have unsaved changes"),
-                            isPresented: $showUnsaved, titleVisibility: .visible) {
-            Button(s.t("Сохранить", "Save")) { leave.saveSignal += 1 }
-            Button(s.t("Сбросить", "Discard"), role: .destructive) { doLeave() }
-            Button(s.cancel, role: .cancel) {}
-        }
+        .unsavedChangesDialog(isPresented: $showUnsaved,
+                              title: s.t("Несохранённые изменения", "Unsaved changes"),
+                              message: s.t("Вы не сохранили изменения. Применить их?",
+                                           "You have unsaved changes. Apply them?"),
+                              saveTitle: s.t("Применить", "Apply"),
+                              discardTitle: s.t("Сбросить", "Discard"),
+                              onSave: { leave.saveSignal += 1 },
+                              onDiscard: { doLeave() })
     }
 
     @ViewBuilder

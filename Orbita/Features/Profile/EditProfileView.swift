@@ -128,12 +128,14 @@ struct EditProfileView: View {
             }
             Button(s.cancel, role: .cancel) { photoToDelete = nil }
         }
-        .confirmationDialog(s.t("Вы не сохранили изменения", "You have unsaved changes"),
-                            isPresented: $showUnsaved, titleVisibility: .visible) {
-            Button(s.t("Сохранить", "Save")) { save() }
-            Button(s.t("Сбросить", "Discard"), role: .destructive) { dismiss() }
-            Button(s.cancel, role: .cancel) {}
-        }
+        .unsavedChangesDialog(isPresented: $showUnsaved,
+                              title: s.t("Несохранённые изменения", "Unsaved changes"),
+                              message: s.t("Вы не сохранили изменения. Применить их?",
+                                           "You have unsaved changes. Apply them?"),
+                              saveTitle: s.t("Применить", "Apply"),
+                              discardTitle: s.t("Сбросить", "Discard"),
+                              onSave: { save() },
+                              onDiscard: { dismiss() })
     }
 
     // MARK: Фото
