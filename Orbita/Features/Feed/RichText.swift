@@ -732,8 +732,24 @@ struct FormattingTextView: UIViewRepresentable {
             return UIMenu(children: [styles] + suggestedActions)
         }
 
-        func textViewDidChange(_ tv: UITextView) { controller.refresh() }
-        func textViewDidChangeSelection(_ tv: UITextView) { controller.refresh() }
+        func textViewDidChange(_ tv: UITextView) {
+            controller.refresh()
+            scrollToCaret(tv)
+        }
+        func textViewDidChangeSelection(_ tv: UITextView) {
+            controller.refresh()
+            scrollToCaret(tv)
+        }
+
+        /// Когда поле доросло до максимума и включилась прокрутка — держим курсор (последние строки) в
+        /// видимой части. Иначе новый текст уходил вниз за край и казалось, что есть лимит символов.
+        /// Откладываем на следующий тик: к этому моменту SwiftUI уже пересчитал высоту поля.
+        private func scrollToCaret(_ tv: UITextView) {
+            DispatchQueue.main.async {
+                guard tv.isScrollEnabled, tv.selectedRange.location != NSNotFound else { return }
+                tv.scrollRangeToVisible(tv.selectedRange)
+            }
+        }
     }
 }
 
