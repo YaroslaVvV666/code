@@ -20,10 +20,16 @@
   discard(mid)                отменить незафиксированную запись
 """
 
+import json
 import os
 
 
 def make_blobstore(media_dir):
+    # Несколько хранилищ-пулов (арендовал одно — заполнилось — добавил следующее — потом свой ЦОД):
+    # ORBITA_POOLS = JSON-список пулов, новые файлы пишутся в активный, старые читаются из своего.
+    pools = os.environ.get("ORBITA_POOLS", "").strip()
+    if pools:
+        return PooledBlobStore(media_dir, pools)
     if os.environ.get("ORBITA_S3_BUCKET", "").strip():
         return S3BlobStore(media_dir)
     return LocalBlobStore(media_dir)
@@ -65,21 +71,25 @@ class LocalBlobStore:
 class S3BlobStore:
     backend = "s3"
 
-    def __init__(self, media_dir):
+    def __init__(self, media_dir, cfg=None):
         import boto3
-        import tempfile
-        self.bucket = os.environ["ORBITA_S3_BUCKET"].strip()
-        self.prefix = os.environ.get("ORBITA_S3_PREFIX", "media/")
+        cfg = cfg or {}            # cfg — настройки одного пула (для PooledBlobStore); иначе берём из окружения
+        self.bucket = (cfg.get("bucket") or os.environ.get("ORBITA_S3_BUCKET", "")).strip()
+        self.prefix = cfg.get("prefix") or os.environ.get("ORBITA_S3_PREFIX", "media/")
         kw = {}
-        ep = os.environ.get("ORBITA_S3_ENDPOINT")        # для MinIO/совместимых; для AWS не нужен
+        ep = cfg.get("endpoint") or os.environ.get("ORBITA_S3_ENDPOINT")   # для MinIO/совместимых; для AWS не нужен
         if ep:
             kw["endpoint_url"] = ep
-        region = os.environ.get("ORBITA_S3_REGION")
+        region = cfg.get("region") or os.environ.get("ORBITA_S3_REGION")
         if region:
             kw["region_name"] = region
-        # ключи берутся из AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (стандартно для boto3)
+        # ключи: индивидуальные для пула, иначе AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (стандартно для boto3)
+        if cfg.get("access_key"):
+            kw["aws_access_key_id"] = cfg["access_key"]
+        if cfg.get("secret_key"):
+            kw["aws_secret_access_key"] = cfg["secret_key"]
         self.c = boto3.client("s3", **kw)
-        self.tmp = os.environ.get("ORBITA_S3_TMP") or os.path.join(media_dir, "staging")
+        self.tmp = cfg.get("tmp") or os.environ.get("ORBITA_S3_TMP") or os.path.join(media_dir, "staging")
         os.makedirs(self.tmp, exist_ok=True)
 
     def _key(self, mid):
@@ -125,6 +135,71 @@ class S3BlobStore:
 
     def reader(self, mid, size):
         return _S3Reader(self.c, self.bucket, self._key(mid))
+
+
+def _make_pool(cfg, media_dir):
+    if cfg.get("type", "local") == "s3":
+        return S3BlobStore(media_dir, cfg)
+    return LocalBlobStore(cfg.get("dir") or media_dir)
+
+
+class PooledBlobStore:
+    """Маршрутизатор по нескольким хранилищам. Новые файлы пишутся в активный пул (по умолчанию последний),
+    старые читаются из того пула, где лежат — поэтому можно добавлять хранилища по мере заполнения, не трогая
+    уже загруженное. Интерфейс тот же (mid), сервер ничего не меняет. Где лежит каждый файл — помнит локатор
+    (таблица в основной БД), привязывается через bind_locator() на старте. Неизвестный файл (загружен до
+    пулов) читается из первого пула — им делают исходное хранилище, так что миграция не нужна.
+
+    Пример ORBITA_POOLS:
+      [{"id":"p0","type":"s3","bucket":"orbita-1","endpoint":"https://storage.yandexcloud.net","region":"ru-central1"},
+       {"id":"p1","type":"s3","bucket":"orbita-2","endpoint":"https://storage.yandexcloud.net","region":"ru-central1"},
+       {"id":"dc0","type":"local","dir":"/mnt/dc1/media"}]
+    Активный пул — последний, либо ORBITA_ACTIVE_POOL=<id>.
+    """
+    backend = "pooled"
+
+    def __init__(self, media_dir, pools_json):
+        cfgs = json.loads(pools_json)
+        if not cfgs:
+            raise ValueError("ORBITA_POOLS пуст")
+        self.pools, self.order = {}, []
+        for c in cfgs:
+            pid = str(c["id"])
+            self.pools[pid] = _make_pool(c, media_dir)
+            self.order.append(pid)
+        active = os.environ.get("ORBITA_ACTIVE_POOL", "").strip()
+        self.active_id = active if active in self.pools else self.order[-1]
+        # до bind_locator (на старте, до приёма запросов) — временная память
+        mem = {}
+        self._get = mem.get
+        self._set = lambda mid, pool: mem.__setitem__(mid, pool)
+        self._del = lambda mid: mem.pop(mid, None)
+
+    def bind_locator(self, get, set_, delete):
+        self._get, self._set, self._del = get, set_, delete
+
+    def _pool_for(self, mid):
+        return self.pools.get(self._get(mid)) or self.pools[self.order[0]]
+
+    def exists(self, mid):
+        return self._pool_for(mid).exists(mid)
+
+    def reader(self, mid, size):
+        return self._pool_for(mid).reader(mid, size)
+
+    def remove(self, mid):
+        self._pool_for(mid).remove(mid)
+        self._del(mid)
+
+    def stage(self, mid):
+        return self.pools[self.active_id].stage(mid)
+
+    def commit(self, mid):
+        self.pools[self.active_id].commit(mid)
+        self._set(mid, self.active_id)          # запоминаем пул именно после успешной заливки
+
+    def discard(self, mid):
+        self.pools[self.active_id].discard(mid)
 
 
 class _S3Reader:

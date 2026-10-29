@@ -518,6 +518,24 @@ def run(sql, args=()):
         return DB.execute(sql, args)
 
 
+# Индекс «какой файл в каком пуле хранилища» (для PooledBlobStore). Храним в основной БД — общий для всех
+# воркеров. Привязываем локатор к STORE только если он — пул (у обычного одиночного хранилища метода нет).
+if hasattr(STORE, "bind_locator"):
+    DB.execute("CREATE TABLE IF NOT EXISTS blob_pool(mid TEXT PRIMARY KEY, pool TEXT NOT NULL)")
+
+    def _blob_pool_get(mid):
+        r = q1("SELECT pool FROM blob_pool WHERE mid = ?", (mid,))
+        return r["pool"] if r else None
+
+    def _blob_pool_set(mid, pool):
+        run("INSERT OR REPLACE INTO blob_pool(mid, pool) VALUES (?, ?)", (mid, pool))
+
+    def _blob_pool_del(mid):
+        run("DELETE FROM blob_pool WHERE mid = ?", (mid,))
+
+    STORE.bind_locator(_blob_pool_get, _blob_pool_set, _blob_pool_del)
+
+
 RATELIMIT = os.environ.get("ORBITA_RATELIMIT", "1") != "0"
 
 # Метрики процесса (для /metrics, формат Prometheus). Каждый воркер отдаёт свои — Prometheus опрашивает все.
