@@ -4,23 +4,41 @@ import UIKit
 // MARK: - Тон аватарки для фона QR
 
 enum AvatarTone {
-    /// Средний цвет аватарки — его ставим на фон за QR-кодом.
+    /// Преобладающий тон аватарки — его ставим на фон за QR-кодом.
+    /// Берём не среднее по всем пикселям (из-за этого получалась мутная «каша»),
+    /// а самый частый цвет: строим грубую гистограмму и выбираем самую населённую корзину.
+    /// Для снежного фото фон станет +- белым/кремовым, а не серо-бурым.
     static func load(_ avatarID: String?) async -> Color? {
         guard let id = avatarID, let url = ServerConfig.mediaURL(id),
-              let image = await ImageCache.shared.load(url, maxPixel: 60, persistKey: id),
+              let image = await ImageCache.shared.load(url, maxPixel: 64, persistKey: id),
               let cg = image.cgImage else { return nil }
-        let w = 10, h = 10
+        let w = 48, h = 48
         var px = [UInt8](repeating: 0, count: w * h * 4)
         guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+
+        // Квантуем цвет в крупные корзины (6×6×6 = 216). Внутри каждой копим сумму настоящих
+        // значений, чтобы вернуть чистый средний цвет именно самой частой корзины.
+        let levels = 6
+        let bucketSize = 256 / levels
+        let total = levels * levels * levels
+        var counts = [Int](repeating: 0, count: total)
+        var sumR = [Double](repeating: 0, count: total)
+        var sumG = [Double](repeating: 0, count: total)
+        var sumB = [Double](repeating: 0, count: total)
         for i in stride(from: 0, to: px.count, by: 4) where px[i + 3] > 10 {
-            r += Double(px[i]); g += Double(px[i + 1]); b += Double(px[i + 2]); n += 1
+            let r = Int(px[i]), g = Int(px[i + 1]), b = Int(px[i + 2])
+            let idx = ((min(levels - 1, r / bucketSize) * levels)
+                       + min(levels - 1, g / bucketSize)) * levels
+                       + min(levels - 1, b / bucketSize)
+            counts[idx] += 1
+            sumR[idx] += Double(r); sumG[idx] += Double(g); sumB[idx] += Double(b)
         }
-        guard n > 0 else { return nil }
-        return Color(red: r / n / 255, green: g / n / 255, blue: b / n / 255)
+        guard let best = counts.indices.max(by: { counts[$0] < counts[$1] }), counts[best] > 0 else { return nil }
+        let n = Double(counts[best])
+        return Color(red: sumR[best] / n / 255, green: sumG[best] / n / 255, blue: sumB[best] / n / 255)
     }
 
     /// Градиент фона из тона аватарки: тёмная тема — глубже и насыщеннее, светлая — мягче.
@@ -118,7 +136,6 @@ private struct QRShareCard: View {
         ZStack {
             LinearGradient(colors: backgroundColors, startPoint: .top, endPoint: .bottom)
                 .animation(.easeInOut(duration: 0.35), value: tone)
-            EmojiPattern(emoji: style.emoji, dark: dark)
 
             VStack(spacing: 0) {
                 AvatarView(name: name, size: 116, avatarID: avatarID).clipShape(Circle())
