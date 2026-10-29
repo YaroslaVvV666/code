@@ -393,6 +393,7 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
 ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
 ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
 ensure_column("posts", "sensitive", "sensitive INTEGER NOT NULL DEFAULT 0")          # 18+/чувствительный контент — показывается с размытием
+ensure_column("media", "nsfw", "nsfw INTEGER NOT NULL DEFAULT 0")                     # авто-модерация: 18+ по модели — пост публикуется, но с размытием (для всех)
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of, author)")
 DB.execute("CREATE TABLE IF NOT EXISTS post_saves(post_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(post_id, user_id))")
@@ -2108,9 +2109,12 @@ def upload_media(req, me):
         duration = max(0.0, min(float(params.get("dur", 0)), 36000.0))
     except ValueError:
         duration = 0.0
-    run("INSERT INTO media(id, owner, kind, mime, width, height, duration, thumb, size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (mid, me["id"], kind, mime, width, height, duration, thumb, length, time.time()))
-    if verdict == "review":                                # спорное — публикуется, но попадает в очередь на проверку человеком
+    # «review» — распознана обнажёнка/18+: файл не блокируем (это не запрещёнка, та ушла в «block»),
+    # но помечаем nsfw — пост с таким медиа опубликуется с размытием для ВСЕХ зрителей
+    nsfw = 1 if verdict == "review" else 0
+    run("INSERT INTO media(id, owner, kind, mime, width, height, duration, thumb, size, nsfw, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (mid, me["id"], kind, mime, width, height, duration, thumb, length, nsfw, time.time()))
+    if verdict == "review":                                # спорное — публикуется (с размытием), и попадает в очередь на проверку человеком
         run("INSERT OR REPLACE INTO media_review(media_id, owner, verdict, detail, created_at) VALUES (?,?,?,?,?)",
             (mid, me["id"], verdict, json.dumps(detail, ensure_ascii=False)[:2000], time.time()))
     req.send_json(201, {"id": mid, "kind": kind, "width": width, "height": height,
@@ -3081,6 +3085,13 @@ def create_post(req, me):
         music_media, mkey = str(tj["media"]), music_key(tj["title"], tj["artist"])
     else:
         music_media = mkey = None
+    # авто-18+: если модель пометила любое вложение как nsfw — пост публикуется с размытием, что бы ни прислал клиент
+    media_ids = [it[0] for it in items if it[0] and not it[0].startswith("art:")]
+    auto_sensitive = False
+    if media_ids:
+        marks = ",".join("?" for _ in media_ids)
+        auto_sensitive = q1("SELECT 1 FROM media WHERE id IN (%s) AND nsfw = 1 LIMIT 1" % marks, tuple(media_ids)) is not None
+    sensitive = 1 if (body.get("sensitive") or auto_sensitive) else 0
     with LOCK:
         run("BEGIN")
         try:
@@ -3089,7 +3100,7 @@ def create_post(req, me):
                 (pid, uid, enc(uid, "posts", COL["post_text"], pid, text),
                  enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
                  music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
-                 1 if (not reel and body.get("wall_only")) else 0, 1 if body.get("sensitive") else 0))
+                 1 if (not reel and body.get("wall_only")) else 0, sensitive))
             write_post_media(pid, items)
             run("COMMIT")
         except Exception:
