@@ -130,6 +130,11 @@ ADMIN_TOKEN = os.environ.get("ORBITA_ADMIN_TOKEN", "").strip()
 # Срок хранения (дни) для справки/выгрузки. 0 — не ограничиваем (хранить, пока есть). Реальную «ретенцию после
 # удаления пользователем» включать отдельной политикой — по умолчанию удаление остаётся настоящим удалением.
 RETENTION_DAYS = int(os.environ.get("ORBITA_RETENTION_DAYS", "0") or "0")
+# Комплаенс-ретеншн: когда включён, удалённые пользователем сообщения/медиа физически НЕ стираются,
+# а лишь прячутся от пользователей (виден только админ-выгрузке). «Отпечаток» остаётся даже после
+# очистки чата, удаления «у всех» и исчезающих сообщений. ВНИМАНИЕ: это слежка-ретеншн (см. закон
+# «Яровой»/ОРИ в РФ и, наоборот, GDPR/право на удаление вне РФ) — включайте осознанно.
+RETAIN_FOREVER = os.environ.get("ORBITA_RETAIN_FOREVER", "0") != "0"
 
 # *_enc — шифртекст AES-256-GCM, *_idx — слепой индекс (HMAC) для поиска без хранения значения
 SCHEMA = """
@@ -399,6 +404,8 @@ ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0"
 ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
 ensure_column("posts", "sensitive", "sensitive INTEGER NOT NULL DEFAULT 0")          # 18+/чувствительный контент — показывается с размытием
 ensure_column("media", "nsfw", "nsfw INTEGER NOT NULL DEFAULT 0")                     # авто-модерация: 18+ по модели — пост публикуется, но с размытием (для всех)
+ensure_column("messages", "purged", "purged INTEGER NOT NULL DEFAULT 0")              # комплаенс-ретеншн: удалено пользователем, но сохранено для выгрузки
+ensure_column("group_messages", "purged", "purged INTEGER NOT NULL DEFAULT 0")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of, author)")
 DB.execute("CREATE TABLE IF NOT EXISTS post_saves(post_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(post_id, user_id))")
@@ -4237,6 +4244,8 @@ def last_thumb(m):
 
 
 def drop_message_media(m):
+    if RETAIN_FOREVER:                           # комплаенс-ретеншн: вложения удалённых сообщений тоже сохраняем
+        return
     for att in attachments_of(m):
         mid = att.get("media_id")
         if not mid:
@@ -4893,18 +4902,28 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     return row
 
 
+def retained_delete_dm(mid):
+    """Удаление личного сообщения с учётом комплаенс-ретеншна.
+    При RETAIN_FOREVER строка не стирается, а прячется от обоих собеседников (виден только админ-выгрузке)."""
+    if RETAIN_FOREVER:
+        run("UPDATE messages SET purged = 1, del_sender = 1, del_recipient = 1, expires_at = NULL WHERE id = ?", (mid,))
+    else:
+        run("DELETE FROM messages WHERE id = ?", (mid,))
+
+
 def purge_dm(m):
     """Полностью стереть личное сообщение и всё, что к нему привязано (для исчезающих сообщений)."""
     mid = m["id"]
-    for a in (attachments_of(m) or []):
-        for media_id in (a.get("media_id"), a.get("thumb")):
-            if media_id:
-                run("DELETE FROM media WHERE id = ? AND owner = ?", (media_id, m["sender"]))
-                STORE.remove(media_id)
+    if not RETAIN_FOREVER:                       # при ретеншне медиа тоже сохраняем для выгрузки
+        for a in (attachments_of(m) or []):
+            for media_id in (a.get("media_id"), a.get("thumb")):
+                if media_id:
+                    run("DELETE FROM media WHERE id = ? AND owner = ?", (media_id, m["sender"]))
+                    STORE.remove(media_id)
     for t in ("reactions", "message_notes", "poll_votes", "poll_options", "polls"):
         run("DELETE FROM %s WHERE message_id = ?" % t, (mid,))
     run("DELETE FROM pins WHERE message_id = ?", (mid,))
-    run("DELETE FROM messages WHERE id = ?", (mid,))
+    retained_delete_dm(mid)
 
 
 def reap_disappearing():
@@ -5348,12 +5367,12 @@ def delete_message(req, me, mid):
         raise ApiError(404, "not_found")
     if m["sender"] == uid and req.query().get("all") == "1":
         drop_message_media(m)
-        run("DELETE FROM messages WHERE id = ?", (mid,))            # у обоих
+        retained_delete_dm(mid)                                     # у обоих (при ретеншне — скрыто, но сохранено)
         run("DELETE FROM reactions WHERE message_id = ?", (mid,))
         run("DELETE FROM pins WHERE message_id = ?", (mid,))
     elif m["sender"] == m["recipient"]:                         # «Избранное»
         drop_message_media(m)
-        run("DELETE FROM messages WHERE id = ?", (mid,))
+        retained_delete_dm(mid)
         run("DELETE FROM reactions WHERE message_id = ?", (mid,))
         run("DELETE FROM pins WHERE message_id = ?", (mid,))
     elif m["sender"] == uid:
