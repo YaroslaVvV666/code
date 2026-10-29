@@ -287,6 +287,9 @@ struct OrbitaTabBar: View {
     @Environment(\.lang) private var lang
     /// Положение пузыря в «слотах» панели (0…5, кнопка «+» — слот 2)
     @State private var pillSlot: CGFloat
+    /// Перемотка шортса жестом по панели вкладок: с какого места начали
+    @State private var scrubStart: Double = 0
+    @State private var scrubbingBar = false
 
     init(selection: Binding<MainTab>, chatsBadge: Int = 0, onCompose: @escaping () -> Void) {
         _selection = selection
@@ -342,6 +345,19 @@ struct OrbitaTabBar: View {
         .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.12), radius: 18, y: 8)
         .padding(.horizontal, 14)
         .padding(.bottom, 4)
+        // как в TikTok: в шортсах можно зажать палец на панели (даже на кнопке) и, двигая вбок, перематывать видео
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 14)
+                .onChanged { v in
+                    guard selection == .reels, abs(v.translation.width) > abs(v.translation.height) else { return }
+                    if !scrubbingBar { scrubbingBar = true; scrubStart = ReelScrubBus.shared.currentFrac }
+                    let width = max(1, UIScreen.main.bounds.width)
+                    ReelScrubBus.shared.scrub(to: scrubStart + v.translation.width / width)
+                }
+                .onEnded { _ in
+                    if scrubbingBar { scrubbingBar = false; ReelScrubBus.shared.end() }
+                }
+        )
     }
 
     /// Один пузырь на всю панель: катится от слота к слоту, к середине пути «раздувается» и возвращается с мягким отскоком
@@ -364,6 +380,8 @@ struct OrbitaTabBar: View {
 
     private func item(_ tab: MainTab, icon: String, label: String, badge: Int = 0) -> some View {
         Button {
+            // если касание «ушло в перемотку шортса» (двигали палец по панели) — вкладку не переключаем
+            if ReelScrubBus.shared.suppressTapUntil > Date() { return }
             if selection != tab {
                 Haptics.select()
                 selection = tab

@@ -534,11 +534,11 @@ struct ReelsView: View {
                         .background(theme.sheet)
                         .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22, style: .continuous))
                         .overlay(alignment: .top) {
-                            // за верхнюю кромку шторку можно тянуть вверх и вниз
-                            Color.clear.frame(height: 64).contentShape(Rectangle())
-                                .overlay(alignment: .top) {
-                                    Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
-                                }
+                            // за верхнюю кромку шторку можно тянуть вверх и вниз.
+                            // тянем только центральную часть — углы (в т.ч. крестик) остаются нажимаемыми
+                            ZStack(alignment: .top) {
+                                Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
+                                Color.clear.frame(width: 200, height: 56).contentShape(Rectangle())
                                 .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .global)
                                     .onChanged { v in var t = Transaction(); t.disablesAnimations = true
                                         withTransaction(t) { sheetDrag = v.translation.height } }
@@ -555,6 +555,8 @@ struct ReelsView: View {
                                             sheetDrag = 0
                                         }
                                     })
+                            }
+                            .frame(maxWidth: .infinity)             // полоса во всю ширину, но тянется только центр
                         }
                         .padding(.bottom, kb)                       // клавиатуру учитываем сами: ввод всегда над ней
                         .ignoresSafeArea(.container, edges: .bottom)
@@ -609,7 +611,8 @@ struct ReelsView: View {
     /// Сколько снизу занимает плавающая панель вкладок: подпись и полоса прогресса стоят над ней
     private var bottomClear: CGFloat {
         let bottom = (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.keyWindow?.safeAreaInsets.bottom) ?? 34
-        return fixed != nil ? bottom + 28 : bottom + 76          // в режиме «один звук» нижней панели нет
+        // кнопки/подпись/полоса прижаты к низу: полоса течения видео почти прилегает к панели вкладок (как в TikTok)
+        return fixed != nil ? bottom + 20 : bottom + 40          // в режиме «один звук» нижней панели нет
     }
 
     private var topInset: CGFloat {
@@ -790,6 +793,7 @@ struct ReelPage: View {
     @Environment(\.lang) private var lang
     @Environment(\.openURL) private var systemOpenURL
     @ObservedObject private var bookmarks = BookmarkStore.shared
+    @ObservedObject private var scrubBus = ReelScrubBus.shared
 
     @State private var player: AVPlayer?
     @State private var timeObserver: Any?
@@ -955,8 +959,8 @@ struct ReelPage: View {
                     Spacer(minLength: 30)
                     rail
                 }
-                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, 10)
-                progressBar
+                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, 6)
+                progressBar(hitHeight: 48)                       // широкая зона перемотки: промазать по полоске трудно
                     .padding(.horizontal, 14)
                 Color.clear.frame(height: bottomClear + Self.safeBottom)         // место под плавающую панель вкладок (+ нижний отступ экрана, который слой больше не учитывает сам)
             }
@@ -973,6 +977,17 @@ struct ReelPage: View {
         }
         .onChange(of: near) { _, now in now ? makePlayer() : destroyPlayer() }
         .onChange(of: active) { _, now in now ? activate() : deactivate() }
+        // перемотка жестом по панели вкладок (как в TikTok) — применяем только к активному ролику
+        .onChange(of: scrubBus.tick) { _, _ in
+            guard active, let f = scrubBus.target else { return }
+            scrubbing = true
+            progress = f
+            if let item = player?.currentItem, item.duration.seconds.isFinite {
+                player?.seek(to: CMTime(seconds: item.duration.seconds * f, preferredTimescale: 600),
+                             toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
+        .onChange(of: scrubBus.active) { _, on in if active, !on { scrubbing = false } }
         .onChange(of: suspended) { _, now in
             guard active else { return }
             if now { pauseClock(); player?.pause() }
@@ -1020,6 +1035,7 @@ struct ReelPage: View {
         timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { t in
             let d = p.currentItem?.duration.seconds ?? 0
             if d.isFinite, d > 0, !scrubbing { progress = min(1, t.seconds / d) }
+            if active { ReelScrubBus.shared.currentFrac = progress }     // чтобы панель вкладок знала, откуда перематывать
             if !ready, t.seconds > 0.05 { ready = true }
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { _ in
@@ -1149,7 +1165,7 @@ struct ReelPage: View {
                             Text("/ " + clock(duration)).font(.system(size: 14).monospacedDigit()).foregroundStyle(.white.opacity(0.65))
                             Spacer()
                         }
-                        progressBar
+                        progressBar()
                         HStack(spacing: 26) {
                             lsAction(count: short(post.likes), action: { if !post.likedByMe { burst += 1; Haptics.impact(.medium) }; onLike() }) {
                                 StoryHeart(liked: post.likedByMe, burst: burst, size: 24, solidWhenIdle: true)
@@ -1546,18 +1562,24 @@ struct ReelPage: View {
 
     // MARK: Полоса прогресса: тонкая линия с точкой, при касании толстеет
 
-    private var progressBar: some View {
+    /// hitHeight — высота зоны перемотки: в портрете делаем её большой, чтобы «промазать» по тонкой полоске
+    /// было почти невозможно (как в TikTok). Сама полоса остаётся тонкой и стоит внизу зоны, у панели вкладок.
+    private func progressBar(hitHeight: CGFloat = 26) -> some View {
         GeometryReader { geo in
             let w = geo.size.width
             let x = max(0, min(w, w * progress))
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.28)).frame(height: scrubbing ? 5 : 2.5)
-                Capsule().fill(.white).frame(width: max(5, x), height: scrubbing ? 5 : 2.5)
-                Circle().fill(.white).frame(width: scrubbing ? 13 : 7, height: scrubbing ? 13 : 7)
-                    .shadow(color: .black.opacity(0.35), radius: 2)
-                    .offset(x: max(0, x - (scrubbing ? 6.5 : 3.5)))
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.28)).frame(height: scrubbing ? 5 : 2.5)
+                    Capsule().fill(.white).frame(width: max(5, x), height: scrubbing ? 5 : 2.5)
+                    Circle().fill(.white).frame(width: scrubbing ? 13 : 7, height: scrubbing ? 13 : 7)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                        .offset(x: max(0, x - (scrubbing ? 6.5 : 3.5)))
+                }
+                .frame(height: 13)
             }
-            .frame(height: 26)
+            .frame(height: hitHeight)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { v in
@@ -1571,7 +1593,7 @@ struct ReelPage: View {
                 }
                 .onEnded { _ in scrubbing = false })
         }
-        .frame(height: 26)
+        .frame(height: hitHeight)
         .animation(.easeOut(duration: 0.15), value: scrubbing)
     }
 }
