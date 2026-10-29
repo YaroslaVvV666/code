@@ -32,9 +32,6 @@ struct MessageMeta: View {
                 Text(views >= 1000 ? String(format: "%.1fK", Double(views) / 1000) : "\(views)").font(.system(size: 11))
                 Text("·").font(.system(size: 11))
             }
-            if let note = message.note {
-                MessageNoteChip(messageID: message.id, note: note, color: color)
-            }
             if message.editedAt != nil {
                 Text(Strings(lang: lang).edited).font(.system(size: 11))
             }
@@ -76,13 +73,13 @@ extension EnvironmentValues {
     }
 }
 
-/// Заметка мелким текстом слева от времени. Длинная обрезается; нажатие — полная версия во всплывающем окне
+/// Заметка отдельным пузырьком, чуть заезжающим на низ сообщения. Длинная обрезается;
+/// нажатие — полная версия во всплывающем окне.
 struct MessageNoteChip: View {
     let messageID: String
     let note: String
-    let color: Color
 
-    static let maxChars = 16
+    static let maxChars = 18
 
     /// Длинная — первые символы и «…»; ширина предсказуема, под неё в пузыре оставляется место
     static func short(_ note: String) -> String {
@@ -96,13 +93,17 @@ struct MessageNoteChip: View {
     @State private var expanded = false
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             Image(systemName: "note.text").font(.system(size: 9, weight: .semibold))
-            Text(Self.short(note)).font(.system(size: 11).italic()).lineLimit(1)
+            Text(Self.short(note)).font(.system(size: 11, weight: .medium).italic()).lineLimit(1)
         }
+        .foregroundStyle(theme.textSecondary)
         .fixedSize()
-        .padding(.trailing, 2)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(theme.surface, in: Capsule())
+        .overlay(Capsule().stroke(theme.stroke, lineWidth: 0.6))
+        .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.14), radius: 4, y: 1)
+        .contentShape(Capsule())
         .onTapGesture {
             guard editNote != nil, !MessageMenu.isOpen else { return }
             Haptics.select()
@@ -352,7 +353,17 @@ struct MessageRow: View {
 
     private var content: some View {
         VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
-            if let info = callInfo { callBubble(info) } else { core }
+            Group {
+                if let info = callInfo { callBubble(info) } else { core }
+            }
+            .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                // заметка — отдельный пузырёк, чуть заезжающий на низ сообщения (виден только вам)
+                if let note = message.note {
+                    MessageNoteChip(messageID: message.id, note: note)
+                        .offset(x: mine ? -14 : 14, y: 13)
+                }
+            }
+            .padding(.bottom, message.note != nil ? 16 : 0)      // место под выступающий пузырёк
             if !message.reactions.isEmpty { reactionChips }
         }
     }
@@ -492,7 +503,6 @@ struct MessageRow: View {
         // Короткому сообщению не добавляем лишнего, длинному — время не наезжает на текст.
         let metaGap: CGFloat = 10                              // обязательный зазор «текст ↔ время»
         let metaWidth: CGFloat = 24 + (mine ? 14 : 0) + (message.editedAt != nil ? 44 : 0)
-            + (message.note.map { n in 16 + CGFloat(MessageNoteChip.short(n).count) * 5.8 } ?? 0)
             + (message.views.map { v -> CGFloat in
                 // глаз + число + «·» + три зазора; число считаем так же, как рисует MessageMeta
                 let text = v >= 1000 ? String(format: "%.1fK", Double(v) / 1000) : "\(v)"
