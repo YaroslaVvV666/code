@@ -1737,6 +1737,8 @@ struct ChatScreen: View {
                 }
                 if !atBottom {
                     Button {
+                        // прыжок вниз = всё ниже прочитано: сразу гасим счётчик, кнопка уедет сама (atBottom)
+                        withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
                         withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                     } label: {
                         Image(systemName: "chevron.down")
