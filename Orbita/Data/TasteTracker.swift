@@ -166,6 +166,47 @@ extension ExtrasAPI {
         return try decodeAPI(MyReportListDTO.self, from: data).reports
     }
 
+    // MARK: Техподдержка
+
+    /// Новое обращение в поддержку. link — необязательная привязка к объекту (жалоба).
+    @discardableResult
+    func openSupportTicket(topic: String, text: String, subject: String = "",
+                           linkKind: String? = nil, linkID: String? = nil) async throws -> SupportTicket {
+        var body: [String: Any] = ["topic": topic, "text": text]
+        if !subject.isEmpty { body["subject"] = subject }
+        if let linkKind { body["link_kind"] = linkKind }
+        if let linkID { body["link_id"] = linkID }
+        let data = try await api.request("POST", "/v1/support/tickets", body: ServerAPI.json(body))
+        return try decodeAPI(SupportTicketDTO.self, from: data).ticket
+    }
+
+    /// Мои обращения в поддержку
+    func supportTickets() async throws -> [SupportTicket] {
+        let data = try await api.request("GET", "/v1/support/tickets")
+        return try decodeAPI(SupportTicketListDTO.self, from: data).tickets
+    }
+
+    /// Переписка по обращению (открытие снимает отметку непрочитанного)
+    func supportThread(id: String) async throws -> SupportTicket {
+        let data = try await api.request("GET", "/v1/support/tickets/\(id)")
+        return try decodeAPI(SupportTicketDTO.self, from: data).ticket
+    }
+
+    /// Ответ пользователя в своём обращении
+    @discardableResult
+    func replySupport(id: String, text: String) async throws -> SupportTicket {
+        let data = try await api.request("POST", "/v1/support/tickets/\(id)/messages",
+                                         body: ServerAPI.json(["text": text]))
+        return try decodeAPI(SupportTicketDTO.self, from: data).ticket
+    }
+
+    /// Сколько обращений с непрочитанным ответом поддержки — для значка
+    func supportUnread() async -> Int {
+        guard let data = try? await api.request("GET", "/v1/support/unread"),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
+        return obj["count"] as? Int ?? 0
+    }
+
     /// Репост шортса к себе на страницу / отмена репоста
     @discardableResult
     func setReposted(id: String, on: Bool) async throws -> (count: Int, mine: Bool)? {
@@ -237,3 +278,82 @@ struct MyReport: Identifiable, Decodable, Equatable {
 }
 
 struct MyReportListDTO: Decodable { let reports: [MyReport] }
+
+// MARK: - Техподдержка
+
+/// Одно сообщение в обращении: автор — я (`user`) или поддержка (`staff`).
+struct SupportMessage: Identifiable, Decodable, Equatable {
+    let id: String
+    let author: String
+    let body: String
+    let createdAt: Double
+
+    var fromStaff: Bool { author == "staff" }
+
+    enum CodingKeys: String, CodingKey { case id, author, body; case createdAt = "created_at" }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        author = (try? c.decode(String.self, forKey: .author)) ?? "user"
+        body = (try? c.decode(String.self, forKey: .body)) ?? ""
+        createdAt = (try? c.decode(Double.self, forKey: .createdAt)) ?? 0
+    }
+}
+
+/// Обращение в поддержку со статусом и перепиской.
+struct SupportTicket: Identifiable, Decodable, Equatable {
+    let id: String
+    let topic: String
+    let subject: String
+    let status: String          // open | answered | closed
+    let unread: Bool
+    let createdAt: Double
+    let updatedAt: Double
+    let lastBody: String
+    let lastFromStaff: Bool
+    let messages: [SupportMessage]
+
+    enum CodingKeys: String, CodingKey {
+        case id, topic, subject, status, unread, messages, last
+        case createdAt = "created_at", updatedAt = "updated_at"
+    }
+    private struct Last: Decodable { let body: String?; let author: String? }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        topic = (try? c.decode(String.self, forKey: .topic)) ?? "other"
+        subject = (try? c.decode(String.self, forKey: .subject)) ?? ""
+        status = (try? c.decode(String.self, forKey: .status)) ?? "open"
+        unread = (try? c.decode(Bool.self, forKey: .unread)) ?? false
+        createdAt = (try? c.decode(Double.self, forKey: .createdAt)) ?? 0
+        updatedAt = (try? c.decode(Double.self, forKey: .updatedAt)) ?? 0
+        messages = (try? c.decode([SupportMessage].self, forKey: .messages)) ?? []
+        let last = try? c.decode(Last.self, forKey: .last)
+        lastBody = last?.body ?? messages.last?.body ?? ""
+        lastFromStaff = (last?.author ?? messages.last?.author) == "staff"
+    }
+}
+
+struct SupportTicketDTO: Decodable { let ticket: SupportTicket }
+struct SupportTicketListDTO: Decodable { let tickets: [SupportTicket] }
+
+/// Темы обращений — совпадают с набором на сервере (SUPPORT_TOPICS).
+enum SupportTopics {
+    static func list(_ s: Strings) -> [(code: String, title: String, icon: String)] {
+        [("bug", s.t("Ошибка в приложении", "App bug"), "ladybug"),
+         ("account", s.t("Аккаунт и вход", "Account & login"), "person.crop.circle"),
+         ("payment", s.t("Оплата и подписка", "Payments"), "creditcard"),
+         ("safety", s.t("Безопасность", "Safety"), "lock.shield"),
+         ("complaint", s.t("Жалоба", "Complaint"), "exclamationmark.bubble"),
+         ("idea", s.t("Идея или пожелание", "Idea / feedback"), "lightbulb"),
+         ("other", s.t("Другое", "Other"), "ellipsis.circle")]
+    }
+    static func title(_ code: String, _ s: Strings) -> String {
+        list(s).first { $0.code == code }?.title ?? s.t("Другое", "Other")
+    }
+    static func icon(_ code: String) -> String {
+        ["bug": "ladybug", "account": "person.crop.circle", "payment": "creditcard",
+         "safety": "lock.shield", "complaint": "exclamationmark.bubble", "idea": "lightbulb"][code] ?? "ellipsis.circle"
+    }
+}

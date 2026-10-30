@@ -17,6 +17,8 @@ struct PrivacyScreen: View {
     @State private var gestureFX = GestureEffects.enabled
     @State private var showSensitive = SensitiveContent.alwaysShow
     @State private var showMyReports = false
+    @State private var showSupport = false
+    @State private var supportUnread = 0
 
     private var s: Strings { Strings(lang: lang) }
     private var privacy: PrivacySettings { store.profile?.privacy ?? PrivacySettings() }
@@ -41,6 +43,12 @@ struct PrivacyScreen: View {
                 SettingsRow(icon: "exclamationmark.bubble.fill", tint: .orange,
                             title: s.t("Мои жалобы", "My reports"), showsChevron: true) {
                     showMyReports = true
+                }
+                SettingsDivider()
+                SettingsRow(icon: "headphones", tint: .green,
+                            title: s.t("Техподдержка", "Support"),
+                            value: supportUnread > 0 ? String(supportUnread) : nil, showsChevron: true) {
+                    showSupport = true
                 }
                 SettingsDivider()
                 SettingsRow(icon: "lock.shield.fill", tint: .teal, title: s.twoFATitle,
@@ -259,9 +267,17 @@ struct PrivacyScreen: View {
         }
         .task {
             blockedCount = (try? await session.socialRepo.blocks().count) ?? 0
+            supportUnread = await session.extras.supportUnread()
         }
         .sheet(isPresented: $showMyReports) {
             NavigationStack { MyReportsView() }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showSupport, onDismiss: { Task { supportUnread = await session.extras.supportUnread() } }) {
+            NavigationStack { SupportView() }
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .preferredColorScheme(theme.dark ? .dark : .light)

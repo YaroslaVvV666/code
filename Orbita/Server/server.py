@@ -421,6 +421,18 @@ DB.execute("CREATE TABLE IF NOT EXISTS reports("
            "resolution TEXT, handled_by TEXT, handled_at REAL)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter, created_at)")
+# техподдержка: обращения пользователей (диалог человек ↔ поддержка). Сюда же сводятся жалобы.
+#   status: open — ждёт ответа поддержки, answered — поддержка ответила, closed — закрыто.
+DB.execute("CREATE TABLE IF NOT EXISTS support_tickets("
+           "id TEXT PRIMARY KEY, user TEXT NOT NULL, topic TEXT NOT NULL DEFAULT 'other', subject TEXT, "
+           "status TEXT NOT NULL DEFAULT 'open', created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+           "unread_user INTEGER NOT NULL DEFAULT 0, link_kind TEXT, link_id TEXT)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_user ON support_tickets(user, updated_at DESC)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_status ON support_tickets(status, updated_at)")
+DB.execute("CREATE TABLE IF NOT EXISTS support_messages("
+           "id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, "
+           "created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_msg ON support_messages(ticket_id, created_at)")
 # индексы под самые частые выборки (лента «для вас», непрочитанные, скрытые сообщения групп)
 DB.execute("CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_reel ON posts(reel, created_at DESC)")
@@ -3676,6 +3688,153 @@ def admin_resolve_report(req, me, rid):
     run("UPDATE reports SET status = ?, resolution = ?, handled_by = ?, handled_at = ? WHERE id = ?",
         (status, resolution, label, time.time(), rid))
     admin_audit(req, "resolve_report:" + resolution, rid)
+    req.send_json(200, {"ok": True})
+
+
+# ---------- техподдержка ----------
+
+SUPPORT_TOPICS = {"bug", "account", "payment", "safety", "complaint", "idea", "other"}
+
+
+def ticket_json(t, with_messages=False):
+    j = {"id": t["id"], "topic": t["topic"], "subject": t["subject"] or "",
+         "status": t["status"], "created_at": t["created_at"], "updated_at": t["updated_at"],
+         "unread": bool(t["unread_user"]), "link_kind": t["link_kind"], "link_id": t["link_id"]}
+    last = q1("SELECT body, author, created_at FROM support_messages WHERE ticket_id = ? "
+              "ORDER BY created_at DESC LIMIT 1", (t["id"],))
+    if last:
+        j["last"] = {"body": last["body"], "author": last["author"], "created_at": last["created_at"]}
+    if with_messages:
+        j["messages"] = [{"id": m["id"], "author": m["author"], "body": m["body"], "created_at": m["created_at"]}
+                         for m in q("SELECT * FROM support_messages WHERE ticket_id = ? ORDER BY created_at", (t["id"],))]
+    return j
+
+
+@route("POST", r"/v1/support/tickets")
+def support_open(req, me):
+    """Новое обращение в поддержку: тема + первое сообщение. Можно привязать к объекту (жалоба)."""
+    body = req.body_json()
+    topic = str(body.get("topic", "other"))
+    if topic not in SUPPORT_TOPICS:
+        topic = "other"
+    text = str(body.get("text", "")).strip()[:4000]
+    if not text:
+        raise ApiError(400, "empty")
+    subject = str(body.get("subject", "")).strip()[:120] or None
+    link_kind = str(body.get("link_kind", ""))[:32] or None
+    link_id = str(body.get("link_id", ""))[:64] or None
+    now = time.time()
+    tid = uuid.uuid4().hex
+    run("INSERT INTO support_tickets(id, user, topic, subject, status, created_at, updated_at, unread_user, link_kind, link_id) "
+        "VALUES (?,?,?,?, 'open', ?, ?, 0, ?, ?)", (tid, me["id"], topic, subject, now, now, link_kind, link_id))
+    run("INSERT INTO support_messages(id, ticket_id, author, body, created_at) VALUES (?,?, 'user', ?, ?)",
+        (uuid.uuid4().hex, tid, text, now))
+    req.send_json(200, {"ok": True, "ticket": ticket_json(q1("SELECT * FROM support_tickets WHERE id = ?", (tid,)), True)})
+
+
+@route("GET", r"/v1/support/tickets")
+def support_list(req, me):
+    """Мои обращения со статусом и последним сообщением."""
+    rows = q("SELECT * FROM support_tickets WHERE user = ? ORDER BY updated_at DESC LIMIT 200", (me["id"],))
+    req.send_json(200, {"tickets": [ticket_json(t) for t in rows]})
+
+
+@route("GET", r"/v1/support/unread")
+def support_unread(req, me):
+    """Сколько обращений с непрочитанным ответом поддержки — для значка."""
+    n = q1("SELECT COUNT(*) c FROM support_tickets WHERE user = ? AND unread_user = 1", (me["id"],))["c"]
+    req.send_json(200, {"count": n})
+
+
+@route("GET", r"/v1/support/tickets/([a-f0-9]+)")
+def support_thread(req, me, tid):
+    """Переписка по обращению. Открытие снимает отметку непрочитанного."""
+    t = q1("SELECT * FROM support_tickets WHERE id = ? AND user = ?", (tid, me["id"]))
+    if not t:
+        raise ApiError(404, "not_found")
+    if t["unread_user"]:
+        run("UPDATE support_tickets SET unread_user = 0 WHERE id = ?", (tid,))
+        t = q1("SELECT * FROM support_tickets WHERE id = ?", (tid,))
+    req.send_json(200, {"ticket": ticket_json(t, True)})
+
+
+@route("POST", r"/v1/support/tickets/([a-f0-9]+)/messages")
+def support_reply(req, me, tid):
+    """Ответ пользователя в своём обращении — заново открывает его для поддержки."""
+    t = q1("SELECT * FROM support_tickets WHERE id = ? AND user = ?", (tid, me["id"]))
+    if not t:
+        raise ApiError(404, "not_found")
+    text = str(req.body_json().get("text", "")).strip()[:4000]
+    if not text:
+        raise ApiError(400, "empty")
+    now = time.time()
+    run("INSERT INTO support_messages(id, ticket_id, author, body, created_at) VALUES (?,?, 'user', ?, ?)",
+        (uuid.uuid4().hex, tid, text, now))
+    run("UPDATE support_tickets SET status = 'open', updated_at = ? WHERE id = ?", (now, tid))
+    req.send_json(200, {"ok": True, "ticket": ticket_json(q1("SELECT * FROM support_tickets WHERE id = ?", (tid,)), True)})
+
+
+@route("GET", r"/v1/admin/support", auth=False)
+def admin_support_list(req, me):
+    """Бэк-офис поддержки: ?status=open|answered|closed|all. Здесь же счётчик открытых жалоб."""
+    require_admin(req)
+    status = req.query().get("status", "open")
+    if status == "all":
+        rows = q("SELECT * FROM support_tickets ORDER BY updated_at DESC LIMIT 500")
+    else:
+        if status not in ("open", "answered", "closed"):
+            status = "open"
+        rows = q("SELECT * FROM support_tickets WHERE status = ? ORDER BY updated_at ASC LIMIT 500", (status,))
+    out = []
+    for t in rows:
+        j = ticket_json(t)
+        u = q1("SELECT * FROM users WHERE id = ?", (t["user"],))
+        j["user"] = {"id": t["user"], "name": names(u)[2] if u else "—"}
+        out.append(j)
+    counts = {row["status"]: row["c"] for row in q("SELECT status, COUNT(*) c FROM support_tickets GROUP BY status")}
+    counts["reports_open"] = q1("SELECT COUNT(*) c FROM reports WHERE status = 'open'")["c"]
+    req.send_json(200, {"tickets": out, "counts": counts})
+
+
+@route("GET", r"/v1/admin/support/([a-f0-9]+)", auth=False)
+def admin_support_thread(req, me, tid):
+    require_admin(req)
+    t = q1("SELECT * FROM support_tickets WHERE id = ?", (tid,))
+    if not t:
+        raise ApiError(404, "not_found")
+    j = ticket_json(t, True)
+    u = q1("SELECT * FROM users WHERE id = ?", (t["user"],))
+    j["user"] = {"id": t["user"], "name": names(u)[2] if u else "—"}
+    req.send_json(200, j)
+
+
+@route("POST", r"/v1/admin/support/([a-f0-9]+)/reply", auth=False)
+def admin_support_reply(req, me, tid):
+    """Ответ поддержки: сообщение пользователю + отметка непрочитанного. close=true — закрыть."""
+    require_admin(req)
+    t = q1("SELECT * FROM support_tickets WHERE id = ?", (tid,))
+    if not t:
+        raise ApiError(404, "not_found")
+    body = req.body_json()
+    text = str(body.get("text", "")).strip()[:4000]
+    close = bool(body.get("close"))
+    now = time.time()
+    if text:
+        run("INSERT INTO support_messages(id, ticket_id, author, body, created_at) VALUES (?,?, 'staff', ?, ?)",
+            (uuid.uuid4().hex, tid, text, now))
+    new_status = "closed" if close else "answered"
+    run("UPDATE support_tickets SET status = ?, updated_at = ?, unread_user = 1 WHERE id = ?", (new_status, now, tid))
+    admin_audit(req, "support_reply" + (":close" if close else ""), tid)
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/admin/support/([a-f0-9]+)/close", auth=False)
+def admin_support_close(req, me, tid):
+    require_admin(req)
+    if not q1("SELECT 1 FROM support_tickets WHERE id = ?", (tid,)):
+        raise ApiError(404, "not_found")
+    run("UPDATE support_tickets SET status = 'closed', updated_at = ? WHERE id = ?", (time.time(), tid))
+    admin_audit(req, "support_close", tid)
     req.send_json(200, {"ok": True})
 
 

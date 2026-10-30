@@ -14,6 +14,9 @@ struct ChatPreviewBody: View {
     @State private var messages: [ChatMessage] = []
     @State private var firstUnread: String?
     @State private var loading = true
+    // Предпросмотр не проигрывает звук, но пузырь с аудио требует AudioPlayer в окружении.
+    // Даём собственный «пустой» плеер, чтобы превью работало и в баннере, и в списке — без краша.
+    @StateObject private var previewPlayer = AudioPlayer()
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -45,6 +48,7 @@ struct ChatPreviewBody: View {
                 else if let last = messages.last { proxy.scrollTo(last.key, anchor: .bottom) }
             }
         }
+        .environmentObject(previewPlayer)
         .task(id: peer.id) {
             let thread = try? await repo.thread(peerID: peer.id, limit: limit, peek: true)
             firstUnread = thread?.firstUnread
