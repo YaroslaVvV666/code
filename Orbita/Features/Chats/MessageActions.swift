@@ -685,7 +685,10 @@ struct MessageMenuPresenter<Content: View>: View {
         Color.clear
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
-            .onAppear { MessageMenuWindow.show(content) }
+            // Клавиатура живёт в отдельном системном окне, и размытие из окна меню её не затрагивает.
+            // Поэтому на открытии меню убираем клавиатуру — весь экран оказывается под размытием, без «торчащей»
+            // клавиатуры. Выбор «Ответить»/«Изменить» затем сам вернёт её (фокус по replyTo/editing).
+            .onAppear { hideKeyboard(); MessageMenuWindow.show(content) }
             .onDisappear { MessageMenuWindow.hide() }
     }
 }

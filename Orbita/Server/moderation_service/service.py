@@ -1,6 +1,6 @@
 """Сервис моделей для проверки изображений. Запускается отдельно от server.py:
 
-    pip install -r moderation_service/requirements.txt
+    pip install -r moderation_service/requirements-moderation.txt
     ORBITA_MOD_BACKEND=both python3 moderation_service/service.py        # порт 8090
 
 POST /check   тело — JPEG/PNG, ответ: {"verdict": "ok|review|block", "score": 0..1, "labels": {...}}
