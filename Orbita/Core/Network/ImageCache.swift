@@ -21,7 +21,16 @@ final class ImageCache: @unchecked Sendable {
 
     private func key(_ url: URL, _ maxPixel: CGFloat) -> NSString { "\(url.absoluteString)@\(Int(maxPixel))" as NSString }
 
-    /// Мгновенно, без ожидания: есть ли уже готовая картинка (persistKey — аватарка из постоянного дискового кэша)
+    /// Только память — без диска и декодирования. Безопасно звать из init вью и на главном потоке хоть каждый кадр.
+    func memory(_ url: URL, maxPixel: CGFloat) -> UIImage? {
+        memory.object(forKey: key(url, maxPixel))
+    }
+
+    /// Аватарки с диска уже обновляли с сети в этом запуске — повторно не качаем
+    private var refreshed = Set<String>()
+
+    /// Мгновенно, без ожидания: есть ли уже готовая картинка (persistKey — аватарка из постоянного дискового кэша).
+    /// ВНИМАНИЕ: при промахе памяти читает и декодирует файл — не вызывать на главном потоке в горячих местах.
     func cached(_ url: URL, maxPixel: CGFloat, persistKey: String? = nil) -> UIImage? {
         let k = key(url, maxPixel)
         if let hit = memory.object(forKey: k) { return hit }
@@ -35,10 +44,20 @@ final class ImageCache: @unchecked Sendable {
     func load(_ url: URL, maxPixel: CGFloat, persistKey: String? = nil) async -> UIImage? {
         let k = key(url, maxPixel)
         if let hit = memory.object(forKey: k) { return hit }
-        if let persistKey, let disk = AvatarStore.image(persistKey, maxPixel: maxPixel) {
+        // чтение файла и декодирование — явно в фоне (не зависим от того, на каком акторе нас вызвали)
+        var disk: UIImage?
+        if let persistKey {
+            disk = await Task.detached(priority: .userInitiated) { AvatarStore.image(persistKey, maxPixel: maxPixel) }.value
+        }
+        if let persistKey, let disk {
             memory.setObject(disk, forKey: k)
-            // всё равно обновим с сети в фоне (вдруг аватарку сменили) — но результат уже есть
-            Task.detached(priority: .utility) { _ = await self.task(for: k as String, url: url, maxPixel: maxPixel, persistKey: persistKey).value; self.finish(k as String) }
+            // обновим с сети в фоне (вдруг аватарку сменили) — но один раз за запуск, а не при каждом показе
+            lock.lock()
+            let fresh = refreshed.insert(k as String).inserted
+            lock.unlock()
+            if fresh {
+                Task.detached(priority: .utility) { _ = await self.task(for: k as String, url: url, maxPixel: maxPixel, persistKey: persistKey).value; self.finish(k as String) }
+            }
             return disk
         }
         let image = await task(for: k as String, url: url, maxPixel: maxPixel, persistKey: persistKey).value
@@ -104,22 +123,32 @@ struct CachedImage<Content: View>: View {
         self.maxPixel = maxPixel
         self.persistKey = persistKey
         self.content = content
-        _image = State(initialValue: url.flatMap { ImageCache.shared.cached($0, maxPixel: maxPixel, persistKey: persistKey) })
+        // в init — только память: init вызывается при каждом пересчёте тела родителя (а внутри анимаций — каждый кадр),
+        // и чтение файла с декодированием здесь намертво вешало главный поток
+        _image = State(initialValue: url.flatMap { ImageCache.shared.memory($0, maxPixel: maxPixel) })
     }
 
     var body: some View {
         content(image, failed)
             .task(id: url) {
                 guard let url else { image = nil; return }
-                if let hit = ImageCache.shared.cached(url, maxPixel: maxPixel, persistKey: persistKey) { image = hit; failed = false; return }
+                if let hit = ImageCache.shared.memory(url, maxPixel: maxPixel) { image = hit; failed = false; return }
                 image = nil
                 failed = false
+                let started = Date()
+                // диск и сеть — в фоне (load не привязан к главному актору)
                 let loaded = await ImageCache.shared.load(url, maxPixel: maxPixel, persistKey: persistKey)
                 guard !Task.isCancelled else { return }
-                // картинка проявляется плавно, а не выскакивает на место заглушки
-                withAnimation(.easeOut(duration: 0.22)) {
+                if Date().timeIntervalSince(started) < 0.06 {
+                    // нашлось почти сразу (с диска) — ставим без анимации, чтобы не мигала заглушка
                     image = loaded
                     failed = loaded == nil
+                } else {
+                    // картинка проявляется плавно, а не выскакивает на место заглушки
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        image = loaded
+                        failed = loaded == nil
+                    }
                 }
             }
     }

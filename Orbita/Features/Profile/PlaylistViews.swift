@@ -12,6 +12,7 @@ struct MarqueeText: View {
     var size: CGFloat = 14
     var color: Color
     var always: Bool = false                        // всегда бежит (тикер), даже если текст помещается
+    var running: Bool = true                        // false — пока стоит на месте (например, пока профиль догружается)
 
     private let gap: CGFloat = 40
     private let speed: Double = 34                  // точек в секунду
@@ -23,7 +24,9 @@ struct MarqueeText: View {
 
     var body: some View {
         GeometryReader { geo in
-            if width > geo.size.width + 1 || (always && width > 0) {
+            if !running {
+                label.frame(width: geo.size.width, alignment: width > geo.size.width + 1 ? .leading : .center)
+            } else if width > geo.size.width + 1 || (always && width > 0) {
                 TimelineView(.animation) { context in
                     let cycle = Double(width + gap) / speed
                     let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle) / cycle
@@ -324,6 +327,7 @@ struct MusicStrip: View {
     let queue: [Track]
     let canAdd: Bool
     @ObservedObject var player: AudioPlayer
+    var marquee: Bool = true                        // бежит ли строка (в профиле — только когда всё догрузилось)
     let onAdd: () -> Void
 
     @Environment(\.theme) private var theme
@@ -342,7 +346,7 @@ struct MusicStrip: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(theme.accentColor)
                         .frame(width: 20)
-                    MarqueeText(text: track.display, size: 14, color: theme.text, always: true)
+                    MarqueeText(text: track.display, size: 14, color: theme.text, always: true, running: marquee)
                         .frame(maxWidth: 220)
                 }
                 .padding(.horizontal, 14)

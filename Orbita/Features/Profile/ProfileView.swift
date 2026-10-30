@@ -78,6 +78,8 @@ struct ProfileView: View {
     // (иначе вход в профиль «лагает»), а подключаем чуть позже и плавно проявляем. В тот же сеанс — сразу, без задержки.
     @State private var avatarReveal: Double = ProfileFirstReveal.done ? 1 : 0
     @State private var stageMounted: Bool = ProfileFirstReveal.done
+    /// Строка с песней бежит, только когда всё догрузилось (шапка на месте, аватарки друзей встали на орбиты)
+    @State private var marqueeOn: Bool = ProfileFirstReveal.done
 
     private var s: Strings { Strings(lang: lang) }
     private var name: String { store.profile?.name ?? flow.userName }
@@ -177,6 +179,7 @@ struct ProfileView: View {
             floatingName
         }
         .onAppear(perform: mountStageIfNeeded)
+        .task { await startMarqueeWhenSettled() }
         .background(GeometryReader { g in
             Color.clear.preference(key: StackTopKey.self, value: g.frame(in: .global).minY)
         })
@@ -205,6 +208,18 @@ struct ProfileView: View {
             stageMounted = true
             withAnimation(.easeOut(duration: 0.6)) { avatarReveal = 1 }
         }
+    }
+
+    /// Ждём, пока шапка подключится и все аватарки друзей встанут на орбиты, — потом запускаем бегущую строку
+    private func startMarqueeWhenSettled() async {
+        guard !marqueeOn else { return }
+        while !Task.isCancelled {
+            let key = (store.profile?.orbit ?? []).prefix(5).map(\.id).joined(separator: ",")
+            if stageMounted, store.profile != nil, key.isEmpty || OrbitStage.spinStart[key] != nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard !Task.isCancelled else { return }
+        withAnimation(.easeOut(duration: 0.3)) { marqueeOn = true }
     }
 
     private func setStage(_ n: Int) {
@@ -637,7 +652,7 @@ struct ProfileView: View {
 
             if pullStage == 0 {
             MusicStrip(track: store.profile?.track, queue: store.profile?.track.map { [$0] } ?? [],
-                       canAdd: true, player: session.player) { openPlaylist() }
+                       canAdd: true, player: session.player, marquee: marqueeOn) { openPlaylist() }
                 .padding(.top, 4)
             }
 

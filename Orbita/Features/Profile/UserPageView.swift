@@ -1132,6 +1132,15 @@ private struct OrbitRingRectKey: PreferenceKey {
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
+/// Общее на весь запуск состояние появления орбиты: один источник правды для обоих слоёв кольца
+/// (передний и задний план). Живёт, пока жив процесс — после перезапуска приложения всё покажется заново, по очереди.
+/// Трогается только с главного потока (тело вью и .task вью).
+enum OrbitStage {
+    static var revealedAt: [String: TimeInterval] = [:]     // друг → когда его аватарка появилась
+    static var spinStart: [String: TimeInterval] = [:]      // кольцо → когда начать вращение
+    static var loading: Set<String> = []                    // кольца, которые прямо сейчас грузятся
+}
+
 /// Цвет пузыря по аватарке: оттенок самых насыщенных пикселей, насыщенность ≥ 0.55, яркость 0.6–0.9
 enum OrbitTone {
     private static var cache: [String: UIColor] = [:]
@@ -1192,16 +1201,53 @@ struct OrbitRing: View {
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    @State private var tones: [String: UIColor] = [:]
     @State private var opened: OrbitFriend?
-    // Момент появления кольца: аватарки друзей не вылетают все разом (это лагало при входе в профиль),
-    // а добавляются по одной и плавно — декодирование картинок растягивается во времени, без рывка.
-    @State private var bornAt: TimeInterval = 0
 
     private var shown: [OrbitFriend] { Array(friends.prefix(5)) }
+    private var ringKey: String { shown.map(\.id).joined(separator: ",") }
 
-    /// Через сколько секунд после появления кольца показать i-ю аватарку (пауза + по одной).
-    private func revealAt(_ i: Int) -> TimeInterval { bornAt + 0.35 + Double(i) * 0.33 }
+    /// Базовый размер пузыря: рисуем всегда в нём и масштабируем по глубине, чтобы картинка не перерисовывалась
+    private var bubbleBase: CGFloat { avatarSize * 0.36 * 1.10 }
+
+    /// Первый показ за запуск: аватарки грузятся в фоне строго по очереди, и каждая появляется, только когда её
+    /// картинка уже в памяти — «прилетает» от аватарки на свою орбиту. Пока не встали все, орбита стоит; потом плавно
+    /// разгоняется. Повторные заходы в тот же запуск — сразу, уже кружатся.
+    private func stage() async {
+        let key = ringKey
+        guard !OrbitStage.loading.contains(key) else { return }      // второй слой кольца (перед/зад) не дублирует работу
+        OrbitStage.loading.insert(key)
+        defer { OrbitStage.loading.remove(key) }
+        let pending = shown.filter { OrbitStage.revealedAt[$0.id] == nil }
+        if !pending.isEmpty {
+            try? await Task.sleep(nanoseconds: 300_000_000)            // сначала спокойно открывается сам профиль
+            if Task.isCancelled { return }
+        }
+        var last = Date().timeIntervalSinceReferenceDate
+        for f in pending {
+            if let id = f.avatarID, let url = ServerConfig.mediaURL(id) {
+                _ = await ImageCache.shared.load(url, maxPixel: AvatarView.pixelBucket(bubbleBase), persistKey: id)
+            }
+            _ = await OrbitTone.load(f)                                 // цвет свечения (тоже в фоне, с кэшем)
+            if Task.isCancelled { return }
+            let now = Date().timeIntervalSinceReferenceDate
+            let at = max(now, last + 0.3)                               // по одной, не чаще чем раз в 0.3 с
+            if at > now { try? await Task.sleep(nanoseconds: UInt64((at - now) * 1_000_000_000)) }
+            if Task.isCancelled { return }
+            OrbitStage.revealedAt[f.id] = at
+            last = at
+        }
+        if OrbitStage.spinStart[key] == nil {
+            OrbitStage.spinStart[key] = (pending.isEmpty ? Date().timeIntervalSinceReferenceDate - 10 : last + 0.8)
+        }
+    }
+
+    /// «Время орбиты»: 0, пока аватарки встают на места; затем скорость плавно нарастает до обычной
+    private func orbitTime(_ t: TimeInterval) -> Double {
+        guard let start = OrbitStage.spinStart[ringKey] else { return 0 }
+        let x = t - start, ramp = 1.6
+        if x <= 0 { return 0 }
+        return x < ramp ? x * x / (2 * ramp) : x - ramp / 2
+    }
 
     private func hash(_ id: String, _ k: Int) -> Double {
         var h: UInt32 = 2166136261
@@ -1248,10 +1294,7 @@ struct OrbitRing: View {
             if mine { OrbitPlayerProbe(player: session.player) { ring($0) } } else { ring(listening) }
         }
         .frame(width: avatarSize, height: avatarSize)
-        .onAppear { if bornAt == 0 { bornAt = Date().timeIntervalSinceReferenceDate } }
-        .task(id: friends.map(\.id)) {
-            for f in shown where tones[f.id] == nil { tones[f.id] = await OrbitTone.load(f) }
-        }
+        .task(id: ringKey) { await stage() }
         .fullScreenCover(item: $opened) { f in
             PublicProfileSheet(source: .id(f.id), backButton: true)
                 .environmentObject(session)
@@ -1265,18 +1308,18 @@ struct OrbitRing: View {
     private func ring(_ active: Bool) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 45)) { ctx in
             let t = ctx.date.timeIntervalSinceReferenceDate
-            let pos = positions(t)
+            let pos = positions(orbitTime(t))
             ZStack {
                 ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
                     let p = pos[i]
-                    // показываем только когда настал черёд этой аватарки, и плавно её проявляем
-                    let age = bornAt > 0 ? t - revealAt(i) : -1
-                    if (p.z >= 0) == front, age >= 0 {
-                        let appear = min(1, age / 0.5)
+                    // аватарка есть на экране, только когда её картинка уже готова (см. stage)
+                    if let at = OrbitStage.revealedAt[f.id], t >= at, (p.z >= 0) == front {
+                        let a = min(1, (t - at) / 0.7)
+                        let e = 1 - pow(1 - a, 3)                             // плавное торможение в конце
                         bubble(f, z: p.z, t: t, active: active)
-                            .scaleEffect(0.6 + 0.4 * appear)
-                            .opacity(appear)
-                            .offset(x: p.x, y: p.y)
+                            .scaleEffect(0.35 + 0.65 * e)
+                            .opacity(min(1, a * 1.8))
+                            .offset(x: p.x * e, y: p.y * e)                  // вылетает из-за аватарки на свою орбиту
                             .zIndex(p.z)
                     }
                 }
@@ -1292,10 +1335,10 @@ struct OrbitRing: View {
     }
 
     private func bubble(_ f: OrbitFriend, z: Double, t: TimeInterval, active: Bool) -> some View {
-        let ui = tones[f.id] ?? OrbitTone.cached(f.id) ?? UIColor(hue: 0.85, saturation: 0.7, brightness: 0.88, alpha: 1)
+        let ui = OrbitTone.cached(f.id) ?? UIColor(hue: 0.85, saturation: 0.7, brightness: 0.88, alpha: 1)
         let neon = Color(ui)
         let k = 0.80 + 0.30 * (z + 1) / 2                        // дальше — меньше
-        let d = avatarSize * 0.36 * k
+        let d = bubbleBase                                        // рисуем в постоянном размере, глубину даёт scaleEffect ниже
         return ZStack {
             Circle().fill(RadialGradient(colors: [neon.opacity(0.45), neon.opacity(0)], center: .center, startRadius: d * 0.3, endRadius: d * 0.72))
                 .frame(width: d * 1.5, height: d * 1.5)
@@ -1309,6 +1352,7 @@ struct OrbitRing: View {
             }
         }
         .frame(width: d, height: d)
+        .scaleEffect(k / 1.10)
         .opacity(0.72 + 0.28 * (z + 1) / 2)
         .padding(20)                                                  // зона нажатия шире самой аватарки на 20pt со всех сторон
         .background(Circle().fill(Color.white.opacity(0.001)))        // нажимается даже там, где нет фото и ничего не нарисовано

@@ -104,6 +104,8 @@ struct ProfileBackdrop: View {
                                       y: cy + sin(rad) * s.r * geo.size.width * 0.52)
                     }
                 }
+                // 32 эмодзи с масками — одним слоем: при прокрутке профиля шапка не пересобирает их по отдельности
+                .drawingGroup()
             }
         }
         .frame(height: height)
