@@ -282,7 +282,7 @@ struct MyReportListDTO: Decodable { let reports: [MyReport] }
 // MARK: - Техподдержка
 
 /// Одно сообщение в обращении: автор — я (`user`) или поддержка (`staff`).
-struct SupportMessage: Identifiable, Decodable, Equatable {
+struct SupportMessage: Identifiable, Decodable, Equatable, Hashable {
     let id: String
     let author: String
     let body: String
@@ -301,7 +301,7 @@ struct SupportMessage: Identifiable, Decodable, Equatable {
 }
 
 /// Обращение в поддержку со статусом и перепиской.
-struct SupportTicket: Identifiable, Decodable, Equatable {
+struct SupportTicket: Identifiable, Decodable, Equatable, Hashable {
     let id: String
     let topic: String
     let subject: String
