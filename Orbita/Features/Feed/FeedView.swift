@@ -463,30 +463,32 @@ struct PostCard: View {
     private var cardBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
+                // аватар + имя — одна большая зона нажатия на профиль
                 Button { onOpenAuthor?(post.author) } label: {
-                    AvatarView(name: post.author.name, size: 46, avatarID: post.author.avatarID)
-                        .clipShape(Circle())
+                    HStack(spacing: 12) {
+                        AvatarView(name: post.author.name, size: 46, avatarID: post.author.avatarID)
+                            .clipShape(Circle())
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(post.author.name)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                            HStack(spacing: 5) {
+                                if let username = post.author.username {
+                                    Text("@\(username)")
+                                    Text("·")
+                                }
+                                Text(timeText)
+                            }
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(onOpenAuthor == nil)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(post.author.name)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                    HStack(spacing: 5) {
-                        if let username = post.author.username {
-                            Text("@\(username)")
-                            Text("·")
-                        }
-                        Text(timeText)
-                    }
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                }
-
-                Spacer()
 
                 Menu {
                     shareItems
