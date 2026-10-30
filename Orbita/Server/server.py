@@ -1453,6 +1453,35 @@ def admin_media(req, me, mid):
             req.wfile.write(piece)
 
 
+@route("GET", r"/v1/admin/find", auth=False)
+def admin_find(req, me):
+    """Найти пользователя по телефону / юзернейму / id — через слепой индекс (быстро даже на миллионах).
+    Возвращает id и расшифрованный профиль; дальше по id — /v1/admin/export."""
+    require_admin(req)
+    p = req.query()
+    rows = []
+    if p.get("phone"):
+        ph = norm_phone(p["phone"])
+        if ph:
+            rows = q("SELECT * FROM users WHERE phone_idx = ? LIMIT 50", (KR.blind_index(ph, "phone"),))
+    elif p.get("username"):
+        u = p["username"].strip().lstrip("@").lower()
+        if u:
+            rows = q("SELECT * FROM users WHERE username_idx = ? LIMIT 50", (KR.blind_index(u, "username"),))
+    elif p.get("id"):
+        r = q1("SELECT * FROM users WHERE id = ?", (p["id"],))
+        rows = [r] if r else []
+    admin_audit(req, "find", p.get("phone") or p.get("username") or p.get("id") or "")
+    out = []
+    for u in rows:
+        _, _, full = names(u)
+        out.append({"id": u["id"], "name": full,
+                    "username": _dec_try(lambda u=u: dec_profile(u, "username_enc", COL["username"])),
+                    "phone": _dec_try(lambda u=u: dec_profile(u, "phone_enc", COL["phone"])),
+                    "created_at": u["created_at"]})
+    req.send_json(200, {"results": out})
+
+
 @route("GET", r"/v1/admin/access-log", auth=False)
 def admin_access_log(req, me):
     require_admin(req)
