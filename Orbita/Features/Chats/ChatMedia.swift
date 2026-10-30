@@ -53,20 +53,24 @@ final class VoiceRecorder: NSObject, ObservableObject {
             startedAt = Date()
             isRecording = true
             tick = 0
-            timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+            // Снимаем громкость 30 раз в секунду — как раз частота перерисовки диаграммы, поэтому она идёт почти в реальном времени.
+            // Главное: таймер в режиме .common, иначе пока палец держит кнопку записи (трекинг касания) он замирает и волна «залипает».
+            let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
                     guard let self, let r = self.recorder else { return }
                     r.updateMeters()
                     let power = r.averagePower(forChannel: 0)                   // дБ: -160...0
                     let linear = pow(10, power / 20)
                     self.level = min(1, sqrt(linear) * 1.5)
                     self.recent.append(self.level)
-                    if self.recent.count > 60 { self.recent.removeFirst(self.recent.count - 60) }
+                    if self.recent.count > 90 { self.recent.removeFirst(self.recent.count - 90) }
                     self.tick += 1
-                    if self.tick % 2 == 0 { self.samples.append(self.level) }       // 10 отсчётов в секунду
+                    if self.tick % 3 == 0 { self.samples.append(self.level) }       // ~10 отсчётов в секунду в сохранённую волну
                     if r.currentTime >= Self.maxDuration { self.timer?.invalidate() }
                 }
             }
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
             return true
         } catch {
             return false
