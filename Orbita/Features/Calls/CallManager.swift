@@ -41,8 +41,11 @@ final class CallManager: ObservableObject {
         }
         CallRinger.shared.onAnswer = { [weak self] in self?.accept() }
         CallRinger.shared.onDecline = { [weak self] in self?.decline() }
+        // VoIP-пуш разбудил приложение на входящий звонок — подтягиваем его из сервера и соединяемся
+        VoIPPush.shared.onIncomingCall = { [weak self] _, _, _ in self?.wake() }
         engine.onConnected = { [weak self] in self?.connected() }
         engine.onDisconnected = { [weak self] in self?.finish(text: "Соединение потеряно", notify: true) }
+        if CallRinger.shared.consumePendingAnswer() { accept() }     // ответили ещё до запуска приложения
     }
 
     var inCall: Bool { phase != .idle }
@@ -82,6 +85,7 @@ final class CallManager: ObservableObject {
             muted = false
             speaker = incoming.video
             setPhase(.incoming)
+            if pendingAccept { accept() }               // в системном экране уже нажали «Ответить»
         }
         for signal in poll.signals where signal.call == callID { handle(signal) }
     }
@@ -145,8 +149,17 @@ final class CallManager: ObservableObject {
         }
     }
 
+    /// Ответили в системном экране (CallKit) раньше, чем сервер успел сообщить о звонке — примем, как только он придёт
+    private var pendingAccept = false
+
     func accept() {
-        guard phase == .incoming, let id = callID else { return }
+        guard phase == .incoming, let id = callID else {
+            // звонок ещё не подтянулся из poll (например, разбудил VoIP-пуш) — опросим и примем следом
+            pendingAccept = true
+            Task { await pollOnce() }
+            return
+        }
+        pendingAccept = false
         Task {
             guard await permissions(video: video) else {
                 flashError("Разрешите микрофон" + (video ? " и камеру" : "") + " в настройках")

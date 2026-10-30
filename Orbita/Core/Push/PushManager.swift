@@ -56,6 +56,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // регистрируем PushKit сразу при запуске: тогда VoIP-пуш о звонке доходит и при закрытом приложении,
+        // и системный входящий звонок показывается даже на «холодном» старте
+        Task { @MainActor in VoIPPush.shared.activate() }
         return true
     }
 

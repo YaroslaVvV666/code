@@ -162,6 +162,11 @@ struct MainTabView: View {
         .onReceive(PushManager.shared.$token.compactMap { $0 }) { token in
             Task { await session.uploadPush(token: token) }          // и при каждом входе в аккаунт
         }
+        // VoIP-токен (звонки): регистрируем PushKit и отдаём токен серверу отдельным каналом
+        .task { VoIPPush.shared.activate() }
+        .onReceive(VoIPPush.shared.$token.compactMap { $0 }) { token in
+            Task { await session.uploadPush(token: token, kind: "voip") }
+        }
         .onChange(of: push.openChat) { _, route in
             if route != nil { tab = .chats }
         }

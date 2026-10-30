@@ -308,6 +308,7 @@ def ensure_column(table, column, ddl):
 
 
 ensure_column("group_messages", "kind", "kind TEXT")
+ensure_column("push_tokens", "kind", "kind TEXT NOT NULL DEFAULT 'alert'")    # 'alert' — обычные уведомления, 'voip' — звонки (PushKit)
 ensure_column("tracks", "cover", "cover TEXT")                                       # обложка трека (картинка из тегов файла)
 ensure_column("stories", "permanent", "permanent INTEGER NOT NULL DEFAULT 0")
 ensure_column("messages", "kind", "kind TEXT")
@@ -5176,7 +5177,7 @@ def notify_message(sender, recipient, text):
     if not push.configured():
         return
     try:
-        rows = q("SELECT * FROM push_tokens WHERE user_id = ?", (recipient,))
+        rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (recipient,))
         if not rows:
             return
         brief = user_brief(sender, recipient)
@@ -5196,14 +5197,15 @@ def register_push(req, me):
     d = req.body_json()
     token = str(d.get("token", "")).strip().lower()
     environment = "sandbox" if d.get("env") == "sandbox" else "production"
+    kind = "voip" if d.get("kind") == "voip" else "alert"
     if not re.fullmatch(r"[0-9a-f]{64,200}", token):
         raise ApiError(400, "bad_value")
     idx = KR.blind_index(token, "push")
     run("DELETE FROM push_tokens WHERE token_idx = ?", (idx,))       # устройство могло сменить аккаунт
     pid = uuid.uuid4().hex
-    run("INSERT INTO push_tokens(id, user_id, session_id, token_idx, token_enc, env, updated_at) VALUES (?,?,?,?,?,?,?)",
+    run("INSERT INTO push_tokens(id, user_id, session_id, token_idx, token_enc, env, kind, updated_at) VALUES (?,?,?,?,?,?,?,?)",
         (pid, me["id"], me["session_id"], idx, enc(me["id"], "push", COL["push_token"], pid, token),
-         environment, time.time()))
+         environment, kind, time.time()))
     req.send_json(200, {"ok": True, "push": push.configured()})
 
 
@@ -5896,46 +5898,128 @@ CREATE INDEX IF NOT EXISTS idx_calllog_user ON call_log(caller, callee, created_
 DB.executescript(CALL_LOG_SCHEMA)
 
 
-def ice_servers():
-    """STUN помогает собеседникам узнать свои внешние адреса, TURN — ретранслятор на случай строгого NAT (мобильные сети).
-    Без TURN звонки между разными сетями часто не соединяются, поэтому в проде TURN обязателен.
-
-    Поддерживается два способа задать TURN:
-      1) постоянные логин/пароль — ORBITA_TURN_USER / ORBITA_TURN_PASS;
-      2) временные логины coturn (use-auth-secret) — ORBITA_TURN_SECRET: сервер выдаёт на каждый звонок
-         короткоживущий логин, пароль которого нельзя переиспользовать. Это безопаснее постоянного пароля."""
-    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302",
-                         "stun:stun2.l.google.com:19302"]}]
+def _turn_pool():
+    """Список TURN-серверов. Приоритет: ORBITA_TURN_POOL (JSON — несколько серверов в разных городах,
+    с координатами для выбора ближайшего), иначе один ORBITA_TURN_URL/SECRET (как раньше).
+    Формат POOL: [{"id":"msk","urls":["turn:..."],"secret":"...","lat":55.75,"lon":37.6}, ...]"""
+    raw = os.environ.get("ORBITA_TURN_POOL")
+    if raw:
+        try:
+            pool = json.loads(raw)
+            return [p for p in pool if p.get("urls")]
+        except (ValueError, TypeError):
+            pass
     turn = os.environ.get("ORBITA_TURN_URL")
     if turn:
-        urls = [u.strip() for u in turn.split(",") if u.strip()]
-        secret = os.environ.get("ORBITA_TURN_SECRET")
-        if secret:
-            # coturn REST API: username = "<срок_истечения>:<метка>", password = HMAC-SHA1(secret, username)
-            ttl = int(os.environ.get("ORBITA_TURN_TTL", "86400"))
-            username = "%d:orbita" % (int(time.time()) + ttl)
-            password = base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
-            servers.append({"urls": urls, "username": username, "credential": password})
-        else:
-            servers.append({"urls": urls, "username": os.environ.get("ORBITA_TURN_USER", ""),
-                            "credential": os.environ.get("ORBITA_TURN_PASS", "")})
+        return [{"id": "turn", "urls": [u.strip() for u in turn.split(",") if u.strip()],
+                 "secret": os.environ.get("ORBITA_TURN_SECRET", ""),
+                 "username": os.environ.get("ORBITA_TURN_USER", ""),
+                 "credential": os.environ.get("ORBITA_TURN_PASS", "")}]
+    return []
+
+
+def _turn_creds(server):
+    """Короткоживущий логин для coturn (use-auth-secret) либо постоянный логин/пароль."""
+    secret = server.get("secret")
+    if secret:
+        ttl = int(os.environ.get("ORBITA_TURN_TTL", "86400"))
+        username = "%d:orbita" % (int(time.time()) + ttl)
+        password = base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
+        return username, password
+    return server.get("username", ""), server.get("credential", "")
+
+
+def _ip_latlon(ip):
+    """Грубые координаты по IP — только если задан geoip-файл (ORBITA_GEOIP_DB) и стоит geoip2.
+    Без него дальность не учитываем (выбираем по загрузке), а скорость всё равно подберёт сам WebRTC."""
+    db = os.environ.get("ORBITA_GEOIP_DB")
+    if not db or not ip:
+        return None
+    try:
+        import geoip2.database
+        key = "_geoip_reader"
+        reader = globals().get(key)
+        if reader is None:
+            reader = globals()[key] = geoip2.database.Reader(db)
+        r = reader.city(ip)
+        return (r.location.latitude, r.location.longitude)
+    except Exception:
+        return None
+
+
+def ice_servers(client_ip=None, call_id=None):
+    """STUN (узнать свой внешний адрес) + лучшие TURN-ретрансляторы.
+    Выбор лучшего TURN: по загрузке (сколько звонков сейчас на сервере) и по дальности (если есть geoip);
+    возвращаем 2 лучших, а самый быстрый из них по задержке выберет уже сам WebRTC (ICE делает замеры)."""
+    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302",
+                         "stun:stun2.l.google.com:19302"]}]
+    pool = _turn_pool()
+    if not pool:
+        return servers
+    loc = _ip_latlon(client_ip)
+
+    def score(s):
+        load = SHARED.turn_load(s.get("id", "turn")) if hasattr(SHARED, "turn_load") else 0
+        dist = 0.0
+        if loc and s.get("lat") is not None and s.get("lon") is not None:
+            from math import radians, sin, cos, asin, sqrt
+            la1, lo1, la2, lo2 = map(radians, [loc[0], loc[1], s["lat"], s["lon"]])
+            h = sin((la2 - la1) / 2) ** 2 + cos(la1) * cos(la2) * sin((lo2 - lo1) / 2) ** 2
+            dist = 12742 * asin(sqrt(h))                    # км
+        return load * 60 + dist                              # 1 активный звонок ≈ 60 км «ближе»
+
+    best = sorted(pool, key=score)[:2]
+    if call_id and best and hasattr(SHARED, "turn_pick"):
+        SHARED.turn_pick(call_id, best[0].get("id", "turn"))   # запоминаем выбор для учёта загрузки
+    for s in best:
+        username, password = _turn_creds(s)
+        servers.append({"urls": s["urls"], "username": username, "credential": password})
     return servers
 
 
 def call_push(call, caller):
-    for u in (call["callee"],):
-        notify_message(caller, u, "Входящий видеозвонок" if call["video"] else "Входящий звонок")
+    """Будим вызываемого: VoIP-пуш (CallKit звонит даже при закрытом приложении) + разбудить long-poll."""
+    to = call["callee"]
+    brief = user_brief(caller, to)
+    if push.configured():
+        try:
+            rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'voip'", (to,))
+            payload = push.build_voip_payload({"call": call["id"], "video": bool(call["video"]),
+                                               "name": brief["name"], "from": caller, "avatar": brief.get("avatar")})
+            topic = push.voip_topic()
+            for r in rows:
+                token = dec(to, "push", COL["push_token"], r["id"], r["token_enc"])
+                if token:
+                    push.enqueue(r["env"], token, payload, push_type="voip", topic=topic, priority="10")
+        except Exception as e:
+            print("voip push: %s" % e.__class__.__name__)
 
 
 def finish_call(cid, status, by=None):
     c = SHARED.call_pop(cid)
     if not c:
         return
+    if hasattr(SHARED, "turn_release"):
+        SHARED.turn_release(cid)                     # освобождаем TURN-слот (учёт загрузки)
     for u in (c["caller"], c["callee"]):
         SHARED.user_call_clear(u, cid)
         if u != by:
             SHARED.signals_push(u, {"call": cid, "kind": "end", "data": status})
             SHARED.events_publish(u, "call")
+    # пропущенный — обычное уведомление «кто звонил», как в Telegram (VoIP-звонок до этого мог не дойти/не ответить)
+    if status == "missed" and push.configured():
+        brief = user_brief(c["caller"], c["callee"])
+        label = "Пропущенный видеозвонок" if c["video"] else "Пропущенный звонок"
+        try:
+            rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (c["callee"],))
+            payload = push.build_payload(brief["name"], label, unread_total(c["callee"]), "call-" + c["caller"],
+                                         {"chat": c["caller"], "name": brief["name"], "avatar": brief.get("avatar"), "missed_call": True})
+            for r in rows:
+                token = dec(c["callee"], "push", COL["push_token"], r["id"], r["token_enc"])
+                if token:
+                    push.enqueue(r["env"], token, payload, collapse_id="call-" + cid)
+        except Exception as e:
+            print("missed push: %s" % e.__class__.__name__)
     dur = time.time() - c["answered"] if c.get("answered") else 0
     run("INSERT OR REPLACE INTO call_log(id, caller, callee, video, status, created_at, duration) VALUES (?,?,?,?,?,?,?)",
         (cid, c["caller"], c["callee"], 1 if c["video"] else 0, status, c["created"], dur))
@@ -5991,7 +6075,7 @@ def start_call(req, me):
     SHARED.call_put(cid, call)
     SHARED.events_publish(to, "call")                  # разбудить вызываемого — звонок появится мгновенно
     call_push(call, uid)
-    req.send_json(201, {"id": cid, "ice": ice_servers()})
+    req.send_json(201, {"id": cid, "ice": ice_servers(req.client_ip(), cid)})
 
 
 @route("GET", r"/v1/calls/poll")
@@ -6005,7 +6089,7 @@ def poll_calls(req, me):
         SHARED.user_call_set(uid, cid, ttl=3600)       # продлеваем «занятость», пока звонок идёт
     incoming = None
     if c and c["callee"] == uid and c["state"] == "ringing":
-        incoming = {"id": cid, "video": c["video"], "from": user_brief(c["caller"], uid), "ice": ice_servers()}
+        incoming = {"id": cid, "video": c["video"], "from": user_brief(c["caller"], uid), "ice": ice_servers(req.client_ip(), cid)}
     current = None
     if c and c["caller"] == uid:
         current = {"id": cid, "state": c["state"], "video": c["video"]}
@@ -6044,7 +6128,7 @@ def call_answer(req, me, cid):
                              "seen": {c["caller"]: now, c["callee"]: now}})
     SHARED.signals_push(c["caller"], {"call": cid, "kind": "accepted", "data": ""})
     SHARED.events_publish(c["caller"], "call")
-    req.send_json(200, {"ok": True, "ice": ice_servers(), "video": c["video"]})
+    req.send_json(200, {"ok": True, "ice": ice_servers(req.client_ip(), cid), "video": c["video"]})
 
 
 @route("POST", r"/v1/calls/([a-f0-9]+)/end")
@@ -6228,7 +6312,7 @@ def push_notice(rid, title, body, data):
     if not push.configured():
         return
     try:
-        rows = q("SELECT * FROM push_tokens WHERE user_id = ?", (rid,))
+        rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (rid,))
         if not rows:
             return
         payload = push.build_payload(title, body, unread_total(rid), "joined", data)
@@ -6664,7 +6748,7 @@ def notify_group(g, sender, text, mentioned=frozenset()):
             tagged = rid in mentioned
             if m["muted"] and not tagged:                   # выключенный чат молчит, но если тегнули — уведомление приходит
                 continue
-            rows = q("SELECT * FROM push_tokens WHERE user_id = ?", (rid,))
+            rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (rid,))
             if not rows:
                 continue
             body = (who + text.replace("\n", " ")[:140]) if PUSH_PREVIEW else "Новое сообщение"

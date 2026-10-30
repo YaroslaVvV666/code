@@ -88,6 +88,21 @@ class MemoryShared:
         self.pending = {}          # uid -> set(тем) — накопленные события для long-poll
         self.hub = _WaiterHub()
         self.rates = {}            # ключ -> [счётчик, время_сброса] — ограничение частоты
+        self.turn_used = {}        # cid -> id_turn_сервера (чей слот занят звонком)
+
+    # --- загрузка TURN-серверов (для выбора наименее загруженного) ---
+
+    def turn_pick(self, cid, server_id):
+        with self._lock:
+            self.turn_used[cid] = server_id
+
+    def turn_release(self, cid):
+        with self._lock:
+            self.turn_used.pop(cid, None)
+
+    def turn_load(self, server_id):
+        with self._lock:
+            return sum(1 for s in self.turn_used.values() if s == server_id)
 
     # --- ограничение частоты (окно фиксированной длины) ---
 
@@ -384,6 +399,22 @@ class RedisShared:
     def _k_qr(qid): return "qr:" + qid
     @staticmethod
     def _k_qrip(ip): return "qrip:" + ip
+
+    # --- загрузка TURN-серверов (общая на все воркеры) ---
+
+    def turn_pick(self, cid, server_id):
+        self.r.hset("turn:used", cid, server_id)
+        self.r.expire("turn:used", 7200)
+
+    def turn_release(self, cid):
+        self.r.hdel("turn:used", cid)
+
+    def turn_load(self, server_id):
+        try:
+            vals = self.r.hvals("turn:used")
+            return sum(1 for v in vals if (v.decode() if isinstance(v, bytes) else v) == server_id)
+        except Exception:
+            return 0
 
     # --- звонки ---
     # звонок хранится как JSON-строка; изменения — под коротким замком по cid (звонков немного, частота низкая)

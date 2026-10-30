@@ -10,6 +10,9 @@ final class CallRinger: NSObject, CXProviderDelegate {
 
     var onAnswer: (() -> Void)?
     var onDecline: (() -> Void)?
+    /// Ответили в системном экране до того, как появился обработчик звонка (холодный старт по VoIP-пушу)
+    private var pendingAnswer = false
+    func consumePendingAnswer() -> Bool { let p = pendingAnswer; pendingAnswer = false; return p }
 
     private let provider: CXProvider
     private let controller = CXCallController()
@@ -71,7 +74,7 @@ final class CallRinger: NSObject, CXProviderDelegate {
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task { @MainActor in
             self.current = nil
-            self.onAnswer?()
+            if let onAnswer = self.onAnswer { onAnswer() } else { self.pendingAnswer = true }
             action.fulfill()
         }
     }

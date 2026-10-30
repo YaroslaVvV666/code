@@ -99,10 +99,10 @@ final class AppSession: ObservableObject {
         await api.signOut()
     }
 
-    /// Передаёт серверу токен устройства для push
-    func uploadPush(token: String) async {
+    /// Передаёт серверу токен устройства для push (kind: "alert" — сообщения, "voip" — звонки)
+    func uploadPush(token: String, kind: String = "alert") async {
         _ = try? await api.request("PUT", "/v1/me/push",
-                                   body: ServerAPI.json(["token": token, "env": PushManager.environment]))
+                                   body: ServerAPI.json(["token": token, "env": PushManager.environment, "kind": kind]))
     }
 
     /// Интересы для ленты «Для вас»
