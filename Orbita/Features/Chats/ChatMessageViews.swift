@@ -295,8 +295,8 @@ struct MessageRow: View {
             if mine { Spacer(minLength: 44) }
             content
                 .offset(x: dragX)
-                .overlay(alignment: mine ? .leading : .trailing) {
-                    // значок ответа появляется при свайпе и «наливается» акцентом при достижении порога
+                .overlay(alignment: .trailing) {
+                    // значок ответа появляется при свайпе справа от сообщения и «наливается» акцентом при достижении порога
                     let p = min(1, -dragX / 56)
                     let ready = p >= 1
                     Image(systemName: "arrowshape.turn.up.left.fill")
@@ -310,7 +310,8 @@ struct MessageRow: View {
                         .overlay(Circle().stroke(theme.stroke, lineWidth: ready ? 0 : 0.5))
                         .scaleEffect(0.5 + 0.5 * p)
                         .opacity(Double(p))
-                        .offset(x: mine ? -42 : 42)
+                        // стоит на месте справа от сообщения, а пузырь уезжает из-под неё влево при свайпе
+                        .offset(x: -dragX - 18)
                         .animation(.spring(response: 0.25, dampingFraction: 0.6), value: ready)
                 }
             if !mine { Spacer(minLength: 44) }
