@@ -24,8 +24,14 @@ final class ProfileStore: ObservableObject {
         }
         // свою аватарку (и все её фото) закачиваем в постоянный кэш — показывается без интернета даже после перезапуска
         if let p = profile {
-            let ids = ([p.avatarID] + p.avatars.map(\.mediaID)).compactMap { $0 }
-            for id in ids where !id.isEmpty { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
+            let ids = ([p.avatarID] + p.avatars.map(\.mediaID)).compactMap { $0 }.filter { !$0.isEmpty }
+            // первые фото прогреваем в память заранее: тяжёлое декодирование идёт в фоне при входе в приложение,
+            // поэтому при открытии «Профиля» картинки уже готовы — без рывка. Остальные — просто в дисковый кэш.
+            for id in ids.prefix(3) {
+                guard let url = ServerConfig.mediaURL(id) else { continue }
+                Task.detached(priority: .userInitiated) { _ = await ImageCache.shared.load(url, maxPixel: 1280, persistKey: id) }
+            }
+            for id in ids.dropFirst(3) { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
         }
     }
 

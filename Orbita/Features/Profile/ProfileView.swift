@@ -31,6 +31,10 @@ struct ComingSoonView: View {
 
 // MARK: - Профиль (как в Telegram)
 
+/// Разовое плавное проявление аватарок при первом входе в «Профиль» за запуск приложения.
+/// Статическое состояние живёт, пока жив процесс: перезапустили приложение — снова покажем красиво.
+enum ProfileFirstReveal { static var done = false }
+
 struct ProfileView: View {
     @ObservedObject var store: ProfileStore
     @Binding var route: ProfileRoute?
@@ -70,6 +74,9 @@ struct ProfileView: View {
     @State private var pageIndex = 0
     @State private var stageForward = true
     @State private var viewer: AvatarViewerRoute?
+    // Первый вход в «Профиль» за запуск приложения: аватарки плавно проявляются, а не выскакивают.
+    // Флаг сбрасывается только при перезапуске приложения (свайпнули из многозадачности) — в тот же сеанс открывается сразу.
+    @State private var avatarReveal: Double = ProfileFirstReveal.done ? 1 : 0
 
     private var s: Strings { Strings(lang: lang) }
     private var name: String { store.profile?.name ?? flow.userName }
@@ -135,7 +142,15 @@ struct ProfileView: View {
                             height: max(bar, 400 + inset - max(-scrollY, probeY)))
                 .offset(y: -inset)
             mainScroll
-            if !photos.isEmpty { avatarStage }
+            if !photos.isEmpty {
+                avatarStage
+                    .opacity(avatarReveal)
+                    .onAppear {
+                        guard !ProfileFirstReveal.done else { return }
+                        ProfileFirstReveal.done = true
+                        withAnimation(.easeOut(duration: 0.55)) { avatarReveal = 1 }
+                    }
+            }
             if pullStage == 2, !photos.isEmpty {
                 // последнее положение — просмотр как в Telegram: назад / ник и дата / «Изм.», миниатюры, «поделиться» и корзина
                 AvatarViewer(name: shownName, photos: photos, start: pageIndex,
