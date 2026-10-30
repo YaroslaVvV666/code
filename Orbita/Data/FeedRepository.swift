@@ -1,7 +1,15 @@
 import Foundation
 
 protocol FeedRepository: Sendable {
-    func loadFeed(forYou: Bool) async throws -> [Post]
+    func loadFeed(forYou: Bool) async throws -> FeedPage
+    // реклама
+    func adImpression(id: String) async
+    func adClick(id: String) async -> String                 // возвращает ссылку
+    func myAds() async throws -> (ads: [AdCampaign], balanceCents: Int)
+    func createAd(_ draft: AdDraft) async throws -> AdCampaign
+    func setAdPaused(id: String, paused: Bool) async throws
+    func deleteAd(id: String) async throws
+    func topUpAds(amountCents: Int) async throws -> Int
     func uploadMedia(_ media: PreparedMedia) async throws -> MediaItem
     func createPost(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post
     func setLike(postID: String, liked: Bool) async throws
@@ -100,7 +108,7 @@ struct CommentDTO: Decodable {
     }
 }
 
-struct PostListDTO: Decodable { let posts: [PostDTO] }
+struct PostListDTO: Decodable { let posts: [PostDTO]; let ads: [AdDTO]? }
 private struct CommentListDTO: Decodable { let comments: [CommentDTO] }
 
 func decodeAPI<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -112,11 +120,12 @@ func decodeAPI<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
 struct RemoteFeedRepository: FeedRepository {
     let api: ServerAPI
 
-    func loadFeed(forYou: Bool) async throws -> [Post] {
+    func loadFeed(forYou: Bool) async throws -> FeedPage {
         var query = ["limit": "60"]
         if forYou { query["sort"] = "for_you" }
         let data = try await api.request("GET", "/v1/posts", query: query)
-        return try decodeAPI(PostListDTO.self, from: data).posts.map(\.model)
+        let dto = try decodeAPI(PostListDTO.self, from: data)
+        return FeedPage(posts: dto.posts.map(\.model), ads: (dto.ads ?? []).map(\.model))
     }
 
     func uploadMedia(_ media: PreparedMedia) async throws -> MediaItem {

@@ -63,6 +63,7 @@ struct ProfileView: View {
     @State private var showStatus = false
     @State private var showQR = false
     @State private var showImport = false
+    @State private var showAds = false
     @State private var showPlaylist = false
     @State private var musicModel: UserPageModel?
     @AppStorage(Haptics.key) private var haptics = true
@@ -351,6 +352,9 @@ struct ProfileView: View {
                     SettingsDivider()
                     SettingsRow(icon: "person.2.wave.2.fill", tint: .teal, title: s.t("Найти друзей из контактов", "Find friends from contacts"),
                                 showsChevron: true) { showImport = true }
+                    SettingsDivider()
+                    SettingsRow(icon: "megaphone.fill", tint: .orange, title: s.t("Рекламный кабинет", "Ad manager"),
+                                showsChevron: true) { showAds = true }
                 }
 
                 SettingsGroup {
@@ -500,6 +504,12 @@ struct ProfileView: View {
         .sheet(isPresented: $showImport) {
             ContactsImportSheet()
                 .environmentObject(session).environmentObject(flow)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showAds) {
+            AdvertiserCabinetView()
+                .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
         }

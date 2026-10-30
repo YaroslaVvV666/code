@@ -35,6 +35,12 @@ struct FeedView: View {
 
     private var s: Strings { Strings(lang: lang) }
 
+    /// Рекламные вставки после поста с данным индексом — только в основной ленте
+    private func adsAfter(_ index: Int) -> [FeedAd] {
+        guard vm.authorFilter == nil, query.isEmpty else { return [] }
+        return vm.ads.filter { $0.slot == index && !vm.hiddenAdIDs.contains($0.id) }
+    }
+
     /// Фильтр по автору + поиск (не зависит от раскладки)
     private var visiblePosts: [Post] {
         var list = vm.posts
@@ -70,7 +76,7 @@ struct FeedView: View {
 
                     stateView
 
-                    ForEach(visiblePosts) { post in
+                    ForEach(Array(visiblePosts.enumerated()), id: \.element.id) { index, post in
                         PostCard(post: post, autoplay: autoplay,
                                  onLike: { vm.toggleLike(post) },
                                  onComments: { commentsPost = post },
@@ -80,6 +86,13 @@ struct FeedView: View {
                             .onAppear { session.taste.appeared(post.id) }
                             .onDisappear { session.taste.disappeared(post.id) }
                         Divider().overlay(theme.stroke)
+                        // реклама между постами (только в основной ленте, не в поиске/фильтре по автору)
+                        ForEach(adsAfter(index)) { ad in
+                            AdCardView(ad: ad,
+                                       onHide: { withAnimation { vm.hiddenAdIDs.insert(ad.id) } },
+                                       onReport: { withAnimation { vm.hiddenAdIDs.insert(ad.id) } })
+                            Divider().overlay(theme.stroke)
+                        }
                     }
                 }
             }

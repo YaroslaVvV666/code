@@ -9,6 +9,8 @@ final class FeedViewModel: ObservableObject {
     }
 
     @Published private(set) var posts: [Post] = []
+    @Published private(set) var ads: [FeedAd] = []
+    @Published var hiddenAdIDs: Set<String> = []
     @Published private(set) var state: LoadState = .idle
     @Published var uploadProgress: Double?          // nil — ничего не загружается
     @Published var actionError: APIError?
@@ -44,7 +46,9 @@ final class FeedViewModel: ObservableObject {
     func load() async {
         if posts.isEmpty { state = .loading }
         do {
-            posts = try await repo.loadFeed(forYou: forYou)
+            let page = try await repo.loadFeed(forYou: forYou)
+            posts = page.posts
+            ads = page.ads
             state = .loaded
         } catch {
             state = .failed(Self.map(error))
