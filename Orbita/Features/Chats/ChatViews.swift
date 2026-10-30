@@ -2003,6 +2003,10 @@ struct ChatScreen: View {
         Task {
             guard let post = try? await session.feedRepo.post(id: id) else { postLinkID = id; return }
             if post.media.first?.kind == .video {
+                // Сначала прячем клавиатуру и панель эмодзи/стикеров (это inputView поля ввода),
+                // ждём, пока они свернутся, и только потом открываем шортс — без наложения.
+                hideKeyboard()
+                try? await Task.sleep(nanoseconds: 300_000_000)
                 session.reelRequest = post
                 if standalone { dismiss() }
             } else {
