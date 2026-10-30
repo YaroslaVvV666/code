@@ -17,6 +17,7 @@ private struct InfoAvatarTopKey: PreferenceKey {
 
 struct ChatInfoView: View {
     @ObservedObject var model: ChatModel
+    @ObservedObject private var prefs = ChatListPrefs.shared
     var onPlayMusic: (Track, [Track]) -> Void
     var onLeftGroup: () -> Void
 
@@ -414,7 +415,12 @@ struct ChatInfoView: View {
                 tile("phone.fill", s.t("Звонок", "Call")) { callPeer(video: false) }
                 tile("video.fill", s.t("Видео", "Video")) { callPeer(video: true) }
                 tile("person.crop.circle", s.t("Профиль", "Profile")) { showProfile = true }
-                tile("bell.fill", s.t("Звук", "Sound")) { notice = s.t("Звук личных чатов настраивается в профиле", "Set sound in the profile") }
+                let dmMuted = { _ = prefs.muteTick; return prefs.isDMMuted(model.peer.id) }()
+                tile(dmMuted ? "bell.slash.fill" : "bell.fill",
+                     dmMuted ? s.t("Без звука", "Muted") : s.t("Звук", "Sound")) {
+                    prefs.setDMMuted(model.peer.id, !prefs.isDMMuted(model.peer.id))
+                    Haptics.impact(.light)
+                }
             }
         }
         .padding(.horizontal, 16)
