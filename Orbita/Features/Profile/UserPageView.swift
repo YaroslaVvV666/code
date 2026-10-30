@@ -1194,8 +1194,14 @@ struct OrbitRing: View {
     @Environment(\.lang) private var lang
     @State private var tones: [String: UIColor] = [:]
     @State private var opened: OrbitFriend?
+    // Момент появления кольца: аватарки друзей не вылетают все разом (это лагало при входе в профиль),
+    // а добавляются по одной и плавно — декодирование картинок растягивается во времени, без рывка.
+    @State private var bornAt: TimeInterval = 0
 
     private var shown: [OrbitFriend] { Array(friends.prefix(5)) }
+
+    /// Через сколько секунд после появления кольца показать i-ю аватарку (пауза + по одной).
+    private func revealAt(_ i: Int) -> TimeInterval { bornAt + 0.35 + Double(i) * 0.33 }
 
     private func hash(_ id: String, _ k: Int) -> Double {
         var h: UInt32 = 2166136261
@@ -1242,6 +1248,7 @@ struct OrbitRing: View {
             if mine { OrbitPlayerProbe(player: session.player) { ring($0) } } else { ring(listening) }
         }
         .frame(width: avatarSize, height: avatarSize)
+        .onAppear { if bornAt == 0 { bornAt = Date().timeIntervalSinceReferenceDate } }
         .task(id: friends.map(\.id)) {
             for f in shown where tones[f.id] == nil { tones[f.id] = await OrbitTone.load(f) }
         }
@@ -1262,8 +1269,13 @@ struct OrbitRing: View {
             ZStack {
                 ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
                     let p = pos[i]
-                    if (p.z >= 0) == front {
+                    // показываем только когда настал черёд этой аватарки, и плавно её проявляем
+                    let age = bornAt > 0 ? t - revealAt(i) : -1
+                    if (p.z >= 0) == front, age >= 0 {
+                        let appear = min(1, age / 0.5)
                         bubble(f, z: p.z, t: t, active: active)
+                            .scaleEffect(0.6 + 0.4 * appear)
+                            .opacity(appear)
                             .offset(x: p.x, y: p.y)
                             .zIndex(p.z)
                     }
