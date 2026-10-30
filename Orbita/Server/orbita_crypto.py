@@ -137,22 +137,71 @@ class KeyRing:
 
     @classmethod
     def load(cls, base_dir):
-        """Порядок: ORBITA_MASTER_KEY (base64) → ORBITA_MASTER_KEY_FILE → keys/master.key (создаётся)"""
+        """Источник мастер-ключа, по приоритету (от самого защищённого к запасному):
+          1. ORBITA_MASTER_KEY_CMD  — команда, печатающая ключ (base64) в stdout. Так ключ берётся из
+             внешнего хранилища секретов и НЕ лежит на диске рядом с кодом/данными. Примеры:
+               AWS KMS:   ORBITA_MASTER_KEY_CMD='aws kms decrypt --ciphertext-blob fileb:///etc/orbita.key.enc \
+                                                  --query Plaintext --output text'
+               Vault:     ORBITA_MASTER_KEY_CMD='vault kv get -field=master_key secret/orbita'
+               GCP KMS:   ORBITA_MASTER_KEY_CMD='gcloud kms decrypt --ciphertext-file=/etc/orbita.key.enc \
+                                                  --plaintext-file=- --key=... | base64'
+          2. ORBITA_MASTER_KEY       — сам ключ (base64) в переменной окружения (её подставляет оркестратор).
+          3. ORBITA_MASTER_KEY_FILE / keys/master.key — файл на диске (создаётся при первом запуске; для разработки).
+        Если задан ORBITA_MASTER_KEY_FINGERPRINT — проверяем, что загруженный ключ именно тот (защита от
+        тихой подмены ключа: с чужим ключом данные стали бы «нечитаемыми», а это легко не заметить)."""
+        cmd = os.environ.get("ORBITA_MASTER_KEY_CMD")
+        if cmd:
+            import subprocess
+            out = subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
+            if out.returncode != 0:
+                raise RuntimeError("ORBITA_MASTER_KEY_CMD завершилась с ошибкой %d: %s"
+                                   % (out.returncode, out.stderr.decode("utf-8", "replace")[:300]))
+            ring = cls(cls._decode_key(out.stdout.decode("utf-8", "replace")))
+            return cls._verify(ring)
         env = os.environ.get("ORBITA_MASTER_KEY")
         if env:
-            return cls(base64.b64decode(env))
+            return cls._verify(cls(cls._decode_key(env)))
         path = os.environ.get("ORBITA_MASTER_KEY_FILE") or os.path.join(base_dir, "keys", "master.key")
         if os.path.exists(path):
             with open(path, "r") as f:
-                return cls(base64.b64decode(f.read().strip()))
+                return cls._verify(cls(cls._decode_key(f.read())))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         key = os.urandom(32)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(base64.b64encode(key).decode() + "\n")
         print("СОЗДАН мастер-ключ: %s\n  Сохраните его копию в безопасном месте отдельно от данных. "
-              "Без него данные не расшифровать." % path)
-        return cls(key)
+              "Без него данные не расшифровать. В проде лучше брать ключ из KMS/Vault "
+              "(см. ORBITA_MASTER_KEY_CMD)." % path)
+        return cls._verify(cls(key))
+
+    @staticmethod
+    def _decode_key(text):
+        """Принимаем ключ как base64 (стандартный путь) либо как 64 hex-символа — так удобнее разным KMS."""
+        s = (text or "").strip()
+        if not s:
+            raise ValueError("пустой мастер-ключ")
+        try:
+            raw = base64.b64decode(s, validate=True)
+            if len(raw) == 32:
+                return raw
+        except Exception:                          # не base64 — пробуем hex ниже
+            pass
+        try:
+            raw = bytes.fromhex(s)
+            if len(raw) == 32:
+                return raw
+        except ValueError:
+            pass
+        raise ValueError("мастер-ключ должен быть 32 байта (base64 или hex)")
+
+    @classmethod
+    def _verify(cls, ring):
+        want = os.environ.get("ORBITA_MASTER_KEY_FINGERPRINT", "").strip().lower()
+        if want and ring.fingerprint().lower() != want:
+            raise RuntimeError("отпечаток мастер-ключа не совпал с ORBITA_MASTER_KEY_FINGERPRINT — "
+                               "загружен НЕ тот ключ, запуск остановлен во избежание порчи данных")
+        return ring
 
     def fingerprint(self):
         """Короткий отпечаток для сверки (по нему мастер-ключ не восстановить)"""

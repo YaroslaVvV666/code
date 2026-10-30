@@ -9,6 +9,13 @@ Environment=ORBITA_HOST=127.0.0.1
 Environment=ORBITA_PORT=8080
 Environment=ORBITA_DATA=/var/lib/orbita
 Environment=ORBITA_MASTER_KEY_FILE=/etc/orbita.key
+# Надёжнее, чем файл на диске: брать мастер-ключ из внешнего хранилища секретов (KMS/Vault).
+# Тогда ключ не лежит рядом с данными, и при взломе сервера его не забрать «одним файлом».
+# Закомментируйте строку ORBITA_MASTER_KEY_FILE выше и раскомментируйте одну из этих:
+#Environment=ORBITA_MASTER_KEY_CMD=aws kms decrypt --ciphertext-blob fileb:///etc/orbita.key.enc --query Plaintext --output text
+#Environment=ORBITA_MASTER_KEY_CMD=vault kv get -field=master_key secret/orbita
+# Необязательно: отпечаток ожидаемого ключа — защита от тихой подмены (служба не стартует с чужим ключом).
+#Environment=ORBITA_MASTER_KEY_FINGERPRINT=0000000000000000
 Environment=ORBITA_DEMO=0
 # Сервер за одним обратным прокси (Caddy) — настоящий IP клиента берётся из X-Forwarded-For.
 # Если сервер смотрит в интернет напрямую (без Caddy) — поставьте 0, иначе IP можно подделать.
@@ -23,10 +30,40 @@ Environment=ORBITA_TRUSTED_PROXIES=1
 #Environment=ORBITA_APNS_TOPIC=com.yourcompany.Orbita
 # Показывать текст сообщения в уведомлении (0 — скрыть, только «Новое сообщение»):
 #Environment=ORBITA_PUSH_PREVIEW=1
+# Проверка целостности кода перед каждым запуском: если server.py или любой .py подменили —
+# служба не стартует. Эталон создаётся при деплое (setup.sh) командой integrity.sh generate.
+ExecStartPre=/usr/bin/env bash /opt/orbita/app/deploy/integrity.sh verify /opt/orbita/app
 ExecStart=/opt/orbita/venv/bin/python server.py
 Restart=always
 RestartSec=2
+
+# --- Песочница systemd: ограничиваем, что служба может сделать, даже если её «пробьют» ---
+# Файловая система почти вся только для чтения; писать можно лишь в данные и временные файлы.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orbita
+ReadOnlyPaths=/opt/orbita/app
+PrivateTmp=true
+ProtectHome=true
+# Запрет повышения прав и опасных возможностей ядра
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+PrivateDevices=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

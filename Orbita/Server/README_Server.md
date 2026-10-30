@@ -99,3 +99,24 @@ export ORBITA_SMTP_FROM="Orbita <no-reply@your-domain.ru>"
 - Плейлист: загрузка `POST /v1/media?kind=audio` (mp3 / m4a, до 40 МБ), затем `POST /v1/me/playlist`,
   `PUT /v1/me/playlist/order`, `PUT|DELETE /v1/me/playlist/{id}`, `GET /v1/users/{id}/playlist`.
   Названия и исполнители шифруются как остальные поля профиля.
+
+## Безопасность сервера (жёсткий прод)
+
+**Мастер-ключ — не на диске.** По умолчанию ключ лежит файлом (`/etc/orbita.key`), что защищает от кражи
+диска/бэкапа, но не от взлома живого сервера. В проде берите ключ из внешнего хранилища секретов — тогда он
+не лежит рядом с данными. Приоритет источников в `KeyRing.load`:
+1. `ORBITA_MASTER_KEY_CMD` — команда, печатающая ключ (base64 или hex) в stdout. Примеры:
+   - AWS KMS: `aws kms decrypt --ciphertext-blob fileb:///etc/orbita.key.enc --query Plaintext --output text`
+   - Vault: `vault kv get -field=master_key secret/orbita`
+2. `ORBITA_MASTER_KEY` — ключ (base64/hex) в переменной окружения (подставляет оркестратор).
+3. `ORBITA_MASTER_KEY_FILE` / `keys/master.key` — файл (создаётся при первом запуске; для разработки).
+
+`ORBITA_MASTER_KEY_FINGERPRINT` (необязательно) — отпечаток ожидаемого ключа; при несовпадении служба не
+стартует (защита от тихой подмены ключа, после которой данные стали бы «нечитаемыми»).
+
+**Код только для чтения + контроль целостности.** `deploy/orbita.service` запускает службу в песочнице systemd:
+`ProtectSystem=strict`, код в `/opt/orbita/app` смонтирован только для чтения, писать можно лишь в
+`/var/lib/orbita`; сброшены все capabilities, включён фильтр системных вызовов, запрещено повышение прав.
+Перед каждым запуском `ExecStartPre` вызывает `deploy/integrity.sh verify` — если любой `.py` подменили,
+служба не стартует. Эталон создаётся при деплое (`setup.sh` → `integrity.sh generate`); после легального
+обновления кода пересоздайте его повторным запуском `setup.sh` (или `integrity.sh generate /opt/orbita/app`).
