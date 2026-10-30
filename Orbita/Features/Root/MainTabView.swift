@@ -290,6 +290,10 @@ struct OrbitaTabBar: View {
     /// Перемотка шортса жестом по панели вкладок: с какого места начали
     @State private var scrubStart: Double = 0
     @State private var scrubbingBar = false
+    /// Проведение пальцем по панели: пузырь едет за пальцем, вкладка выбирается при отпускании
+    @State private var barWidth: CGFloat = 0
+    @State private var sliding = false
+    @State private var suppressTapUntil = Date.distantPast
 
     init(selection: Binding<MainTab>, chatsBadge: Int = 0, onCompose: @escaping () -> Void) {
         _selection = selection
@@ -333,6 +337,10 @@ struct OrbitaTabBar: View {
             item(.profile, icon: "person.crop.circle.fill", label: s.tabProfile)
         }
         .background { pillView }
+        .background { GeometryReader { g in Color.clear
+            .onAppear { barWidth = g.size.width }
+            .onChange(of: g.size.width) { _, w in barWidth = w } } }
+        .coordinateSpace(name: "tabbar")
         .onChange(of: selection) { old, new in
             // пузырь всегда едет; чем дальше — тем чуть быстрее
             let distance = abs(Self.slot(new) - Self.slot(old))
@@ -345,19 +353,54 @@ struct OrbitaTabBar: View {
         .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.12), radius: 18, y: 8)
         .padding(.horizontal, 14)
         .padding(.bottom, 4)
-        // как в TikTok: в шортсах можно зажать палец на панели (даже на кнопке) и, двигая вбок, перематывать видео
+        // Проведение пальцем по панели: на всех вкладках пузырь едет за пальцем и выбирает вкладку при отпускании;
+        // в шортсах тот же жест перематывает видео (как в TikTok).
         .simultaneousGesture(
-            DragGesture(minimumDistance: 14)
+            DragGesture(minimumDistance: 12, coordinateSpace: .named("tabbar"))
                 .onChanged { v in
-                    guard selection == .reels, abs(v.translation.width) > abs(v.translation.height) else { return }
-                    if !scrubbingBar { scrubbingBar = true; scrubStart = ReelScrubBus.shared.currentFrac }
-                    let width = max(1, UIScreen.main.bounds.width)
-                    ReelScrubBus.shared.scrub(to: scrubStart + v.translation.width / width)
+                    guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                    if selection == .reels {
+                        if !scrubbingBar { scrubbingBar = true; scrubStart = ReelScrubBus.shared.currentFrac }
+                        let width = max(1, UIScreen.main.bounds.width)
+                        ReelScrubBus.shared.scrub(to: scrubStart + v.translation.width / width)
+                        return
+                    }
+                    sliding = true
+                    pillSlot = slideSlot(v.location.x)          // пузырь следует за пальцем, без анимации
                 }
-                .onEnded { _ in
-                    if scrubbingBar { scrubbingBar = false; ReelScrubBus.shared.end() }
+                .onEnded { v in
+                    if scrubbingBar { scrubbingBar = false; ReelScrubBus.shared.end(); return }
+                    if sliding {
+                        sliding = false
+                        suppressTapUntil = Date().addingTimeInterval(0.35)    // отпускание на кнопке не считаем тапом
+                        let tab = tabAt(v.location.x)
+                        if tab != selection { Haptics.select(); selection = tab }
+                        else { withAnimation(.spring(response: 0.3, dampingFraction: 0.72)) { pillSlot = Self.slot(tab) } }
+                    }
                 }
         )
+    }
+
+    /// Позиция пузыря (в слотах) под пальцем — центр пузыря следует за точкой касания
+    private func slideSlot(_ x: CGFloat) -> CGFloat {
+        guard barWidth > 0 else { return pillSlot }
+        let w = barWidth / 6
+        return min(5, max(0, x / w - 0.5))
+    }
+
+    /// Какая вкладка под пальцем при отпускании (ячейка «+» не выбирается — берём ближайшую вкладку)
+    private func tabAt(_ x: CGFloat) -> MainTab {
+        guard barWidth > 0 else { return selection }
+        let w = barWidth / 6
+        let cell = min(5, max(0, Int((x / w).rounded(.down))))
+        switch cell {
+        case 0: return .home
+        case 1: return .reels
+        case 3: return .chats
+        case 4: return .communities
+        case 5: return .profile
+        default: return (x / w - 2) < 0.5 ? .reels : .chats      // ячейка «+»
+        }
     }
 
     /// Один пузырь на всю панель: катится от слота к слоту, к середине пути «раздувается» и возвращается с мягким отскоком
@@ -380,8 +423,8 @@ struct OrbitaTabBar: View {
 
     private func item(_ tab: MainTab, icon: String, label: String, badge: Int = 0) -> some View {
         Button {
-            // если касание «ушло в перемотку шортса» (двигали палец по панели) — вкладку не переключаем
-            if ReelScrubBus.shared.suppressTapUntil > Date() { return }
+            // если касание «ушло в перемотку шортса» или в проведение по панели — вкладку по тапу не трогаем
+            if ReelScrubBus.shared.suppressTapUntil > Date() || suppressTapUntil > Date() { return }
             if selection != tab {
                 Haptics.select()
                 selection = tab
