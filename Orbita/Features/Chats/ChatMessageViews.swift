@@ -296,12 +296,22 @@ struct MessageRow: View {
             content
                 .offset(x: dragX)
                 .overlay(alignment: mine ? .leading : .trailing) {
-                    Image(systemName: "arrowshape.turn.up.left.circle.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(theme.accentColor)
-                        .opacity(Double(min(1, -dragX / 56)))
-                        .offset(x: mine ? -34 : 34)
-                        .scaleEffect(min(1, -dragX / 56))
+                    // значок ответа появляется при свайпе и «наливается» акцентом при достижении порога
+                    let p = min(1, -dragX / 56)
+                    let ready = p >= 1
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(ready ? Color.white : theme.text)
+                        .frame(width: 40, height: 40)
+                        .background {
+                            if ready { Circle().fill(theme.accent) }
+                            else { Circle().fill(.ultraThinMaterial) }
+                        }
+                        .overlay(Circle().stroke(theme.stroke, lineWidth: ready ? 0 : 0.5))
+                        .scaleEffect(0.5 + 0.5 * p)
+                        .opacity(Double(p))
+                        .offset(x: mine ? -42 : 42)
+                        .animation(.spring(response: 0.25, dampingFraction: 0.6), value: ready)
                 }
             if !mine { Spacer(minLength: 44) }
         }
