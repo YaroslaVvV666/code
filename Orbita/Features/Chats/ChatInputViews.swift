@@ -32,6 +32,7 @@ struct ChatInputBar: View {
     @State private var slide: CGFloat = 0
     @State private var slideY: CGFloat = 0
     @State private var locked = false
+    @State private var zoomBase: CGFloat = 1          // приближение кружка на момент начала жеста
     @State private var trashing = false
     @State private var notice: String?
     @State private var lastEditID: String?
@@ -692,12 +693,33 @@ struct ChatInputBar: View {
                     }
                     .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
                     .allowsHitTesting(false)
+                // приближение: щипок двумя пальцами или движение вверх/вниз по кружку (удобно, когда запись на замке)
+                Circle().fill(Color.white.opacity(0.001))
+                    .frame(width: side, height: side)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { circle.setZoom(zoomBase * $0) }
+                            .onEnded { _ in zoomBase = circle.zoom }
+                            .simultaneously(with:
+                                DragGesture(minimumDistance: 12)
+                                    .onChanged { v in circle.setZoom(zoomBase - v.translation.height / 140) }
+                                    .onEnded { _ in zoomBase = circle.zoom })
+                    )
+                // текущее увеличение — маленькая подпись, пока оно больше 1×
+                if circle.zoom > 1.04 {
+                    Text(String(format: "%.1f×", circle.zoom))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(.black.opacity(0.4), in: Capsule())
+                        .offset(y: -side / 2 + 22)
+                        .allowsHitTesting(false)
+                }
                 // эффекты по жестам рукой: вылетают поверх кружка (👌→✅, 🫰→💸, ✌️→😎, 🔫→🔫, ❤️→❤️)
                 GestureBurstOverlay(detector: circle.gestures)
                     .frame(width: side, height: side)
                     .allowsHitTesting(false)
                 if locked {
-                    Button { Haptics.impact(.light); circle.flipCamera() } label: {
+                    Button { Haptics.impact(.light); zoomBase = 1; circle.flipCamera() } label: {
                         Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
                             .font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
                             .frame(width: 46, height: 46).glassCircle(interactive: true)
@@ -720,6 +742,7 @@ struct ChatInputBar: View {
         slide = 0
         slideY = 0
         locked = false
+        zoomBase = 1
         Haptics.impact(.medium)
         if emojiOpen { emojiOpen = false; controller.resetInputPanel() }
         controller.unfocus()
@@ -733,6 +756,7 @@ struct ChatInputBar: View {
                     return
                 }
                 guard holding || locked else { circle.shutdown(); flash(s.t("Удерживайте кнопку для записи", "Hold the button to record")); return }
+                circle.setZoom(1)                      // каждый кружок начинаем без приближения
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { active = .circle }
                 circle.startRecording()
             }

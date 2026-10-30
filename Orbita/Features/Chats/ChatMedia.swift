@@ -387,6 +387,25 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         }
     }
 
+    /// Текущее приближение камеры (1 — без увеличения); обновляется при щипке во время записи
+    @Published private(set) var zoom: CGFloat = 1
+
+    /// Приближение камеры во время записи кружка. Значение зажимается до возможностей устройства (но не больше 8×).
+    func setZoom(_ factor: CGFloat) {
+        let session = session
+        queue.async { [weak self] in
+            guard let self,
+                  let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                    .first(where: { $0.device.hasMediaType(.video) })?.device else { return }
+            let maxZ = min(device.activeFormat.videoMaxZoomFactor, 8)
+            let z = max(1, min(factor, maxZ))
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            device.videoZoomFactor = z
+            device.unlockForConfiguration()
+            Task { @MainActor in self.zoom = z }
+        }
+    }
+
     /// Переключает фронтальную и основную камеру (можно и во время записи)
     func flipCamera() {
         let session = session, output = output
@@ -408,8 +427,15 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                     connection.isVideoMirrored = wantFront
                 }
             }
+            // новая камера начинает без приближения
+            if let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                .first(where: { $0.device.hasMediaType(.video) })?.device,
+               (try? device.lockForConfiguration()) != nil {
+                device.videoZoomFactor = 1
+                device.unlockForConfiguration()
+            }
             session.commitConfiguration()
-            Task { @MainActor in self?.isFront = wantFront }
+            Task { @MainActor in self?.isFront = wantFront; self?.zoom = 1 }
         }
     }
 
