@@ -74,9 +74,10 @@ struct ProfileView: View {
     @State private var pageIndex = 0
     @State private var stageForward = true
     @State private var viewer: AvatarViewerRoute?
-    // Первый вход в «Профиль» за запуск приложения: аватарки плавно проявляются, а не выскакивают.
-    // Флаг сбрасывается только при перезапуске приложения (свайпнули из многозадачности) — в тот же сеанс открывается сразу.
+    // Первый вход в «Профиль» за запуск приложения: тяжёлую анимированную шапку с аватарками НЕ строим на первом кадре
+    // (иначе вход в профиль «лагает»), а подключаем чуть позже и плавно проявляем. В тот же сеанс — сразу, без задержки.
     @State private var avatarReveal: Double = ProfileFirstReveal.done ? 1 : 0
+    @State private var stageMounted: Bool = ProfileFirstReveal.done
 
     private var s: Strings { Strings(lang: lang) }
     private var name: String { store.profile?.name ?? flow.userName }
@@ -142,14 +143,11 @@ struct ProfileView: View {
                             height: max(bar, 400 + inset - max(-scrollY, probeY)))
                 .offset(y: -inset)
             mainScroll
-            if !photos.isEmpty {
+            // Тяжёлую шапку с аватарками подключаем только когда stageMounted — на холодном входе это происходит
+            // с небольшой задержкой, поэтому профиль открывается мгновенно, а аватарки «приезжают» чуть позже и плавно.
+            if !photos.isEmpty, stageMounted {
                 avatarStage
                     .opacity(avatarReveal)
-                    .onAppear {
-                        guard !ProfileFirstReveal.done else { return }
-                        ProfileFirstReveal.done = true
-                        withAnimation(.easeOut(duration: 0.55)) { avatarReveal = 1 }
-                    }
             }
             if pullStage == 2, !photos.isEmpty {
                 // последнее положение — просмотр как в Telegram: назад / ник и дата / «Изм.», миниатюры, «поделиться» и корзина
@@ -178,6 +176,7 @@ struct ProfileView: View {
             pinnedBar
             floatingName
         }
+        .onAppear(perform: mountStageIfNeeded)
         .background(GeometryReader { g in
             Color.clear.preference(key: StackTopKey.self, value: g.frame(in: .global).minY)
         })
@@ -194,6 +193,17 @@ struct ProfileView: View {
         .onPreferenceChange(AvatarTopKey.self) { v in
             avatarTopLive = v
             if scrollOffset <= 0.5, pullStage == 0 { avatarTopRest = v }
+        }
+    }
+
+    /// Холодный вход: даём профилю отрисоваться без тяжёлой шапки, затем подключаем её и плавно проявляем.
+    /// Задержка — только в первый раз за запуск; потом аватарки на месте сразу.
+    private func mountStageIfNeeded() {
+        guard !stageMounted else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            ProfileFirstReveal.done = true
+            stageMounted = true
+            withAnimation(.easeOut(duration: 0.6)) { avatarReveal = 1 }
         }
     }
 
