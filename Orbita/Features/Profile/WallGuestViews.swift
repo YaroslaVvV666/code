@@ -60,6 +60,7 @@ struct WallEntryRow: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var picking = false               // открыт ряд эмодзи для реакции
+    @State private var expandedReactions = false     // раскрыт полный список (как в чате)
     @State private var dragX: CGFloat = 0
     private var s: Strings { Strings(lang: lang) }
 
@@ -165,7 +166,7 @@ struct WallEntryRow: View {
                 .buttonStyle(.plain)
                 .transition(.scale.combined(with: .opacity))
             }
-            Button { Haptics.select(); picking.toggle() } label: {
+            Button { Haptics.select(); picking.toggle(); if !picking { expandedReactions = false } } label: {
                 Image(systemName: picking ? "xmark" : "face.smiling")
                     .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.textSecondary)
                     .frame(width: 30, height: 26)
@@ -184,24 +185,43 @@ struct WallEntryRow: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: entry.reactions)
     }
 
-    /// Ряд эмодзи для реакции — те же, что в чате
+    private func react(_ e: String) {
+        onReact(e)
+        picking = false
+        expandedReactions = false
+    }
+
+    private func reactButton(_ e: String) -> some View {
+        Button { react(e) } label: {
+            LottieEmojiView(emoji: e, size: 30, playing: false).frame(width: 36, height: 36)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Как в чате: строчка главных реакций + кнопка раскрытия полного списка
     private var emojiStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(AnimatedEmoji.all, id: \.self) { e in
+        Group {
+            if expandedReactions {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) { ForEach(AnimatedEmoji.all, id: \.self) { reactButton($0) } }
+                        .padding(.horizontal, 6).padding(.vertical, 4)
+                }
+                .frame(height: 44)
+            } else {
+                HStack(spacing: 2) {
+                    ForEach(Array(AnimatedEmoji.popular.prefix(6)), id: \.self) { reactButton($0) }
                     Button {
-                        onReact(e)
-                        picking = false
+                        Haptics.impact(.light)
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { expandedReactions = true }
                     } label: {
-                        LottieEmojiView(emoji: e, size: 30, playing: false)
-                            .frame(width: 36, height: 36)
+                        Image(systemName: "chevron.down").font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(theme.textSecondary).frame(width: 34, height: 36)
                     }
                     .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 6).padding(.vertical, 4)
             }
-            .padding(.horizontal, 6).padding(.vertical, 4)
         }
-        .frame(height: 44)
         .background(theme.accentColor.opacity(0.08), in: Capsule())
         .clipShape(Capsule())
     }
