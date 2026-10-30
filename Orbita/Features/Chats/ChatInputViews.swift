@@ -102,6 +102,13 @@ struct ChatInputBar: View {
                 }
                 .frame(width: 1400, height: 2600)
                 .allowsHitTesting(locked)
+                .contentShape(Rectangle())
+                // приближение щипком где угодно по экрану (когда запись на замке — руки свободны)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { circle.setZoom(zoomBase * $0) }
+                        .onEnded { _ in zoomBase = circle.zoom }
+                )
                 .transition(.opacity)
                 .ignoresSafeArea()
             }
