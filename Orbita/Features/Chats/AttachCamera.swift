@@ -23,9 +23,21 @@ final class AttachCamera: NSObject, ObservableObject, AVCapturePhotoCaptureDeleg
     private var configured = false
     private var onPhoto: ((Data) -> Void)?
 
+    /// Одно живое превью на всё приложение. Слой подключается к сессии ОДИН раз — заранее, пока сессия не запущена,
+    /// и дальше только переезжает между плиткой в скрепке и полноэкранной камерой. Раньше полный экран создавал второй
+    /// слой на уже работающей сессии: iOS перестраивала весь конвейер камеры прямо на главном потоке — плитка чернела,
+    /// и камера открывалась через несколько секунд. Трогать только с главного потока.
+    lazy var previewView: CameraPreview.PreviewView = {
+        let v = CameraPreview.PreviewView()
+        v.previewLayer.session = session
+        v.previewLayer.videoGravity = .resizeAspectFill
+        return v
+    }()
+
     /// Подготовить камеру заранее (без запуска): подключение устройства — самая долгая часть
     func prewarm() {
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
+        _ = previewView                     // слой — к ещё не запущенной сессии: это мгновенно
         queue.async {
             if !self.configured { self.configure(self.position) }
         }
@@ -49,6 +61,7 @@ final class AttachCamera: NSObject, ObservableObject, AVCapturePhotoCaptureDeleg
     func start() {
         stopWork?.cancel()
         stopWork = nil
+        _ = previewView                     // превью подключаем до запуска сессии, а не во время
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: run()
         case .notDetermined:
@@ -171,8 +184,43 @@ final class AttachCamera: NSObject, ObservableObject, AVCapturePhotoCaptureDeleg
 }
 
 /// Плитка в сетке: живое изображение
+/// Показывает общее превью камеры (AttachCamera.previewView) у себя. active — забрать превью сюда.
+/// Превью переезжает между плиткой и полным экраном без перенастройки сессии — поэтому мгновенно.
+struct SharedCameraView: UIViewRepresentable {
+    let camera: AttachCamera
+    var active = true
+
+    final class Host: UIView {
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            subviews.forEach { $0.frame = bounds }
+        }
+    }
+
+    func makeUIView(context: Context) -> Host {
+        let host = Host()
+        host.backgroundColor = .black
+        host.clipsToBounds = true
+        if active { attach(to: host) }
+        return host
+    }
+
+    func updateUIView(_ host: Host, context: Context) {
+        if active { attach(to: host) }
+    }
+
+    private func attach(to host: Host) {
+        let v = camera.previewView
+        guard v.superview !== host else { return }
+        v.frame = host.bounds
+        host.addSubview(v)
+    }
+}
+
 struct CameraTile: View {
     @ObservedObject var camera: AttachCamera
+    /// false, пока открыт полноэкранный режим: превью «живёт» там, а сюда вернётся после закрытия
+    var live = true
     let onOpen: () -> Void
     @Environment(\.theme) private var theme
 
@@ -181,7 +229,7 @@ struct CameraTile: View {
             .aspectRatio(0.78, contentMode: .fit)
             .overlay {
                 if camera.ready {
-                    CameraPreview(session: camera.session)
+                    SharedCameraView(camera: camera, active: live)
                 } else {
                     Image(systemName: "camera.fill").font(.system(size: 26)).foregroundStyle(.white.opacity(0.6))
                 }
@@ -208,7 +256,7 @@ struct CameraCaptureView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            CameraPreview(session: camera.session)
+            SharedCameraView(camera: camera)            // то же превью, что в плитке: картинка сразу, без запуска заново
                 .ignoresSafeArea()
                 .gesture(MagnificationGesture()
                     .onChanged { camera.setZoom(base * $0) }

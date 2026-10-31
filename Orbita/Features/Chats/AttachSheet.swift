@@ -40,7 +40,7 @@ struct AttachSheet: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 2) {
                             if filter == .all || filter == .photos, !camera.denied {
-                                CameraTile(camera: camera) {
+                                CameraTile(camera: camera, live: !showCamera) {
                                     showCamera = true
                                 }
                             }
