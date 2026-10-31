@@ -14,13 +14,38 @@ final class ProfileStore: ObservableObject {
     }
 
     func load() async {
+        // сразу — сохранённый профиль (аватарка, имя, статус видны и без интернета), свежий приходит следом
+        if profile == nil, let cached = repo.cachedProfile() { profile = cached }
         do {
             profile = try await repo.load()
             loadError = nil
         } catch {
             loadError = (error as? APIError) ?? .offline
         }
+        // свою аватарку (и все её фото) закачиваем в постоянный кэш — показывается без интернета даже после перезапуска
+        if let p = profile {
+            let ids = ([p.avatarID] + p.avatars.map(\.mediaID)).compactMap { $0 }.filter { !$0.isEmpty }
+            // первые фото прогреваем в память заранее: тяжёлое декодирование идёт в фоне при входе в приложение,
+            // поэтому при открытии «Профиля» картинки уже готовы — без рывка. Остальные — просто в дисковый кэш.
+            for id in ids.prefix(3) {
+                guard let url = ServerConfig.mediaURL(id) else { continue }
+                Task.detached(priority: .userInitiated) { _ = await ImageCache.shared.load(url, maxPixel: 1280, persistKey: id) }
+            }
+            for id in ids.dropFirst(3) { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
+        }
     }
+
+    /// Эмодзи-статус: рядом с ником появляется сразу, сервер — следом. Не получилось — возвращаем прежний
+    func setStatusEmoji(_ emoji: String) {
+        let old = profile?.statusEmoji
+        profile?.statusEmoji = emoji.isEmpty ? nil : emoji
+        Task {
+            if await update(ProfilePatch(statusEmoji: emoji)) != nil { profile?.statusEmoji = old }
+        }
+    }
+
+    /// Без интернета фото профиля не меняются: показываем то, что сохранено, а правки — когда связь вернётся
+    private var offline: Bool { NetworkState.shared.offline }
 
     /// nil — всё прошло успешно
     @discardableResult
@@ -38,6 +63,7 @@ final class ProfileStore: ObservableObject {
     /// Обрезает фото до квадрата, загружает и добавляет в начало галереи
     @discardableResult
     func addPhoto(from data: Data) async -> APIError? {
+        guard !offline else { return .offline }
         guard let jpeg = ImageProcessing.avatar(data) else { return .invalidResponse }
         do {
             let id = try await repo.uploadAvatar(jpeg)
@@ -50,6 +76,7 @@ final class ProfileStore: ObservableObject {
 
     @discardableResult
     func removePhoto(_ id: String) async -> APIError? {
+        guard !offline else { return .offline }
         do {
             profile = try await repo.deleteAvatar(id: id)
             return nil
@@ -60,6 +87,7 @@ final class ProfileStore: ObservableObject {
 
     @discardableResult
     func reorderPhotos(_ ids: [String]) async -> APIError? {
+        guard !offline else { return .offline }
         do {
             profile = try await repo.reorderAvatars(ids)
             return nil

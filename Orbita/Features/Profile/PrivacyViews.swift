@@ -11,6 +11,14 @@ struct PrivacyScreen: View {
 
     @State private var blockedCount = 0
     @State private var errorText: String?
+    /// «Учитывать мои действия»: nil — ещё не узнали у сервера (по умолчанию включено)
+    @State private var learnFromActivity: Bool?
+    /// Эффекты по жестам в кружочках (локальная настройка устройства)
+    @State private var gestureFX = GestureEffects.enabled
+    @State private var showSensitive = SensitiveContent.alwaysShow
+    @State private var showMyReports = false
+    @State private var showSupport = false
+    @State private var supportUnread = 0
 
     private var s: Strings { Strings(lang: lang) }
     private var privacy: PrivacySettings { store.profile?.privacy ?? PrivacySettings() }
@@ -30,6 +38,17 @@ struct PrivacyScreen: View {
                 SettingsRow(icon: "hand.raised.slash.fill", tint: .red, title: s.blacklist,
                             value: s.blockedCount(blockedCount), showsChevron: true) {
                     session.profileRoute = .blacklist
+                }
+                SettingsDivider()
+                SettingsRow(icon: "exclamationmark.bubble.fill", tint: .orange,
+                            title: s.t("Мои жалобы", "My reports"), showsChevron: true) {
+                    showMyReports = true
+                }
+                SettingsDivider()
+                SettingsRow(icon: "headphones", tint: .green,
+                            title: s.t("Техподдержка", "Support"),
+                            value: supportUnread > 0 ? String(supportUnread) : nil, showsChevron: true) {
+                    showSupport = true
                 }
                 SettingsDivider()
                 SettingsRow(icon: "lock.shield.fill", tint: .teal, title: s.twoFATitle,
@@ -74,6 +93,141 @@ struct PrivacyScreen: View {
                     .padding(.horizontal, 30)
             }
 
+            // Рекомендации: учитывать ли действия человека
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.pink, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Учитывать мои действия", "Learn from my activity")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { learnFromActivity ?? true },
+                            set: { on in
+                                learnFromActivity = on
+                                Task {
+                                    if let info = await session.extras.setTaste(enabled: on) { learnFromActivity = info.enabled }
+                                    await session.feed.load()
+                                }
+                            }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                        .disabled(learnFromActivity == nil)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("""
+                    Когда включено (так по умолчанию), лента «Для вас» и шортсы подбираются по тому, что вы смотрите и сколько, \
+                    что лайкаете, комментируете, сохраняете, репостите, пересылаете и ищете, — чтобы чаще показывать похожее \
+                    и реже то, что вы пролистываете. Если выключить, ваши действия не запоминаются и не учитываются: \
+                    рекомендации строятся только по интересам, выбранным при регистрации, свежести и популярности. \
+                    Записи, на которые вы нажали «Не интересует», не показываются в любом случае. \
+                    Ваши действия видит только сервер Orbita — другим людям они не показываются.
+                    """, """
+                    When on (the default), your For You feed and shorts are picked based on what you watch and for how long, \
+                    what you like, comment on, save, repost, share and search for — to show more of what you enjoy and less of \
+                    what you skip. When off, your activity isn't remembered or used: recommendations are based only on the \
+                    interests you chose at sign-up, freshness and popularity. Posts you marked "Not interested" stay hidden either way. \
+                    Only the Orbita server sees your activity — it's never shown to other people.
+                    """))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .task { learnFromActivity = await session.extras.taste()?.enabled ?? true }
+
+            // Лучшие друзья вокруг аватарки
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "circle.hexagongrid.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Отображение лучших друзей", "Show best friends")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { privacy.orbit == "all" },
+                            set: { apply("orbit", $0 ? "all" : "nobody") }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Вокруг вашей аватарки будут медленно кружиться аватарки тех, с кем вы общаетесь больше всего. Это видят все, кто открывает ваш профиль.",
+                         "The avatars of people you chat with the most will slowly orbit your profile picture. Everyone who opens your profile sees it."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+            }
+
+            // Эффекты по жестам в кружочках
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "hand.wave.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.teal, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Эффекты по жестам", "Gesture effects")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { gestureFX },
+                            set: { on in gestureFX = on; GestureEffects.enabled = on }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Во время записи видеосообщения (кружочка) жесты рукой запускают эффекты: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Распознавание идёт на устройстве, камера никуда не передаётся.",
+                         "While recording a video message, hand gestures trigger effects: 👌 — ✅, 🫰 — 💸, ✌️ — 😎, 🔫 — 🔫, ❤️ — ❤️. Recognition runs on-device; the camera is not sent anywhere."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Чувствительный контент (18+)
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsGroup {
+                    HStack(spacing: 14) {
+                        Image(systemName: "eye.trianglebadge.exclamationmark.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Показывать чувствительный контент", "Show sensitive content")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { showSensitive },
+                            set: { on in showSensitive = on; SensitiveContent.alwaysShow = on }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                }
+                Text(s.t("Контент с пометкой 18+ по умолчанию скрыт под размытием. Включите, чтобы всегда показывать его без предупреждения.",
+                         "Content marked 18+ is blurred by default. Turn this on to always reveal it without a warning."))
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 30)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Кто видит
             VStack(alignment: .leading, spacing: 8) {
                 Text(s.whoCanSeeSection.uppercased())
@@ -84,6 +238,8 @@ struct PrivacyScreen: View {
                     row("phone", icon: "phone.fill", tint: .green)
                     SettingsDivider()
                     row("find", icon: "magnifyingglass", tint: .teal)
+                    SettingsDivider()
+                    row("followers", icon: "person.2.fill", tint: .mint)
                     SettingsDivider()
                     row("last_seen", icon: "clock.fill", tint: .orange)
                     SettingsDivider()
@@ -111,6 +267,21 @@ struct PrivacyScreen: View {
         }
         .task {
             blockedCount = (try? await session.socialRepo.blocks().count) ?? 0
+            supportUnread = await session.extras.supportUnread()
+        }
+        .sheet(isPresented: $showMyReports) {
+            NavigationStack { MyReportsView() }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showSupport, onDismiss: { Task { supportUnread = await session.extras.supportUnread() } }) {
+            NavigationStack { SupportView() }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .preferredColorScheme(theme.dark ? .dark : .light)
+                .presentationBackground(theme.sheet)
         }
     }
 
@@ -138,7 +309,7 @@ struct VisibilityScreen: View {
     private var isStub: Bool { ["calls", "forwards", "invites"].contains(key) }
     /// «Только контактам» — везде, кроме поиска по номеру
     private var choices: [(String, String)] {
-        key == "find" ? [("all", s.visibleAll), ("nobody", s.visibleNone)]
+        (key == "find" || key == "followers") ? [("all", s.visibleAll), ("nobody", s.visibleNone)]
                       : [("all", s.visibleAll), ("contacts", s.visibleContacts), ("nobody", s.visibleNone)]
     }
 

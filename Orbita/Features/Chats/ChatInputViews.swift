@@ -1,7 +1,10 @@
 import SwiftUI
+import Combine
 import PhotosUI
+import Photos
 import UniformTypeIdentifiers
 import UIKit
+import AVFoundation
 
 /// Строка ввода как в Telegram:
 /// [скрепка] [поле с форматированием и смайлом] [отправить | микрофон ↔ камера]
@@ -14,6 +17,7 @@ struct ChatInputBar: View {
     @StateObject private var controller = RichComposerController()
     @StateObject private var voice = VoiceRecorder()
     @StateObject private var circle = CircleRecorder()
+    @State private var barTop: CGFloat = 0
 
     @AppStorage("chat.micMode") private var micModeRaw = "voice"
     @State private var drafts: [DraftAttachment] = []
@@ -21,18 +25,25 @@ struct ChatInputBar: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
+    @State private var showAttach = false
+    @State private var showLocation = false             // «Геопозиция» из скрепки: точка или трансляция
     @State private var emojiOpen = false
     @State private var holding = false
     @State private var active: Active = .none
     @State private var slide: CGFloat = 0
     @State private var slideY: CGFloat = 0
     @State private var locked = false
+    @State private var zoomBase: CGFloat = 1          // приближение кружка на момент начала жеста
+    @State private var holdStarted: Date?               // когда зажали кнопку записи — чтобы отличить «слишком коротко» от сбоя
+    @State private var cameraLive = false               // камера кружка уже показывает картинку (заглушка гаснет)
     @State private var trashing = false
     @State private var notice: String?
     @State private var lastEditID: String?
+    @State private var editingDraft: DraftAttachment?
 
     @EnvironmentObject private var session: AppSession
     @State private var showSchedule = false
+    @State private var showStickerCreator = false
     @State private var kbVisible = false
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -47,13 +58,17 @@ struct ChatInputBar: View {
         if let target = model.editing {
             return controller.hasContent || !target.attachments.isEmpty
         }
-        return controller.hasContent || !drafts.isEmpty
+        return controller.hasContent || !drafts.isEmpty || preparing > 0
     }
+
+    /// Фото или видео ещё готовится к отправке — ждём, отправить пока нельзя
+    private var busy: Bool { preparing > 0 && model.editing == nil }
 
     var body: some View {
         VStack(spacing: 0) {
             banner
             tray
+                .animation(.spring(response: 0.3, dampingFraction: 0.82), value: stickerSuggestions()?.map(\.id))
             if model.isPreview {
                 joinBar
             } else if model.canWrite {
@@ -68,7 +83,11 @@ struct ChatInputBar: View {
                 }
                 .buttonStyle(.plain)
             } else if model.peer.isGroup {
-                Text(s.t("Писать могут только администраторы", "Only admins can write here"))
+                Text(model.group?.restrictedUntil.map { until in
+                        until == .distantFuture ? s.t("Администраторы запретили вам писать", "Admins restricted you from writing")
+                            : s.t("Вы сможете писать после ", "You can write after ") + until.formatted(date: .abbreviated, time: .shortened)
+                    } ?? (model.group?.whoWrites == "selected" ? s.t("Писать могут только выбранные участники", "Only selected members can write")
+                                                                : s.t("Писать могут только администраторы", "Only admins can write here")))
                     .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
                     .frame(maxWidth: .infinity).padding(.vertical, 16)
             } else {
@@ -86,11 +105,23 @@ struct ChatInputBar: View {
                 }
                 .frame(width: 1400, height: 2600)
                 .allowsHitTesting(locked)
+                .contentShape(Rectangle())
+                // приближение щипком где угодно по экрану (когда запись на замке — руки свободны)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { circle.setZoom(zoomBase * $0) }
+                        .onEnded { _ in zoomBase = circle.zoom }
+                )
                 .transition(.opacity)
                 .ignoresSafeArea()
             }
         }
-        .overlay(alignment: .top) { circleOverlay }
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { barTop = g.frame(in: .global).minY }
+                .onChange(of: g.frame(in: .global).minY) { _, v in barTop = v }
+        })
+        .overlay(alignment: .top) { circleOverlay.zIndex(100) }
         .overlay(alignment: .top) {
             if let notice {
                 ToastView(text: notice).offset(y: -52).allowsHitTesting(false)
@@ -98,11 +129,49 @@ struct ChatInputBar: View {
             }
         }
         .zIndex(5)
+        .fullScreenCover(item: $editingDraft) { draft in
+            if case .media(let m) = draft.source, case .image(let data) = m.source, let image = UIImage(data: data) {
+                PhotoEditorView(image: image, onDone: { edited in
+                    if let jpeg = edited.jpegData(compressionQuality: 0.9),
+                       let media = try? MediaPreparer.prepareImage(jpeg),
+                       let i = drafts.firstIndex(where: { $0.id == draft.id }) {
+                        drafts[i] = DraftAttachment(source: .media(media))
+                    }
+                    editingDraft = nil
+                }, onCancel: { editingDraft = nil })
+            }
+        }
         .sheet(isPresented: $showSchedule) {
             ScheduleSheet { date in showSchedule = false; scheduleSend(at: date) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
                 .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showStickerCreator) {
+            StickerCreatorSheet(onChanged: { Task { await model.loadStickers() } })
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showLocation) {
+            LocationShareSheet { point, live in model.sendLocation(point, live: live) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showAttach) {
+            AttachSheet(canPoll: !model.peer.isChannel || model.group?.isAdmin == true,
+                        onAssets: { addAssets($0) },
+                        onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
+                        onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
+                        onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
+                        onPhoto: { addPhoto($0) },
+                        onVideo: { addVideoFile($0) },
+                        onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true } })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.fraction(0.62), .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.sheet)
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems, maxSelectionCount: 10,
                       matching: .any(of: [.images, .videos]))
@@ -143,6 +212,7 @@ struct ChatInputBar: View {
         }
         .gesture(DragGesture(minimumDistance: 18).onEnded { if $0.translation.height > 30 { hideKeyboard() } })
         .task { await model.loadStickers() }
+        .onAppear { AttachCamera.shared.prewarm() }
         .onDisappear {
             voice.cancel()
             circle.shutdown()
@@ -152,6 +222,7 @@ struct ChatInputBar: View {
                 let snap = controller.snapshot()
                 if !snap.text.isEmpty { ChatDraftStore.save(chat: model.peer.id, text: snap.text, entities: snap.entities) }
             }
+            ChatDraftSignal.bump()                          // строка в списке чатов — с последним текстом черновика
         }
     }
 
@@ -219,6 +290,7 @@ struct ChatInputBar: View {
         case .sticker: return s.stickerLabel
         case .file: return a.name ?? s.fileLabel
         case .audio: return a.displayTitle
+        case .location: return a.geo?.isLive == true ? s.t("📍 Трансляция геопозиции", "📍 Live location") : s.t("📍 Геопозиция", "📍 Location")
         }
     }
 
@@ -244,11 +316,32 @@ struct ChatInputBar: View {
                 }
                 .padding(.horizontal, 14).padding(.top, 8)
             }
+        } else if let suggested = stickerSuggestions(), !suggested.isEmpty {
+            // в поле один эмодзи — стикеры с ним из своих наборов, нажатие отправляет стикер вместо эмодзи
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(suggested) { st in
+                        Button {
+                            Haptics.impact(.light)
+                            controller.clear()
+                            model.sendSticker(st)
+                            onSent()
+                        } label: {
+                            StickerImage(sticker: st, size: 62)
+                        }
+                        .buttonStyle(PressStyle())
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
+                }
+                .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         } else if !drafts.isEmpty || preparing > 0 {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(drafts) { draft in
-                        DraftThumb(draft: draft) { drafts.removeAll { $0.id == draft.id } }
+                        DraftThumb(draft: draft, onRemove: { drafts.removeAll { $0.id == draft.id } },
+                                   onEdit: { editingDraft = draft })
                     }
                     if preparing > 0 {
                         ProgressView().frame(width: 64, height: 64).card(theme, radius: 12)
@@ -257,6 +350,18 @@ struct ChatInputBar: View {
                 .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
             }
         }
+    }
+
+    /// Стикеры под эмодзи, если в поле только он (как в Telegram). Без вариантных селекторов: ❤ и ❤️ — одно и то же
+    private func stickerSuggestions() -> [Sticker]? {
+        guard controller.length > 0, controller.length <= 12, model.editing == nil, drafts.isEmpty, model.canWrite else { return nil }
+        let typed = controller.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed.count == 1, let ch = typed.first, ch.unicodeScalars.contains(where: { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }) else { return nil }
+        func norm(_ v: String) -> String { v.replacingOccurrences(of: "\u{FE0F}", with: "") }
+        let key = norm(typed)
+        var seen = Set<String>()
+        let found = model.packs.flatMap(\.stickers).filter { norm($0.emoji) == key && seen.insert($0.id).inserted }
+        return found.isEmpty ? nil : Array(found.prefix(20))
     }
 
     /// Участники группы с юзернеймом, подходящие под набранное после «@»
@@ -274,7 +379,15 @@ struct ChatInputBar: View {
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             if !recording {
-                attachButton.transition(.opacity)
+                if trashing {
+                    // отмена записи: на месте скрепки (в её же пузыре) мусорка, а скрепка возвращается после анимации
+                    TrashCancelAnimation(color: theme.danger)
+                        .frame(width: 44, height: 44)
+                        .glassCircle()
+                        .transition(.opacity)
+                } else {
+                    attachButton.transition(.opacity)
+                }
             }
 
             ZStack(alignment: .bottomLeading) {
@@ -287,15 +400,6 @@ struct ChatInputBar: View {
 
             trailingButton
         }
-        .overlay(alignment: .bottomLeading) {
-            // отмена записи: микрофон падает в мусорку, крышка открывается и закрывается
-            if trashing {
-                TrashCancelAnimation(color: theme.danger)
-                    .padding(.leading, 6)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-            }
-        }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, kbVisible ? 22 : 12)      // зазор от клавиатуры — поле не «налезает» на неё
@@ -303,14 +407,24 @@ struct ChatInputBar: View {
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in kbVisible = true }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in kbVisible = false }
         .animation(.easeOut(duration: 0.18), value: recording)
+        .animation(.easeOut(duration: 0.2), value: trashing)
     }
 
     private var attachButton: some View {
-        Menu {
-            Button { showPhotoPicker = true } label: { Label(s.attachPhotoVideo, systemImage: "photo.on.rectangle") }
-            Button { showFileImporter = true } label: { Label(s.attachFile, systemImage: "doc") }
-            if !model.peer.isChannel || model.group?.isAdmin == true {
-                Button { onPoll() } label: { Label(s.t("Опрос", "Poll"), systemImage: "chart.bar.fill") }
+        Button {
+            Haptics.impact(.light)
+            AttachCamera.shared.warmStart()          // камера включается, пока меню выезжает
+            if kbVisible {
+                // сначала прячем клавиатуру, и только когда она уехала — открываем меню
+                controller.unfocus()
+                Task { @MainActor in
+                    var waited = 0
+                    while kbVisible, waited < 20 { try? await Task.sleep(nanoseconds: 25_000_000); waited += 1 }
+                    showAttach = true
+                }
+            } else {
+                controller.unfocus()
+                showAttach = true
             }
         } label: {
             Image(systemName: "paperclip")
@@ -318,7 +432,9 @@ struct ChatInputBar: View {
                 .foregroundStyle(theme.text)
                 .frame(width: 44, height: 44)
                 .glassCircle()
+                .padding(8).contentShape(Rectangle()).padding(-8)     // зона нажатия шире видимой кнопки
         }
+        .buttonStyle(.plain)
     }
 
     private var field: some View {
@@ -339,6 +455,7 @@ struct ChatInputBar: View {
                     .font(.system(size: 21))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 40, height: 38)
+                    .padding(.vertical, 8).padding(.horizontal, 4).contentShape(Rectangle()).padding(.vertical, -8).padding(.horizontal, -4)
             }
             .buttonStyle(.plain)
         }
@@ -373,16 +490,31 @@ struct ChatInputBar: View {
                 }
                 .transition(.scale.combined(with: .opacity))
             } else if canSend && !recording {
-                Button { send() } label: {
-                    Image(systemName: model.editing != nil ? "checkmark" : "arrow.up")
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(theme.accent, in: Circle())
-                        .shadow(color: theme.accentColor.opacity(0.45), radius: 7, y: 3)
+                Button { if !busy { send() } } label: {
+                    ZStack {
+                        if busy {
+                            ProgressView().tint(.white).scaleEffect(0.8)
+                        } else {
+                            Image(systemName: model.editing != nil ? "checkmark" : "arrow.up")
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 38, height: 38)
+                    .background(busy ? AnyShapeStyle(theme.textTertiary.opacity(0.55)) : AnyShapeStyle(theme.accent), in: Circle())
+                    .shadow(color: theme.accentColor.opacity(busy ? 0 : 0.45), radius: 7, y: 3)
+                    .animation(.easeOut(duration: 0.2), value: busy)
+                    .padding(8).contentShape(Rectangle()).padding(-8)
                 }
                 .buttonStyle(PressStyle())
+                .disabled(busy)
                 .contextMenu {
+                    if model.editing == nil && drafts.contains(where: \.isVideo) {
+                        // как в Telegram: видео без звука уходит как GIF и у получателя крутится по кругу
+                        Button { sendAsGIF() } label: {
+                            Label(s.t("Отправить как GIF (без звука)", "Send as GIF (no sound)"), systemImage: "speaker.slash")
+                        }
+                    }
                     if model.editing == nil && model.peer.id != session.serverID {
                         Button { send(silent: true) } label: {
                             Label(s.t("Отправить без звука", "Send silently"), systemImage: "bell.slash")
@@ -508,13 +640,17 @@ struct ChatInputBar: View {
             } else {
                 Spacer()
                 HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                    Text(willCancel ? s.t("Отпустите — отмена", "Release to cancel") : s.slideToCancel)
+                    Image(systemName: "chevron.left").opacity(willCancel ? 0 : 1)
+                    Text(willCancel ? s.t("Отпусти", "Release") : s.slideToCancel)
+                        .contentTransition(.interpolate)
                 }
-                .font(.system(size: 15))
+                .font(.system(size: 15, weight: willCancel ? .semibold : .regular))
                 .foregroundStyle(willCancel ? theme.danger : theme.textSecondary)
+                .scaleEffect(willCancel ? 1.12 : 1, anchor: .trailing)
+                // пока не дотянул — текст едет за пальцем; дотянул — замирает и становится красным «Отпусти»
                 .offset(x: max(-60, min(0, slide / 3)))
                 .padding(.trailing, 14)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: willCancel)
             }
         }
         .padding(.leading, 14)
@@ -537,21 +673,41 @@ struct ChatInputBar: View {
             } else {
                 BlinkingDot()
             }
-            RecordClock(since: { [circle] in circle.startedAt })
+            RecordClock(since: { [circle] in circle.clockStart })
                 .font(.system(size: 17, weight: .medium).monospacedDigit())
                 .foregroundStyle(theme.text)
             Spacer()
             if locked {
                 cancelLockedButton
             } else {
-                Text(willCancel ? s.t("Отпустите — отмена", "Release to cancel") : s.slideToCancel)
-                    .font(.system(size: 15))
+                Text(willCancel ? s.t("Отпусти", "Release") : s.slideToCancel)
+                    .contentTransition(.interpolate)
+                    .font(.system(size: 15, weight: willCancel ? .semibold : .regular))
                     .foregroundStyle(willCancel ? theme.danger : theme.textSecondary)
+                    .scaleEffect(willCancel ? 1.12 : 1, anchor: .trailing)
+                    .offset(x: max(-60, min(0, slide / 3)))
                     .padding(.trailing, 14)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: willCancel)
             }
         }
         .padding(.leading, 14)
         .frame(height: 40)
+    }
+
+    /// Заглушка в круге, пока камера не дала картинку: размытый кадр последнего кружка (или мягкий градиент)
+    private var circlePlaceholder: some View {
+        ZStack {
+            if let image = CircleRecorder.lastFrame {
+                Image(uiImage: image).resizable().scaledToFill()
+                    .blur(radius: 18).scaleEffect(1.15)
+            } else {
+                LinearGradient(colors: [theme.accentColor.opacity(0.55), .black], startPoint: .top, endPoint: .bottom)
+            }
+            Color.black.opacity(0.18)
+        }
+        .opacity(cameraLive ? 0 : 1)
+        .animation(.easeOut(duration: 0.35), value: cameraLive)
+        .allowsHitTesting(false)
     }
 
     /// Живое «кружок»-превью ближе к центру экрана; всё за ним размыто
@@ -561,19 +717,44 @@ struct ChatInputBar: View {
             let screenH = UIScreen.main.bounds.height
             let side: CGFloat = 288
             ZStack {
-                CameraPreview(session: circle.session)
+                CameraPreview(session: circle.session, mirrored: circle.isFront)   // фронталка — зеркало, как и в записи
                     .frame(width: side, height: side)
+                    .overlay { circlePlaceholder }          // пока камера включается — размытый кадр прошлого кружка
                     .clipShape(Circle())
-                    .scaleEffect(x: circle.isFront ? -1 : 1, y: 1)       // фронталка — зеркало
                     .overlay {
                         // кольцо-таймер: заполняется за 60 секунд и «дышит» — запись на замке выглядит живой
                         CircleRing(color: willCancel ? theme.danger : theme.accentColor,
-                                   startedAt: { [circle] in circle.startedAt }, limit: CircleRecorder.maxDuration)
+                                   startedAt: { [circle] in circle.clockStart }, limit: CircleRecorder.maxDuration)
                     }
                     .shadow(color: .black.opacity(0.35), radius: 18, y: 6)
                     .allowsHitTesting(false)
+                // приближение: щипок двумя пальцами или движение вверх/вниз по кружку (удобно, когда запись на замке)
+                Circle().fill(Color.white.opacity(0.001))
+                    .frame(width: side, height: side)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { circle.setZoom(zoomBase * $0) }
+                            .onEnded { _ in zoomBase = circle.zoom }
+                            .simultaneously(with:
+                                DragGesture(minimumDistance: 12)
+                                    .onChanged { v in circle.setZoom(zoomBase - v.translation.height / 140) }
+                                    .onEnded { _ in zoomBase = circle.zoom })
+                    )
+                // текущее увеличение — маленькая подпись, пока оно больше 1×
+                if circle.zoom > 1.04 {
+                    Text(String(format: "%.1f×", circle.zoom))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(.black.opacity(0.4), in: Capsule())
+                        .offset(y: -side / 2 + 22)
+                        .allowsHitTesting(false)
+                }
+                // эффекты по жестам рукой: вылетают поверх кружка (👌→✅, 🫰→💸, ✌️→😎, 🔫→🔫, ❤️→❤️)
+                GestureBurstOverlay(detector: circle.gestures)
+                    .frame(width: side, height: side)
+                    .allowsHitTesting(false)
                 if locked {
-                    Button { Haptics.impact(.light); circle.flipCamera() } label: {
+                    Button { Haptics.impact(.light); zoomBase = 1; circle.flipCamera() } label: {
                         Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
                             .font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
                             .frame(width: 46, height: 46).glassCircle(interactive: true)
@@ -583,38 +764,52 @@ struct ChatInputBar: View {
                     .transition(.scale.combined(with: .opacity))
                 }
             }
-            .offset(y: -(screenH * 0.58 - 112))              // центр круга примерно на 42% высоты экрана
+            // центр круга — на ~44% высоты экрана, независимо от высоты поля ввода
+            .offset(y: screenH * 0.44 - side / 2 - (barTop > 0 ? barTop : screenH - 90))
             .transition(.scale(scale: 0.6).combined(with: .opacity))
+            .onChange(of: circle.ready) { _, ready in
+                // камера запустилась — первые кадры приходят через мгновение, тогда и убираем заглушку
+                if ready { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { cameraLive = true } }
+                else { cameraLive = false }
+            }
         }
     }
 
     private func beginHold() {
         guard model.canWrite, !recording else { return }
+        guard !CallGate.blocks(cameraMode ? .circle : .voice) else { return }      // во время звонка не записываем
         holding = true
         slide = 0
         slideY = 0
         locked = false
+        zoomBase = 1
         Haptics.impact(.medium)
         if emojiOpen { emojiOpen = false; controller.resetInputPanel() }
         controller.unfocus()
+        holdStarted = Date()
         if cameraMode {
+            // кружок появляется сразу — с размытым кадром прошлого кружка, пока камера включается параллельно
+            cameraLive = circle.ready
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { active = .circle }
             Task {
                 let ok = await circle.prepare()
                 guard ok else {
                     holding = false
+                    withAnimation(.easeOut(duration: 0.2)) { active = .none }
                     flash(circle.failure == "denied" ? s.cameraDenied
                           : s.t("Не удалось включить камеру", "Couldn't start the camera"))
                     return
                 }
-                guard holding || locked else { circle.shutdown(); flash(s.t("Удерживайте кнопку для записи", "Hold the button to record")); return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { active = .circle }
+                // отпустили, пока камера включалась — «слишком короткая запись» уже показали в finishRecording
+                guard active == .circle, holding || locked else { circle.shutdown(); return }
+                circle.setZoom(1)                      // каждый кружок начинаем без приближения
                 circle.startRecording()
             }
         } else {
             Task {
                 let ok = await voice.start()
                 guard ok else { holding = false; flash(s.micDenied); return }
-                guard holding || locked else { voice.cancel(); return }
+                guard holding || locked else { voice.cancel(); flash(s.tooShort); return }
                 active = .voice
             }
         }
@@ -652,17 +847,17 @@ struct ChatInputBar: View {
                 flash(s.tooShort)
             }
         case .circle:
+            let held = holdStarted.map { Date().timeIntervalSince($0) } ?? 0
             Task {
                 let file = await circle.stopRecording()
                 circle.shutdown()
                 guard let file else {
                     if !cancelled {
-                        if circle.lastErrorCode == -11805 {
-                            // камера не успела записать ни кадра — обычно запись была слишком короткой
+                        // коротко нажали (или «нет данных» -11805) — это не сбой, а слишком короткая запись
+                        if held < 1.5 || circle.lastErrorCode == -11805 {
                             flash(s.tooShort)
                         } else {
-                            let code = circle.lastErrorCode.map { " (\($0))" } ?? ""
-                            flash(s.t("Видео не записалось, попробуйте ещё раз", "Recording failed, try again") + code)
+                            flash(s.t("Видео не записалось, попробуйте ещё раз", "Recording failed, try again"))
                         }
                     }
                     return
@@ -675,6 +870,7 @@ struct ChatInputBar: View {
                     return
                 }
                 Haptics.notify(.success)
+                CircleRecorder.rememberFrame(info.data)         // в следующий раз — размытым, пока камера включается
                 model.sendCircle(url: file, thumb: info.data, duration: info.duration)
                 onSent()
             }
@@ -698,14 +894,15 @@ struct ChatInputBar: View {
 
     private func showPanel() {
         let panel = EmojiStickerPanel(
-            packs: model.packs,
+            packs: model.packs.filter { !$0.stickers.isEmpty },   // в панели отправки пустые наборы не показываем — только в редакторе наборов
             onEmoji: { controller.insert($0) },
             onBackspace: { controller.backspace() },
             onSticker: { sticker in
                 Haptics.impact(.light)
                 model.sendSticker(sticker)
                 onSent()
-            })
+            },
+            onCreateStickers: { showStickerCreator = true })
             .environment(\.theme, theme)
             .environment(\.lang, lang)
         controller.setInputPanel(panel)
@@ -716,7 +913,7 @@ struct ChatInputBar: View {
     /// Отложенная отправка: вложения загружаются сразу, сообщение уйдёт в выбранное время
     private func scheduleSend(at date: Date) {
         let snap = controller.snapshot()
-        guard !snap.text.isEmpty || !drafts.isEmpty else { return }
+        guard preparing == 0, !snap.text.isEmpty || !drafts.isEmpty else { return }
         let items = drafts
         drafts = []
         controller.clear()
@@ -737,6 +934,29 @@ struct ChatInputBar: View {
         }
     }
 
+    /// Видео из вложений — без звуковой дорожки и с пометкой GIF, остальное как есть; затем обычная отправка
+    private func sendAsGIF() {
+        let items = drafts
+        guard items.contains(where: \.isVideo) else { return }
+        preparing += 1
+        Task {
+            var converted: [DraftAttachment] = []
+            for item in items {
+                if case .media(let m) = item.source, case .video(let url) = m.source, let silent = await VideoSilencer.stripAudio(url) {
+                    var gif = PreparedMedia(source: .video(silent), width: m.width, height: m.height,
+                                            duration: m.duration, thumbnail: m.thumbnail)
+                    gif.gif = true
+                    converted.append(DraftAttachment(source: .media(gif)))
+                } else {
+                    converted.append(item)
+                }
+            }
+            drafts = converted
+            preparing -= 1
+            send()
+        }
+    }
+
     private func send(silent: Bool = false) {
         let snap = controller.snapshot()
         if let target = model.editing {
@@ -744,7 +964,7 @@ struct ChatInputBar: View {
             Task { _ = await model.saveEdit(target, text: snap.text, entities: snap.entities) }
             return
         }
-        guard !snap.text.isEmpty || !drafts.isEmpty else { return }
+        guard preparing == 0, !snap.text.isEmpty || !drafts.isEmpty else { return }
         let items = drafts
         drafts = []
         controller.clear()
@@ -773,6 +993,54 @@ struct ChatInputBar: View {
     }
 
     // MARK: Файлы и фото
+
+    private func addAssets(_ assets: [PHAsset]) {
+        preparing += assets.count
+        Task {
+            for asset in assets {
+                do {
+                    let media = try await AssetLoader.prepare(asset)
+                    drafts.append(DraftAttachment(source: .media(media)))
+                } catch MediaError.tooLong {
+                    flash(s.t("Видео слишком длинное", "Video is too long"))
+                } catch MediaError.tooLarge {
+                    flash(s.t("Файл слишком большой", "File is too large"))
+                } catch {
+                    flash(s.t("Не удалось добавить файл", "Couldn't add the file"))
+                }
+                preparing -= 1
+            }
+        }
+    }
+
+    private func addVideoFile(_ url: URL) {
+        preparing += 1
+        Task {
+            do {
+                let media = try await MediaPreparer.prepare(videoFile: url)
+                drafts.append(DraftAttachment(source: .media(media)))
+            } catch MediaError.tooLong {
+                flash(s.t("Видео слишком длинное", "Video is too long"))
+            } catch MediaError.tooLarge {
+                flash(s.t("Файл слишком большой", "File is too large"))
+            } catch {
+                flash(s.t("Не удалось добавить файл", "Couldn't add the file"))
+            }
+            preparing -= 1
+        }
+    }
+
+    private func addPhoto(_ data: Data) {
+        preparing += 1
+        Task {
+            if let media = try? MediaPreparer.prepareImage(data) {
+                drafts.append(DraftAttachment(source: .media(media)))
+            } else {
+                flash(s.t("Не удалось добавить файл", "Couldn't add the file"))
+            }
+            preparing -= 1
+        }
+    }
 
     private func addMedia(_ items: [PhotosPickerItem]) {
         preparing += items.count
@@ -839,7 +1107,13 @@ struct ChatInputBar: View {
 private struct DraftThumb: View {
     let draft: DraftAttachment
     let onRemove: () -> Void
+    var onEdit: (() -> Void)? = nil
     @Environment(\.theme) private var theme
+
+    private var canEdit: Bool {
+        if case .media(let m) = draft.source, case .image = m.source { return true }
+        return false
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -864,6 +1138,15 @@ private struct DraftThumb: View {
             }
             .frame(width: 64, height: 64)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                if canEdit {
+                    Image(systemName: "pencil.circle.fill")
+                        .font(.system(size: 20)).symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.black.opacity(0.6)).padding(3)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { if canEdit { onEdit?() } }
 
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
@@ -994,7 +1277,7 @@ struct TrashCancelAnimation: View {
     let color: Color
 
     @State private var lid: Double = 0          // угол крышки
-    @State private var micY: CGFloat = -26
+    @State private var micY: CGFloat = -20
     @State private var micTilt: Double = 0
     @State private var micScale: CGFloat = 1
     @State private var micOpacity: Double = 1
@@ -1004,24 +1287,25 @@ struct TrashCancelAnimation: View {
     var body: some View {
         ZStack {
             Image(systemName: "mic.fill")
-                .font(.system(size: 22, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(color)
                 .scaleEffect(micScale)
                 .rotationEffect(.degrees(micTilt))
                 .offset(y: micY)
                 .opacity(micOpacity)
             TrashBinShape(lid: lid, color: color)
-                .frame(width: 26, height: 30)
+                .frame(width: 20, height: 23)
                 .scaleEffect(binScale)
                 .opacity(binOpacity)
-                .offset(y: 4)
+                .offset(y: 1)
         }
         .frame(width: 44, height: 44)
+        .scaleEffect(1 / 1.5)
         .onAppear {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { binScale = 1; binOpacity = 1 }
             withAnimation(.easeOut(duration: 0.2).delay(0.08)) { lid = -72 }
             withAnimation(.easeIn(duration: 0.34).delay(0.12)) {
-                micY = 6; micTilt = -28; micScale = 0.45
+                micY = 3; micTilt = -28; micScale = 0.45
             }
             withAnimation(.easeOut(duration: 0.12).delay(0.38)) { micOpacity = 0 }
             withAnimation(.easeInOut(duration: 0.2).delay(0.52)) { lid = 0 }
@@ -1071,5 +1355,24 @@ private struct TrashBinShape: View {
             .frame(height: 12)
             .rotationEffect(.degrees(lid), anchor: UnitPoint(x: 0.05, y: 0.6))
         }
+    }
+}
+
+/// Убирает звуковую дорожку из видео (без перекодирования): так отправляется «GIF»
+enum VideoSilencer {
+    static func stripAudio(_ url: URL) async -> URL? {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let duration = try? await asset.load(.duration) else { return nil }
+        let composition = AVMutableComposition()
+        guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        do { try video.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero) } catch { return nil }
+        video.preferredTransform = (try? await track.load(.preferredTransform)) ?? .identity
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else { return nil }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("gif-\(UUID().uuidString).mp4")
+        export.outputURL = out
+        export.outputFileType = .mp4
+        await export.export()
+        return export.status == .completed ? out : nil
     }
 }

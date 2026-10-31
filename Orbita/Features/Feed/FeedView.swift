@@ -26,11 +26,20 @@ struct FeedView: View {
     @State private var editingPost: Post?
     @FocusState private var searchFocused: Bool
     @StateObject private var stories = StoryStore()
+    @StateObject private var activity = ActivityStore()
+    @State private var showActivity = false
+    @State private var pendingAuthor: Author?
     @Environment(\.scenePhase) private var scenePhase
     @State private var pull: CGFloat = 0
     @State private var pullArmed = false
 
     private var s: Strings { Strings(lang: lang) }
+
+    /// Рекламные вставки после поста с данным индексом — только в основной ленте
+    private func adsAfter(_ index: Int) -> [FeedAd] {
+        guard vm.authorFilter == nil, query.isEmpty else { return [] }
+        return vm.ads.filter { $0.slot == index && !vm.hiddenAdIDs.contains($0.id) }
+    }
 
     /// Фильтр по автору + поиск (не зависит от раскладки)
     private var visiblePosts: [Post] {
@@ -50,6 +59,7 @@ struct FeedView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+                .zIndex(5)          // плашка «что нового» под колокольчиком ложится поверх ленты
 
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -66,7 +76,7 @@ struct FeedView: View {
 
                     stateView
 
-                    ForEach(visiblePosts) { post in
+                    ForEach(Array(visiblePosts.enumerated()), id: \.element.id) { index, post in
                         PostCard(post: post, autoplay: autoplay,
                                  onLike: { vm.toggleLike(post) },
                                  onComments: { commentsPost = post },
@@ -76,12 +86,26 @@ struct FeedView: View {
                             .onAppear { session.taste.appeared(post.id) }
                             .onDisappear { session.taste.disappeared(post.id) }
                         Divider().overlay(theme.stroke)
+                        // реклама между постами (только в основной ленте, не в поиске/фильтре по автору)
+                        ForEach(adsAfter(index)) { ad in
+                            AdCardView(ad: ad,
+                                       onHide: { withAnimation { vm.hiddenAdIDs.insert(ad.id) } },
+                                       onReport: { withAnimation { vm.hiddenAdIDs.insert(ad.id) } })
+                            Divider().overlay(theme.stroke)
+                        }
                     }
                 }
             }
             .coordinateSpace(name: "feedScroll")
             .onPreferenceChange(FeedPullKey.self) { handlePull($0) }
             .scrollDismissesKeyboard(.interactively)
+            .refreshable {
+                // потянули вниз — лента и истории обновляются
+                async let feed: Void = vm.load()
+                async let tray: Void = stories.reload(session.extras)
+                _ = await (feed, tray)
+                Haptics.impact(.light)
+            }
         }
         .task { await vm.load() }
         .task {
@@ -92,6 +116,19 @@ struct FeedView: View {
             }
         }
         .modifier(StoryPresenters(store: stories))
+        .task {
+            // счётчик на колокольчике: раз в минуту, тихо, без баннеров
+            while !Task.isCancelled {
+                await activity.refresh(session.extras)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+        .sheet(isPresented: $showActivity, onDismiss: {
+            if let a = pendingAuthor { pendingAuthor = nil; onOpenAuthor?(a) }
+        }) {
+            ActivityView(store: activity) { pendingAuthor = $0 }
+                .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { session.taste.endAll() }
         }
@@ -147,7 +184,6 @@ struct FeedView: View {
             pullArmed = false
             let opened = stories.openFirstUnseen()
             if opened { Haptics.impact(.light) }
-            Task { await vm.load() }
         }
     }
 
@@ -170,11 +206,6 @@ struct FeedView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Button { session.profileRoute = .interests; session.tabRequest = .profile } label: {
-                Label(s.t("Интересы", "Interests"), systemImage: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .medium)).foregroundStyle(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
@@ -256,6 +287,8 @@ struct FeedView: View {
                             .frame(width: 40, height: 40)
                     }
                 }
+
+                BellButton(store: activity) { showActivity = true }
 
                 Button { showBookmarks = true } label: {
                     Image(systemName: "bookmark")
@@ -354,6 +387,8 @@ struct PostCard: View {
     @State private var confirmDelete = false
     @State private var sendSheet = false
     @State private var showLikers = false
+    @State private var hiddenNote: String?
+    @State private var reportAsk = false
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @EnvironmentObject private var session: AppSession
     @EnvironmentObject private var flow: AuthFlow
@@ -376,6 +411,7 @@ struct PostCard: View {
         Button { sendSheet = true } label: { Label(s.sendToChat, systemImage: "paperplane") }
         Button {
             UIPasteboard.general.string = link
+            session.taste.shared(post.id)                     // поделился — учитывается в рекомендациях
             Haptics.notify(.success)
         } label: { Label(s.copyLink, systemImage: "link") }
     }
@@ -401,32 +437,58 @@ struct PostCard: View {
     }
 
     var body: some View {
+        if let note = hiddenNote {
+            HStack(spacing: 10) {
+                Image(systemName: "eye.slash").foregroundStyle(theme.textSecondary)
+                Text(note).font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+                Spacer()
+                Button(s.t("Вернуть", "Undo")) {
+                    withAnimation { hiddenNote = nil }
+                }
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
+            }
+            .padding(16)
+            .transition(.opacity)
+        } else {
+            cardBody
+        }
+    }
+
+    private var reportReasons: [(String, String)] {
+        [("spam", s.t("Спам", "Spam")), ("violence", s.t("Насилие", "Violence")),
+         ("adult", s.t("Контент для взрослых", "Adult content")), ("illegal", s.t("Незаконный контент", "Illegal content")),
+         ("copyright", s.t("Нарушение авторских прав", "Copyright")), ("other", s.t("Другое", "Other"))]
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
+                // аватар + имя — одна большая зона нажатия на профиль
                 Button { onOpenAuthor?(post.author) } label: {
-                    AvatarView(name: post.author.name, size: 46, avatarID: post.author.avatarID)
-                        .clipShape(Circle())
+                    HStack(spacing: 12) {
+                        AvatarView(name: post.author.name, size: 46, avatarID: post.author.avatarID)
+                            .clipShape(Circle())
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(post.author.name)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                            HStack(spacing: 5) {
+                                if let username = post.author.username {
+                                    Text("@\(username)")
+                                    Text("·")
+                                }
+                                Text(timeText)
+                            }
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(onOpenAuthor == nil)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(post.author.name)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                    HStack(spacing: 5) {
-                        if let username = post.author.username {
-                            Text("@\(username)")
-                            Text("·")
-                        }
-                        Text(timeText)
-                    }
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                }
-
-                Spacer()
 
                 Menu {
                     shareItems
@@ -438,6 +500,15 @@ struct PostCard: View {
                         }
                         Button(role: .destructive) { confirmDelete = true } label: {
                             Label(s.deletePost, systemImage: "trash")
+                        }
+                    } else {
+                        Button {
+                            Haptics.impact(.medium)
+                            session.taste.notInterested(post.id)
+                            withAnimation { hiddenNote = s.t("Скрыто. Эту запись больше не покажем, похожее — реже", "Hidden. We won't show this again, and less like it") }
+                        } label: { Label(s.t("Не интересует", "Not interested"), systemImage: "hand.thumbsdown") }
+                        Button(role: .destructive) { reportAsk = true } label: {
+                            Label(s.t("Пожаловаться", "Report"), systemImage: "exclamationmark.bubble")
                         }
                     }
                 } label: {
@@ -454,9 +525,11 @@ struct PostCard: View {
             }
 
             if !post.media.isEmpty {
-                MediaGrid(media: post.media, autoplay: autoplay) { viewer = ViewerRoute(index: $0) }
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+                SensitiveGate(sensitive: post.sensitive, id: post.id) {
+                    MediaGrid(media: post.media, autoplay: autoplay) { viewer = ViewerRoute(index: $0) }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.stroke, lineWidth: 1))
             }
 
             HStack(spacing: 8) {
@@ -504,6 +577,17 @@ struct PostCard: View {
                 .presentationBackground(theme.sheet)
         }
         .padding(16)
+        .confirmationDialog(s.t("На что жалуетесь?", "What's wrong?"), isPresented: $reportAsk, titleVisibility: .visible) {
+            ForEach(reportReasons, id: \.0) { item in
+                Button(item.1) {
+                    let id = post.id
+                    Task { try? await session.extras.reportPost(id: id, reason: item.0) }
+                    Haptics.notify(.success)
+                    withAnimation { hiddenNote = s.t("Жалоба отправлена. Спасибо!", "Report sent. Thank you!") }
+                }
+            }
+            Button(s.cancel, role: .cancel) {}
+        }
         .confirmationDialog(s.deletePostQuestion, isPresented: $confirmDelete, titleVisibility: .visible) {
             Button(s.delete, role: .destructive, action: onDelete)
             Button(s.cancel, role: .cancel) {}

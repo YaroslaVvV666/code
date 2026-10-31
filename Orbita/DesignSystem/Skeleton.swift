@@ -68,3 +68,31 @@ struct FeedSkeleton: View {
         .padding(.top, 20)
     }
 }
+
+
+/// Заглушка списка чатов, пока он грузится
+struct ChatListSkeleton: View {
+    var count = 9
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { i in
+                HStack(spacing: 12) {
+                    Circle().fill(Color.gray.opacity(0.18)).frame(width: 54, height: 54)
+                    VStack(alignment: .leading, spacing: 9) {
+                        SkeletonBlock(height: 13, width: CGFloat(110 + (i * 37) % 80))
+                        SkeletonBlock(height: 11, width: CGFloat(170 + (i * 53) % 110))
+                    }
+                    Spacer(minLength: 0)
+                    SkeletonBlock(height: 10, width: 34)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .opacity(1 - Double(i) * 0.07)
+            }
+        }
+        .shimmer()
+        .padding(.top, 8)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .transition(.opacity)
+    }
+}

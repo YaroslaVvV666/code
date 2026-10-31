@@ -77,6 +77,7 @@ enum AuthError: Error, Equatable {
     case wrongPassword(attemptsLeft: Int)
     case locked(retryAfter: Int)
     case deliveryFailed
+    case otpNotConfigured          // сервер отвечает, но запущен без SMS и без ORBITA_OTP_DEV=1
     case unknown
 }
 
@@ -125,12 +126,28 @@ struct Post: Identifiable, Equatable {
     var likedByMe: Bool
     let isMine: Bool
     let commentsEnabled: Bool
+    var views = 0                    // просмотры (в сетке шортсов, как в TikTok)
     var editedAt: Date? = nil
     var saves = 0                    // сколько человек сохранили в избранное
     var savedByMe = false            // сохранено ли мной (по данным сервера)
     var reposts = 0                  // сколько человек сделали репост
     var repostedByMe = false
     var music: PostMusic? = nil      // музыка шортса (из плейлиста автора)
+    var isRepost = false             // это репост-копия чужого шортса на странице репостнувшего
+    var allowRepost = true           // автор разрешил репосты
+    var sensitive = false            // 18+/чувствительный контент — медиа под размытием
+    var repostFriends: [Author] = [] // кто из друзей сделал репост (до 8)
+    var origin: Author? = nil        // у репост-копии — автор оригинала
+    /// Создатель ролика: у репоста — автор оригинала, иначе автор
+    var creator: Author { origin ?? author }
+}
+
+/// Параметры публикации, которые выбирает автор
+struct PostOptions: Equatable {
+    var commentsOff = false          // выключить комментарии
+    var noRepost = false             // запретить репосты (для шортсов)
+    var wallOnly = false             // запись на своей стене: видна в профиле, в ленту публикаций не попадает
+    var sensitive = false            // 18+/чувствительный контент — показывается с размытием
 }
 
 struct PostMusic: Equatable, Identifiable {
@@ -168,6 +185,12 @@ struct AvatarPhoto: Identifiable, Equatable, Hashable {
     let createdAt: Date
 }
 
+struct OrbitFriend: Equatable, Identifiable {
+    let id: String
+    let name: String
+    let avatarID: String?
+}
+
 struct UserProfile: Equatable {
     let id: String
     var name: String                // имя и фамилия через пробел
@@ -195,8 +218,12 @@ struct UserProfile: Equatable {
     var styleEmoji: String? = nil       // фоновый эмодзи
     var friendState: String = "none"    // none | friends | outgoing | incoming
     var friendsCount: Int = 0
+    var followersCount: Int? = nil      // nil — скрыто настройками приватности
+    var following: Bool = false
     var requestsCount: Int? = nil       // входящие заявки (только у своего профиля)
     var statusEmoji: String? = nil      // эмодзи-статус рядом с именем
+    var listening: Bool = false         // человек прямо сейчас слушает музыку
+    var orbit: [OrbitFriend] = []       // лучшие друзья (если человек это включил)
     /// Имя с эмодзи-статусом (для шапок профиля)
     var displayName: String { statusEmoji.flatMap { $0.isEmpty ? nil : name + " " + $0 } ?? name }
 }
@@ -236,6 +263,8 @@ struct PrivacySettings: Equatable {
     var invites = "all"
     var comments = "all"
     var find = "all"
+    var followers = "all"
+    var orbit = "nobody"          // «all» — лучшие друзья кружат вокруг аватарки
 
     /// Поле сервера → значение
     subscript(key: String) -> String {
@@ -252,6 +281,8 @@ struct PrivacySettings: Equatable {
             case "forwards": return forwards
             case "invites": return invites
             case "find": return find
+            case "followers": return followers
+            case "orbit": return orbit
             default: return comments
             }
         }
@@ -268,6 +299,8 @@ struct PrivacySettings: Equatable {
             case "forwards": forwards = newValue
             case "invites": invites = newValue
             case "find": find = newValue
+            case "followers": followers = newValue
+            case "orbit": orbit = newValue
             default: comments = newValue
             }
         }
@@ -318,6 +351,7 @@ enum DeepLink: Identifiable, Equatable {
     case server(String)             // orbita://server?url=http://192.168.1.20:8080
     case post(String)               // orbita://post/<id>  или  http://сервер/p/<id>
     case group(String)              // orbita://group/<code>  или  http://сервер/g/<code>
+    case phone(String)              // orbita://phone/+7981…  — номер телефона из текста сообщения
 
     var id: String {
         switch self {
@@ -327,6 +361,7 @@ enum DeepLink: Identifiable, Equatable {
         case .server(let v):   return "server:" + v
         case .post(let v):     return "post:" + v
         case .group(let v):    return "group:" + v
+        case .phone(let v):    return "ph:" + v
         }
     }
 
@@ -380,6 +415,9 @@ enum DeepLink: Identifiable, Equatable {
         case "group":
             guard tail.range(of: "^[A-Za-z0-9_]{5,32}$", options: .regularExpression) != nil else { return nil }
             self = .group(tail)
+        case "phone":
+            guard tail.range(of: "^\\+?\\d{7,15}$", options: .regularExpression) != nil else { return nil }
+            self = .phone(tail)
         case "id":
             guard tail.range(of: "^[A-Za-z0-9\\-]{8,64}$", options: .regularExpression) != nil else { return nil }
             self = .userID(tail)
@@ -415,6 +453,7 @@ struct PreparedMedia: Identifiable {
     let height: Int
     let duration: Double?
     let thumbnail: Data             // JPEG-миниатюра для предпросмотра и обложки
+    var gif = false                 // видео без звука, отправляется как GIF: у получателя крутится по кругу
 
     var isVideo: Bool { if case .video = source { return true }; return false }
 }

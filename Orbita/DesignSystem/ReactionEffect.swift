@@ -6,6 +6,8 @@ struct ReactionFX: Identifiable, Equatable {
     let id = UUID()
     let emoji: String
     var messageID: String = ""
+    /// Реакцию поставил собеседник (пришла с сервера): эффект — только если сообщение сейчас видно на экране
+    var incoming = false
 }
 
 /// Положение сообщений на экране (экранные координаты): эффект реакции вылетает прямо из нужного сообщения
@@ -64,54 +66,60 @@ struct ReactionEffectLayer: View {
         return CGPoint(x: min(max(o.x, 30), size.width - 30), y: min(max(o.y, 130), size.height - 90))
     }
 
+    /// Символы рисуются один раз этого размера (чуть крупнее самой большой частицы), а дальше только уменьшаются
+    private static let emojiBase: CGFloat = 26
+    private static let sparkBase: CGFloat = 18
+    /// Все частицы гаснут к ~1.67 с (старт +0.12, задержка до 0.25, жизнь до 1.3); дольше слой не держим
+    private static let lifetime: Double = 1.8
+
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                TimelineView(.animation) { tl in
-                    let t = tl.date.timeIntervalSince(start)
-                    ZStack {
-                        ForEach(items.indices, id: \.self) { i in
-                            particle(items[i], t: t, size: geo.size)
-                        }
-                    }
+        // Один Canvas вместо 21 отдельного Text: эмодзи не набираются шрифтом заново на каждом кадре,
+        // а рисуются готовыми символами; 60 кадров в секунду хватает, на ProMotion не гоним 120
+        TimelineView(.animation(minimumInterval: 1.0 / 60)) { tl in
+            Canvas { ctx, size in
+                guard let emoji = ctx.resolveSymbol(id: 0), let spark = ctx.resolveSymbol(id: 1) else { return }
+                let t = tl.date.timeIntervalSince(start)
+                let a = anchor(size)                         // точка вылета — один раз за кадр, а не для каждой частицы
+                for item in items {
+                    draw(item, t: t, anchor: a, in: ctx, emoji: emoji, spark: spark)
                 }
+            } symbols: {
+                Text(fx.emoji).font(.system(size: Self.emojiBase)).tag(0)
+                Text("✨").font(.system(size: Self.sparkBase)).tag(1)
             }
         }
         .allowsHitTesting(false)
         .task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(Self.lifetime * 1_000_000_000))
             onDone()
         }
     }
 
-    @ViewBuilder
-    private func particle(_ item: Item, t: Double, size: CGSize) -> some View {
+    private func draw(_ item: Item, t: Double, anchor a: CGPoint, in ctx: GraphicsContext,
+                      emoji: GraphicsContext.ResolvedSymbol, spark: GraphicsContext.ResolvedSymbol) {
         let age = t - item.delay
         let p = CGFloat(age / item.life)
-        if age > 0, p < 1 {
-            let fadeIn = min(1, p / 0.12)
-            let fadeOut = p > 0.7 ? (1 - p) / 0.3 : 1
-            let alpha = Double(fadeIn * fadeOut)
-            if item.spark {
-                let eased = 1 - (1 - p) * (1 - p)
-                let a = anchor(size)
-                let cx = a.x + CGFloat(cos(item.angle)) * item.dx * eased
-                let cy = a.y + CGFloat(sin(item.angle)) * item.dx * eased
-                Text("✨").font(.system(size: item.size))
-                    .scaleEffect(0.5 + 0.8 * (1 - abs(p - 0.4)))
-                    .opacity(alpha)
-                    .position(x: cx, y: cy)
-            } else {
-                let eased = 1 - (1 - p) * (1 - p)
-                let a = anchor(size)
-                let x = a.x + item.dx * (0.3 + 0.7 * eased) + item.sway * CGFloat(sin(item.phase + Double(p) * 7))
-                let y = a.y - item.rise * eased
-                Text(fx.emoji).font(.system(size: item.size))
-                    .scaleEffect(0.5 + 0.6 * min(1, p * 4))
-                    .rotationEffect(.degrees(Double(item.dx) * 0.12 * Double(p)))
-                    .opacity(alpha)
-                    .position(x: x, y: y)
-            }
+        guard age > 0, p < 1 else { return }
+        let fadeIn = min(1, p / 0.12)
+        let fadeOut = p > 0.7 ? (1 - p) / 0.3 : 1
+        let eased = 1 - (1 - p) * (1 - p)
+        var c = ctx
+        c.opacity = Double(fadeIn * fadeOut)
+        if item.spark {
+            let cx = a.x + CGFloat(cos(item.angle)) * item.dx * eased
+            let cy = a.y + CGFloat(sin(item.angle)) * item.dx * eased
+            let scale = (0.5 + 0.8 * (1 - abs(p - 0.4))) * item.size / Self.sparkBase
+            c.translateBy(x: cx, y: cy)
+            c.scaleBy(x: scale, y: scale)
+            c.draw(spark, at: .zero, anchor: .center)
+        } else {
+            let x = a.x + item.dx * (0.3 + 0.7 * eased) + item.sway * CGFloat(sin(item.phase + Double(p) * 7))
+            let y = a.y - item.rise * eased
+            let scale = (0.5 + 0.6 * min(1, p * 4)) * item.size / Self.emojiBase
+            c.translateBy(x: x, y: y)
+            c.rotate(by: .degrees(Double(item.dx) * 0.12 * Double(p)))
+            c.scaleBy(x: scale, y: scale)
+            c.draw(emoji, at: .zero, anchor: .center)
         }
     }
 }

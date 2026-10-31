@@ -50,7 +50,7 @@ extension Strings {
     var releaseToSend: String { t("Отпустите, чтобы отправить", "Release to send") }
     var micDenied: String { t("Разрешите доступ к микрофону в Настройках", "Allow microphone access in Settings") }
     var cameraDenied: String { t("Разрешите доступ к камере и микрофону в Настройках", "Allow camera and microphone access in Settings") }
-    var tooShort: String { t("Слишком короткая запись", "Recording is too short") }
+    var tooShort: String { t("Слишком короткая запись — удерживайте дольше", "Too short — hold the button longer") }
     var photoLabel: String { t("Фото", "Photo") }
     var videoLabel: String { t("Видео", "Video") }
     var fileLabel: String { t("Файл", "File") }

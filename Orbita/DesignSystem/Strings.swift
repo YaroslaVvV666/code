@@ -181,7 +181,15 @@ struct Strings {
             return t("Вход заблокирован. Повторите через \(mmss(n)).", "Sign-in is locked. Try again in \(mmss(n)).")
         case .deliveryFailed: return t("Не удалось отправить или проверить код. Проверьте номер и связь с сервером.",
                                        "Couldn't send or check the code. Check the number and the server connection.")
+        case .otpNotConfigured:
+            return t("Сервер запущен без отправки SMS, поэтому войти в существующий аккаунт нельзя (иначе создался бы новый с тем же номером). Перезапустите server.py с ORBITA_OTP_DEV=1 или подключите SMS-провайдера.",
+                     "The server runs without SMS, so you can't sign in to an existing account (a duplicate would be created). Restart server.py with ORBITA_OTP_DEV=1 or configure an SMS provider.")
         case .unknown:        return t("Что-то пошло не так. Попробуйте ещё раз.", "Something went wrong. Please try again.")
         }
     }
+}
+
+extension Int {
+    /// Int(Double) падает на NaN/∞ — для таймеров плеера берём безопасно.
+    init(safe d: Double) { self = d.isFinite ? Int(Swift.max(0, Swift.min(d, 359_999))) : 0 }
 }

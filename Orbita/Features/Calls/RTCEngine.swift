@@ -53,6 +53,9 @@ final class RTCEngine: NSObject, ObservableObject {
         config.iceServers = servers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential) }
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
+        config.iceCandidatePoolSize = 1                // кандидаты собираются заранее — соединение между сетями быстрее
+        config.bundlePolicy = .maxBundle
+        config.rtcpMuxPolicy = .require
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
         pc = Self.factory.peerConnection(with: config, constraints: constraints, delegate: self)
 
@@ -122,12 +125,47 @@ final class RTCEngine: NSObject, ObservableObject {
         }
     }
 
+    /// Формат кадров экрана: та же пропорция, что у телефона (раньше жёстко 9:16, из-за чего края обрезались)
+    private static func screenSize(width: CGFloat = 720) -> (Int32, Int32) {
+        let b = UIScreen.main.bounds
+        let w = b.width > 0 ? b.width : 390, h = b.height > 0 ? b.height : 844
+        let height = Int((width * h / w).rounded()) & ~1
+        return (Int32(width), Int32(height))
+    }
+
+    private var broadcastMode = false
+
     func startScreenShare() async -> Bool {
         guard let source = videoSource, !sharing else { return false }
+        let (w, h) = Self.screenSize()
+
+        // Весь экран и в фоне — через расширение (если оно добавлено в проект); иначе — только экран самого приложения
+        if ScreenBroadcast.available {
+            await capturer?.stopCapture()
+            source.adaptOutputFormat(toWidth: w, height: h, fps: 10)
+            let capturer = RTCVideoCapturer(delegate: source)
+            let started = ScreenBroadcast.shared.begin(
+                onStart: { [weak self] in
+                    Task { @MainActor in
+                        self?.sharing = true
+                        self?.broadcastMode = true
+                        self?.localVideo?.isEnabled = true
+                        self?.camNote = "экран ✓"
+                        self?.refreshDebug()
+                    }
+                },
+                onFrame: { buffer, ns in
+                    source.capturer(capturer, didCapture: RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: ns))
+                },
+                onEnd: { [weak self] in Task { @MainActor in self?.broadcastEnded() } })
+            if started { return true }
+            startCamera(front: usingFront)
+        }
+
         let recorder = RPScreenRecorder.shared()
         guard recorder.isAvailable else { return false }
         await capturer?.stopCapture()
-        source.adaptOutputFormat(toWidth: 720, height: 1280, fps: 15)
+        source.adaptOutputFormat(toWidth: w, height: h, fps: 15)
         let handler = Self.frameHandler(source: source, capturer: RTCVideoCapturer(delegate: source))
         let ok: Bool = await withCheckedContinuation { c in
             recorder.startCapture(handler: handler, completionHandler: { error in c.resume(returning: error == nil) })
@@ -143,7 +181,24 @@ final class RTCEngine: NSObject, ObservableObject {
         return ok
     }
 
+    /// Расширение закончило вещание само (кнопка в строке состояния или конец звонка)
+    private func broadcastEnded() {
+        guard broadcastMode || sharing else { return }
+        broadcastMode = false
+        sharing = false
+        videoSource?.adaptOutputFormat(toWidth: 1280, height: 720, fps: 30)
+        startCamera(front: usingFront)
+    }
+
     func stopScreenShare(restoreCamera: Bool = true) {
+        if broadcastMode {
+            broadcastMode = false
+            sharing = false
+            ScreenBroadcast.shared.stop()
+            videoSource?.adaptOutputFormat(toWidth: 1280, height: 720, fps: 30)
+            if restoreCamera { startCamera(front: usingFront) }
+            return
+        }
         guard sharing else { return }
         sharing = false
         RPScreenRecorder.shared().stopCapture { _ in }
@@ -239,6 +294,7 @@ final class RTCEngine: NSObject, ObservableObject {
     }
 
     func close() {
+        if broadcastMode { broadcastMode = false; ScreenBroadcast.shared.stop() }
         if sharing { sharing = false; RPScreenRecorder.shared().stopCapture { _ in } }
         let oldCapturer = capturer
         Task { await oldCapturer?.stopCapture() }
@@ -299,19 +355,29 @@ extension RTCEngine: RTCPeerConnectionDelegate {
     }
 }
 
-/// Видео из WebRTC в SwiftUI
+/// Видео из WebRTC в SwiftUI. Кадры экрана (узкие, как у телефона) показываются целиком, без обрезки; камера — на весь экран
 struct RTCVideoView: UIViewRepresentable {
     let track: RTCVideoTrack?
     var mirror = false
     var fill = true
 
-    final class Coordinator { var current: RTCVideoTrack? }
+    final class Coordinator: NSObject, RTCVideoViewDelegate {
+        var current: RTCVideoTrack?
+        var fill = true
+        func videoView(_ videoView: RTCVideoRenderer, didChangeVideoSize size: CGSize) {
+            let aspect = size.height > 0 ? size.width / size.height : 1
+            let screenLike = aspect < 0.53 || aspect > 1.9          // камера: 9:16, 3:4, 4:3, 16:9 — экран телефона уже
+            DispatchQueue.main.async { (videoView as? RTCMTLVideoView)?.videoContentMode = (self.fill && !screenLike) ? .scaleAspectFill : .scaleAspectFit }
+        }
+    }
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let v = RTCMTLVideoView()
         v.videoContentMode = fill ? .scaleAspectFill : .scaleAspectFit
         v.backgroundColor = .black
+        v.delegate = context.coordinator
+        context.coordinator.fill = fill
         return v
     }
 

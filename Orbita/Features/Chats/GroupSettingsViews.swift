@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 
 // MARK: - Вспомогательное
 
@@ -41,6 +42,8 @@ struct GroupSettingsForm: View {
     @Binding var draft: GroupDraft
     /// Тип доступа и ссылку меняет только владелец
     var ownerRights = true
+    /// «Кто может писать» и медленный режим прямо в форме (при создании); в настройках — на экране «Разрешения»
+    var writingInline = true
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -85,15 +88,17 @@ struct GroupSettingsForm: View {
             toggleRow(s.t("Заявки на вступление", "Join requests"), $draft.approve,
                       s.t("Администраторы подтверждают каждого, кто хочет вступить.", "Admins approve everyone who wants to join."))
             if !channel {
-                menuRow(s.t("Кто может писать", "Who can write")) {
-                    Picker("", selection: $draft.whoWrites) {
-                        Text(s.t("Все участники", "All members")).tag("all")
-                        Text(s.t("Только админы", "Admins only")).tag("admins")
+                if writingInline {
+                    menuRow(s.t("Кто может писать", "Who can write")) {
+                        Picker("", selection: $draft.whoWrites) {
+                            Text(s.t("Все участники", "All members")).tag("all")
+                            Text(s.t("Только админы", "Admins only")).tag("admins")
+                        }
                     }
-                }
-                menuRow(s.t("Медленный режим", "Slow mode")) {
-                    Picker("", selection: $draft.slow) {
-                        ForEach(slowSteps, id: \.self) { Text(s.slowLabel($0)).tag($0) }
+                    menuRow(s.t("Медленный режим", "Slow mode")) {
+                        Picker("", selection: $draft.slow) {
+                            ForEach(slowSteps, id: \.self) { Text(s.slowLabel($0)).tag($0) }
+                        }
                     }
                 }
                 toggleRow(s.t("История для новых участников", "History for new members"), $draft.history,
@@ -219,9 +224,27 @@ struct GroupEditSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    GroupSettingsForm(draft: $draft, ownerRights: group.isOwner)
+                    GroupSettingsForm(draft: $draft, ownerRights: group.isOwner, writingInline: false)
 
                     if group.isChannel && group.isOwner { DiscussionPicker(selected: $discussion) }
+
+                    if !group.isChannel {
+                        NavigationLink {
+                            GroupPermissionsView(draft: $draft, members: group.members)
+                        } label: {
+                            navRow("key.fill", s.t("Разрешения", "Permissions"), badge: 0, value: permissionsSummary)
+                        }
+                        NavigationLink {
+                            GroupRestrictedView(groupID: group.id)
+                        } label: {
+                            navRow("speaker.slash.fill", s.t("Запрещено писать", "Restricted"), badge: 0)
+                        }
+                    }
+                    NavigationLink {
+                        GroupStatsView(groupID: group.id, title: group.name, channel: group.isChannel)
+                    } label: {
+                        navRow("chart.bar.fill", s.t("Статистика", "Statistics"), badge: 0)
+                    }
 
                     NavigationLink {
                         GroupRequestsView(groupID: group.id) { await onDone() }
@@ -257,7 +280,8 @@ struct GroupEditSheet: View {
         .onAppear {
             draft = GroupDraft(type: group.type, title: group.name, about: group.about, kind: group.kind,
                                handle: group.handle ?? "", approve: group.approve, noForward: group.noForward,
-                               slow: group.slow, whoWrites: group.whoWrites, history: group.history)
+                               slow: group.slow, whoWrites: group.whoWrites, history: group.history,
+                               perms: group.perms, writers: group.writers)
             discussion = group.discussion
         }
         .confirmationDialog(s.t("Удалить для всех? Все сообщения будут стёрты.", "Delete for everyone? All messages will be erased."),
@@ -267,11 +291,20 @@ struct GroupEditSheet: View {
         }
     }
 
-    private func navRow(_ icon: String, _ title: String, badge: Int) -> some View {
+    /// «Все участники · медленный режим 30 с» — что сейчас настроено
+    private var permissionsSummary: String {
+        var parts = [draft.whoWrites == "admins" ? s.t("Только админы", "Admins only")
+                     : draft.whoWrites == "selected" ? s.t("Выбранные", "Selected") : s.t("Все", "Everyone")]
+        if draft.slow > 0 { parts.append(s.slowLabel(draft.slow)) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func navRow(_ icon: String, _ title: String, badge: Int, value: String? = nil) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon).foregroundStyle(theme.accentColor).frame(width: 24)
             Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
             Spacer()
+            if let value { Text(value).font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(1) }
             if badge > 0 {
                 Text("\(badge)").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
                     .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
@@ -297,6 +330,8 @@ struct GroupEditSheet: View {
             if !group.isChannel {
                 p.slow = draft.slow
                 p.whoWrites = draft.whoWrites
+                p.perms = draft.perms
+                if draft.whoWrites == "selected" { p.writers = draft.writers }
             }
             do {
                 _ = try await session.messengerRepo.editGroup(id: group.id, patch: p)
@@ -499,6 +534,684 @@ struct GroupBansView: View {
         .task {
             list = (try? await session.messengerRepo.bannedUsers(groupID: groupID)) ?? []
             loaded = true
+        }
+    }
+}
+
+
+// MARK: - Разрешения группы (как в Telegram)
+
+struct GroupPermissionsView: View {
+    @Binding var draft: GroupDraft
+    let members: [GroupMember]
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    private var s: Strings { Strings(lang: lang) }
+    private let slowSteps = [0, 10, 30, 60, 300, 900, 3600]
+    private var regular: [GroupMember] { members.filter { $0.role == "member" } }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                caption(s.t("КТО МОЖЕТ ПИСАТЬ", "WHO CAN SEND MESSAGES"))
+                VStack(spacing: 0) {
+                    choice(s.t("Все участники", "All members"), "all")
+                    line
+                    choice(s.t("Только администраторы", "Admins only"), "admins")
+                    line
+                    choice(s.t("Выбранные участники", "Selected members"), "selected")
+                }
+                .card(theme, radius: 14)
+                if draft.whoWrites == "selected" {
+                    hint(s.t("Отметьте, кто может писать. Администраторы пишут всегда.",
+                             "Pick who can write. Admins can always write."))
+                    VStack(spacing: 0) {
+                        if regular.isEmpty {
+                            Text(s.t("В группе пока только администраторы", "Only admins in the group so far"))
+                                .font(.system(size: 14)).foregroundStyle(theme.textSecondary).padding(16)
+                        }
+                        ForEach(regular) { m in
+                            memberRow(m)
+                            if m.id != regular.last?.id { line }
+                        }
+                    }
+                    .card(theme, radius: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                caption(s.t("ЧТО МОГУТ УЧАСТНИКИ", "WHAT MEMBERS CAN DO")).padding(.top, 8)
+                VStack(spacing: 0) {
+                    perm(s.t("Фото, видео и файлы", "Photos, videos & files"), "photo.on.rectangle", \.media)
+                    line
+                    perm(s.t("Голосовые и кружки", "Voice & video messages"), "mic.fill", \.voice)
+                    line
+                    perm(s.t("Стикеры и GIF", "Stickers & GIFs"), "face.smiling", \.stickers)
+                    line
+                    perm(s.t("Ссылки", "Links"), "link", \.links)
+                    line
+                    perm(s.t("Опросы", "Polls"), "chart.bar.xaxis", \.polls)
+                    line
+                    perm(s.t("Добавлять участников", "Add members"), "person.badge.plus", \.invite)
+                    line
+                    perm(s.t("Закреплять сообщения", "Pin messages"), "pin.fill", \.pin)
+                }
+                .card(theme, radius: 14)
+                hint(s.t("Администраторов это не касается.", "Admins aren't affected."))
+
+                caption(s.t("МЕДЛЕННЫЙ РЕЖИМ", "SLOW MODE")).padding(.top, 8)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(slowSteps, id: \.self) { v in
+                            Button {
+                                Haptics.select()
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) { draft.slow = v }
+                            } label: {
+                                Text(s.slowLabel(v)).font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(draft.slow == v ? Color.white : theme.text)
+                                    .padding(.horizontal, 14).frame(height: 34)
+                                    .background(draft.slow == v ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                            }
+                            .buttonStyle(PressStyle())
+                        }
+                    }
+                }
+                hint(s.t("Как часто участник может отправлять сообщение.", "How often a member can send a message."))
+                hint(s.t("Изменения сохранятся кнопкой «Сохранить».", "Tap “Save” to apply the changes.")).padding(.top, 6)
+            }
+            .padding(16)
+        }
+        .navigationTitle(s.t("Разрешения", "Permissions"))
+        .navigationBarTitleDisplayMode(.inline)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: draft.whoWrites)
+    }
+
+    private var line: some View { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 16) }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary).padding(.leading, 4)
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text).font(.system(size: 12)).foregroundStyle(theme.textTertiary).padding(.horizontal, 4)
+    }
+
+    private func choice(_ title: String, _ value: String) -> some View {
+        Button {
+            Haptics.select()
+            draft.whoWrites = value
+        } label: {
+            HStack {
+                Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
+                Spacer()
+                if draft.whoWrites == value {
+                    Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.accentColor)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 16).frame(height: 48).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func memberRow(_ m: GroupMember) -> some View {
+        let on = draft.writers.contains(m.id)
+        return Button {
+            Haptics.select()
+            if on { draft.writers.removeAll { $0 == m.id } } else { draft.writers.append(m.id) }
+        } label: {
+            HStack(spacing: 12) {
+                AvatarView(name: m.name, size: 36, avatarID: m.avatarID).clipShape(Circle())
+                Text(m.name).font(.system(size: 16)).foregroundStyle(theme.text).lineLimit(1)
+                Spacer()
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22)).foregroundStyle(on ? theme.accentColor : theme.textTertiary)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .padding(.horizontal, 16).padding(.vertical, 7).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func perm(_ title: String, _ icon: String, _ key: WritableKeyPath<GroupPerms, Bool>) -> some View {
+        Toggle(isOn: Binding(get: { draft.perms[keyPath: key] }, set: { draft.perms[keyPath: key] = $0 })) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 15)).foregroundStyle(theme.accentColor).frame(width: 22)
+                Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
+            }
+        }
+        .tint(theme.accentColor)
+        .padding(.horizontal, 16).frame(height: 48)
+    }
+}
+
+// MARK: - Кому запретили писать
+
+struct GroupRestrictedView: View {
+    let groupID: String
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    @State private var list: [RestrictedMember] = []
+    @State private var loaded = false
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if list.isEmpty && loaded {
+                    VStack(spacing: 8) {
+                        Image(systemName: "speaker.slash").font(.system(size: 30)).foregroundStyle(theme.textTertiary)
+                        Text(s.t("Никому не запрещено писать", "Nobody is restricted"))
+                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                        Text(s.t("Запретить можно при удалении сообщения участника.",
+                                 "You can restrict someone when deleting their message."))
+                            .font(.system(size: 13)).foregroundStyle(theme.textTertiary).multilineTextAlignment(.center)
+                    }
+                    .padding(40)
+                }
+                ForEach(list) { r in
+                    HStack(spacing: 12) {
+                        AvatarView(name: r.member.name, size: 46, avatarID: r.member.avatarID).clipShape(Circle())
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.member.name).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                            Text(r.until.map { s.t("до ", "until ") + $0.formatted(date: .abbreviated, time: .shortened) }
+                                 ?? s.t("навсегда", "forever"))
+                                .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                        }
+                        Spacer()
+                        Button {
+                            Haptics.impact(.light)
+                            Task {
+                                try? await session.messengerRepo.unrestrict(groupID: groupID, userID: r.id)
+                                withAnimation(.easeOut(duration: 0.2)) { list.removeAll { $0.id == r.id } }
+                            }
+                        } label: {
+                            Text(s.t("Разрешить", "Allow")).font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(theme.accentColor)
+                                .padding(.horizontal, 14).frame(height: 32).card(theme, radius: 16)
+                        }
+                        .buttonStyle(PressStyle())
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .transition(.opacity)
+                }
+            }
+        }
+        .navigationTitle(s.t("Запрещено писать", "Restricted"))
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            list = (try? await session.messengerRepo.restricted(groupID: groupID)) ?? []
+            loaded = true
+        }
+    }
+}
+
+
+// MARK: - Статистика канала или группы (как в Telegram)
+
+struct GroupStatsView: View {
+    let groupID: String
+    let title: String
+    let channel: Bool
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    @State private var stats: GroupStats?
+    @State private var failed = false
+    @State private var showJoined = true
+    @State private var showLeft = true
+    @State private var hiddenSources: Set<String> = []
+    @State private var hiddenLangs: Set<String> = []
+    private var s: Strings { Strings(lang: lang) }
+
+    static let sourceOrder = ["subscribers", "other", "dm", "groups", "url"]
+    static let sourceColors: [String: Color] = [
+        "subscribers": Color(red: 0.0, green: 0.48, blue: 1.0), "other": Color(red: 0.35, green: 0.78, blue: 0.98),
+        "dm": Color(red: 0.55, green: 0.85, blue: 0.2), "groups": Color(red: 1.0, green: 0.58, blue: 0.0),
+        "url": Color(red: 0.2, green: 0.78, blue: 0.35),
+    ]
+    static let langColors: [Color] = [Color(red: 0.0, green: 0.48, blue: 1.0), Color(red: 0.35, green: 0.78, blue: 0.98),
+                                      Color(red: 1.0, green: 0.58, blue: 0.0), Color(red: 0.2, green: 0.78, blue: 0.35),
+                                      Color(red: 0.69, green: 0.32, blue: 0.87), Color(red: 1.0, green: 0.27, blue: 0.23)]
+
+    private func sourceName(_ key: String) -> String {
+        switch key {
+        case "subscribers": return channel ? s.t("Подписчики", "Followers") : s.t("Участники", "Members")
+        case "dm": return s.t("Личные чаты", "Private chats")
+        case "groups": return s.t("Группы", "Groups")
+        case "url": return "URL"
+        default: return s.t("Другое", "Other")
+        }
+    }
+
+    private func langName(_ code: String) -> String {
+        if code == "other" { return s.t("Неизвестно", "Unknown") }
+        let name = Locale(identifier: lang == .ru ? "ru" : "en").localizedString(forLanguageCode: code) ?? code
+        return name.prefix(1).uppercased() + name.dropFirst()
+    }
+
+    var body: some View {
+        ScrollView {
+            if let stats {
+                VStack(alignment: .leading, spacing: 10) {
+                    overview(stats)
+                    section(s.t("РОСТ", "GROWTH")) {
+                        RangeChartCard(dates: stats.growth.map(\.day)) { range in
+                            growthChart(stats, range: range, mini: false)
+                        } mini: {
+                            growthChart(stats, range: nil, mini: true)
+                        }
+                    }
+                    section(channel ? s.t("ПОДПИСЧИКИ", "FOLLOWERS") : s.t("УЧАСТНИКИ", "MEMBERS")) {
+                        RangeChartCard(dates: stats.followers.map(\.day)) { range in
+                            followersChart(stats, range: range, mini: false)
+                        } mini: {
+                            followersChart(stats, range: nil, mini: true)
+                        } legend: {
+                            ChipsFlow {
+                                SeriesChip(title: s.t("Подписались", "Joined"), color: .green, on: showJoined) { toggle(&showJoined, other: showLeft) }
+                                SeriesChip(title: s.t("Отписались", "Left"), color: .red, on: showLeft) { toggle(&showLeft, other: showJoined) }
+                            }
+                        }
+                    }
+                    if channel {
+                        section(s.t("ИСТОЧНИКИ ПРОСМОТРОВ", "VIEW SOURCES")) {
+                            RangeChartCard(dates: stats.views.map(\.day)) { range in
+                                sourcesChart(stats, range: range, mini: false)
+                            } mini: {
+                                sourcesChart(stats, range: nil, mini: true)
+                            } legend: {
+                                ChipsFlow {
+                                    ForEach(Self.sourceOrder, id: \.self) { key in
+                                        SeriesChip(title: sourceName(key), color: Self.sourceColors[key] ?? .gray,
+                                                   on: !hiddenSources.contains(key)) { toggleSet(&hiddenSources, key, total: Self.sourceOrder.count) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !stats.languages.isEmpty {
+                        section(s.t("ЯЗЫКИ", "LANGUAGES")) { languagesCard(stats) }
+                    }
+                    section(s.t("АКТИВНОСТЬ ПО ЧАСАМ", "ACTIVITY BY HOUR")) { hoursCard(stats) }
+                    if !stats.posts.isEmpty {
+                        section(s.t("ПОСЛЕДНИЕ ПУБЛИКАЦИИ", "RECENT POSTS")) { postsCard(stats) }
+                    }
+                }
+                .padding(16)
+                .transition(.opacity)
+            } else if failed {
+                Text(s.t("Не удалось загрузить статистику", "Couldn't load statistics"))
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary).padding(.top, 120)
+            } else {
+                ProgressView().padding(.top, 120)
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .animation(.easeOut(duration: 0.25), value: stats == nil)
+        .task {
+            do { stats = try await session.messengerRepo.stats(groupID: groupID, days: 90) } catch { failed = true }
+        }
+    }
+
+    /// Хотя бы одна линия на графике остаётся включённой
+    private func toggle(_ value: inout Bool, other: Bool) {
+        guard !value || other else { Haptics.notify(.warning); return }
+        Haptics.select()
+        withAnimation(.easeInOut(duration: 0.25)) { value.toggle() }
+    }
+
+    private func toggleSet(_ set: inout Set<String>, _ key: String, total: Int) {
+        if set.contains(key) { set.remove(key) }
+        else if set.count + 1 < total { set.insert(key) }
+        else { Haptics.notify(.warning); return }
+        Haptics.select()
+    }
+
+    // MARK: Общая
+
+    private func overview(_ st: GroupStats) -> some View {
+        let delta = st.count - st.countWeekAgo
+        let pct = st.countWeekAgo > 0 ? abs(Double(delta)) / Double(st.countWeekAgo) * 100 : 0
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(s.t("ОБЩАЯ", "OVERVIEW")).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+                Spacer()
+                Text(Self.rangeText(st.periodStart...st.periodEnd)).font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, 4)
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], spacing: 14) {
+                metric("\(st.count)", channel ? s.t("Подписчики", "Followers") : s.t("Участники", "Members"),
+                       delta: delta == 0 ? nil : (delta > 0 ? "+" : "") + "\(delta) (" + String(format: "%.2f%%", pct) + ")", up: delta > 0)
+                metric(String(format: "%.2f%%", st.notifyPercent), s.t("Уведомления включены", "Notifications enabled"))
+                if channel {
+                    metric(Self.short(st.viewsPerPost), s.t("Просмотров на пост", "Views per post"))
+                    metric(Self.short(st.sharesPerPost), s.t("Пересылок на пост", "Shares per post"))
+                }
+                metric(Self.short(st.reactionsPerPost), s.t("Реакций на пост", "Reactions per post"))
+            }
+            .padding(16)
+            .card(theme, radius: 22)
+        }
+    }
+
+    private func metric(_ value: String, _ label: String, delta: String? = nil, up: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(value).font(.system(size: 20, weight: .bold)).foregroundStyle(theme.text)
+                if let delta {
+                    Text(delta).font(.system(size: 14, weight: .medium)).foregroundStyle(up ? Color.green : Color.red)
+                }
+            }
+            Text(label).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(2)
+        }
+    }
+
+    static func short(_ v: Double) -> String {
+        v >= 1000 ? String(format: "%.1fK", v / 1000) : (v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v))
+    }
+
+    static func rangeText(_ r: ClosedRange<Date>) -> String {
+        let f = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        return r.lowerBound.formatted(f) + " – " + r.upperBound.formatted(f)
+    }
+
+    private func section<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary).padding(.horizontal, 4)
+            content()
+        }
+        .padding(.top, 14)
+    }
+
+    // MARK: Графики
+
+    private func growthChart(_ st: GroupStats, range: ClosedRange<Date>?, mini: Bool) -> some View {
+        let points = st.growth.filter { range?.contains($0.day) ?? true }
+        let values = points.map(\.count)
+        let lo = values.min() ?? 0, hi = values.max() ?? 1
+        let pad = max(1, (hi - lo) / 8)
+        return Chart(points, id: \.day) { p in
+            LineMark(x: .value("day", p.day), y: .value("count", p.count))
+                .foregroundStyle(Color(red: 0.2, green: 0.5, blue: 1.0))
+                .lineStyle(StrokeStyle(lineWidth: mini ? 1.2 : 2.2))
+                .interpolationMethod(.monotone)
+        }
+        .chartYScale(domain: max(0, lo - pad)...(hi + pad))
+        .modifier(StatsAxes(mini: mini))
+    }
+
+    private func followersChart(_ st: GroupStats, range: ClosedRange<Date>?, mini: Bool) -> some View {
+        let points = st.followers.filter { range?.contains($0.day) ?? true }
+        return Chart {
+            if showJoined {
+                ForEach(points, id: \.day) { p in
+                    LineMark(x: .value("day", p.day), y: .value("n", p.joined), series: .value("s", "joined"))
+                        .foregroundStyle(Color.green).lineStyle(StrokeStyle(lineWidth: mini ? 1 : 2))
+                }
+            }
+            if showLeft {
+                ForEach(points, id: \.day) { p in
+                    LineMark(x: .value("day", p.day), y: .value("n", p.left), series: .value("s", "left"))
+                        .foregroundStyle(Color.red).lineStyle(StrokeStyle(lineWidth: mini ? 1 : 2))
+                }
+            }
+        }
+        .modifier(StatsAxes(mini: mini))
+    }
+
+    private func sourcesChart(_ st: GroupStats, range: ClosedRange<Date>?, mini: Bool) -> some View {
+        let days = st.views.filter { range?.contains($0.day) ?? true }
+        let keys = Self.sourceOrder.filter { !hiddenSources.contains($0) }
+        return Chart {
+            ForEach(days, id: \.day) { d in
+                ForEach(keys, id: \.self) { key in
+                    BarMark(x: .value("day", d.day, unit: .day), y: .value("views", d.sources[key] ?? 0))
+                        .foregroundStyle(Self.sourceColors[key] ?? .gray)
+                }
+            }
+        }
+        .modifier(StatsAxes(mini: mini))
+    }
+
+    private func languagesCard(_ st: GroupStats) -> some View {
+        let shown = st.languages.filter { !hiddenLangs.contains($0.code) }
+        let total = max(1, shown.reduce(0) { $0 + $1.count })
+        func label(_ l: GroupStats.LangShare) -> String {
+            let pct = Int((Double(l.count) / Double(total) * 100).rounded())
+            return pct >= 6 ? "\(pct)%" : ""
+        }
+        return VStack(spacing: 14) {
+            Chart(shown, id: \.code) { item in
+                SectorMark(angle: .value("n", item.count), angularInset: 1.5)
+                    .foregroundStyle(Self.langColors[item.index % Self.langColors.count])
+                    .annotation(position: .overlay) {
+                        Text(label(item)).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                    }
+            }
+            .frame(height: 230)
+            .animation(.easeInOut(duration: 0.3), value: hiddenLangs)
+            ChipsFlow {
+                ForEach(st.languages, id: \.code) { l in
+                    SeriesChip(title: langName(l.code), color: Self.langColors[l.index % Self.langColors.count],
+                               on: !hiddenLangs.contains(l.code)) { toggleSet(&hiddenLangs, l.code, total: st.languages.count) }
+                }
+            }
+        }
+        .padding(16)
+        .card(theme, radius: 22)
+    }
+
+    private func hoursCard(_ st: GroupStats) -> some View {
+        // сервер считает часы по UTC — сдвигаем в часовой пояс телефона
+        let shift = TimeZone.current.secondsFromGMT() / 3600
+        let local = (0..<24).map { h in GroupStats.GrowthPoint(day: Date(timeIntervalSince1970: Double(h)),
+                                                               count: st.hours[((h - shift) % 24 + 24) % 24]) }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(s.t("Просмотры за 7 дней, по часам", "Views in the last 7 days, by hour")).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            Chart(local, id: \.day) { p in
+                BarMark(x: .value("hour", Int(p.day.timeIntervalSince1970)), y: .value("views", p.count))
+                    .foregroundStyle(Color(red: 0.2, green: 0.5, blue: 1.0).gradient)
+                    .cornerRadius(3)
+            }
+            .chartXAxis {
+                AxisMarks(values: [0, 6, 12, 18, 23]) { _ in AxisValueLabel() }
+            }
+            .frame(height: 170)
+        }
+        .padding(16)
+        .card(theme, radius: 22)
+    }
+
+    private func postsCard(_ st: GroupStats) -> some View {
+        VStack(spacing: 0) {
+            ForEach(st.posts) { p in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(p.text.isEmpty ? s.t("Публикация", "Post") : p.text)
+                            .font(.system(size: 15)).foregroundStyle(theme.text).lineLimit(1)
+                        Text(p.createdAt.formatted(date: .abbreviated, time: .shortened))
+                            .font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+                    }
+                    Spacer(minLength: 8)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Label("\(p.views)", systemImage: "eye").font(.system(size: 13, weight: .medium)).foregroundStyle(theme.text)
+                        HStack(spacing: 8) {
+                            if p.shares > 0 { Label("\(p.shares)", systemImage: "arrowshape.turn.up.right") }
+                            if p.reactions > 0 { Label("\(p.reactions)", systemImage: "heart") }
+                        }
+                        .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                if p.id != st.posts.last?.id { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 16) }
+            }
+        }
+        .card(theme, radius: 22)
+    }
+}
+
+/// Оси графиков статистики: у большого — сетка и подписи, у мини-графика под ним — ничего
+private struct StatsAxes: ViewModifier {
+    let mini: Bool
+    func body(content: Content) -> some View {
+        if mini {
+            content.chartXAxis(.hidden).chartYAxis(.hidden).chartLegend(.hidden)
+        } else {
+            content
+                .chartYAxis { AxisMarks(position: .leading) { _ in AxisGridLine(); AxisValueLabel() } }
+                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 5)) { _ in AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+                .chartLegend(.hidden)
+        }
+    }
+}
+
+/// Карточка графика как в Telegram: сверху период, большой график, под ним мини-график всего периода
+/// с окном, которое двигают и растягивают за края
+struct RangeChartCard<Main: View, Mini: View, Legend: View>: View {
+    let dates: [Date]
+    @ViewBuilder var main: (ClosedRange<Date>) -> Main
+    @ViewBuilder var mini: () -> Mini
+    @ViewBuilder var legend: () -> Legend
+
+    @Environment(\.theme) private var theme
+    @State private var lo: CGFloat = 0.6           // доли ширины: по умолчанию — последние ~5 недель
+    @State private var hi: CGFloat = 1
+    @State private var startLo: CGFloat?
+    @State private var startHi: CGFloat?
+
+    private static var minSpan: CGFloat { 0.08 }
+
+    private var first: Date { dates.first ?? Date() }
+    private var last: Date { dates.last ?? Date() }
+    private func date(_ f: CGFloat) -> Date { first.addingTimeInterval(last.timeIntervalSince(first) * Double(f)) }
+    private var range: ClosedRange<Date> { date(lo)...max(date(hi), date(lo).addingTimeInterval(86400)) }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(GroupStatsView.rangeText(range)).font(.system(size: 15, weight: .bold)).foregroundStyle(theme.text)
+                .contentTransition(.numericText())
+            main(range).frame(height: 220)
+            GeometryReader { g in
+                let w = g.size.width
+                ZStack(alignment: .leading) {
+                    mini().frame(height: 44).padding(.vertical, 4)
+                    // затемнение вне окна
+                    Rectangle().fill(theme.dark ? Color.black.opacity(0.45) : Color.white.opacity(0.6))
+                        .frame(width: max(0, lo * w))
+                    Rectangle().fill(theme.dark ? Color.black.opacity(0.45) : Color.white.opacity(0.6))
+                        .frame(width: max(0, (1 - hi) * w)).offset(x: hi * w)
+                    // окно: тянуть за середину — сдвиг, за края — ширина
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(theme.textTertiary, lineWidth: 2)
+                        .frame(width: max(24, (hi - lo) * w))
+                        .offset(x: lo * w)
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 1).onChanged { v in
+                            if startLo == nil { startLo = lo; startHi = hi }
+                            let span = (startHi ?? hi) - (startLo ?? lo)
+                            let d = v.translation.width / w
+                            let nl = min(max(0, (startLo ?? lo) + d), 1 - span)
+                            lo = nl; hi = nl + span
+                        }.onEnded { _ in startLo = nil; startHi = nil })
+                    handle(left: true).offset(x: lo * w - 1)
+                        .gesture(DragGesture(minimumDistance: 1).onChanged { v in
+                            if startLo == nil { startLo = lo }
+                            lo = min(max(0, (startLo ?? lo) + v.translation.width / w), hi - Self.minSpan)
+                        }.onEnded { _ in startLo = nil; Haptics.select() })
+                    handle(left: false).offset(x: hi * w - 13)
+                        .gesture(DragGesture(minimumDistance: 1).onChanged { v in
+                            if startHi == nil { startHi = hi }
+                            hi = max(min(1, (startHi ?? hi) + v.translation.width / w), lo + Self.minSpan)
+                        }.onEnded { _ in startHi = nil; Haptics.select() })
+                }
+            }
+            .frame(height: 52)
+            legend()
+        }
+        .padding(16)
+        .card(theme, radius: 22)
+    }
+
+    private func handle(left: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(theme.textTertiary)
+            .frame(width: 14, height: 52)
+            .overlay(Image(systemName: left ? "chevron.compact.left" : "chevron.compact.right")
+                .font(.system(size: 13, weight: .bold)).foregroundStyle(.white))
+            .frame(width: 30, height: 52).contentShape(Rectangle())
+            .offset(x: left ? -8 : -2)
+    }
+}
+
+extension RangeChartCard where Legend == EmptyView {
+    init(dates: [Date], @ViewBuilder main: @escaping (ClosedRange<Date>) -> Main, @ViewBuilder mini: @escaping () -> Mini) {
+        self.init(dates: dates, main: main, mini: mini, legend: { EmptyView() })
+    }
+}
+
+/// Переключатель линии графика: «✓ Подписались» залит цветом линии, выключенный — только обводка
+struct SeriesChip: View {
+    let title: String
+    let color: Color
+    let on: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).opacity(on ? 1 : 0)
+                    .frame(width: on ? nil : 0)
+                Text(title).font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundStyle(on ? Color.white : color)
+            .padding(.horizontal, 14).frame(height: 34)
+            .background(Capsule().fill(on ? color : Color.clear))
+            .overlay(Capsule().strokeBorder(color, lineWidth: 1.5))
+        }
+        .buttonStyle(PressStyle())
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: on)
+    }
+}
+
+/// Чипы переносятся на следующую строку, если не влезают
+struct ChipsFlow<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        FlowRows(spacing: 8) { content() }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct FlowRows: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, maxX: CGFloat = 0
+        for v in subviews {
+            let size = v.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { x = 0; y += row + spacing; row = 0 }
+            x += size.width + spacing
+            row = max(row, size.height)
+            maxX = max(maxX, x - spacing)
+        }
+        return CGSize(width: min(maxX, width), height: y + row)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, row: CGFloat = 0
+        for v in subviews {
+            let size = v.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX { x = bounds.minX; y += row + spacing; row = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            row = max(row, size.height)
         }
     }
 }

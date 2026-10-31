@@ -36,6 +36,18 @@ enum Keychain {
         SecItemDelete(baseQuery(account) as CFDictionary)
     }
 
+    /// Имена всех сохранённых записей, начинающихся с `prefix`
+    static func accounts(withPrefix prefix: String) -> [String] {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecReturnAttributes as String: true,
+                                    kSecMatchLimit as String: kSecMatchLimitAll]
+        var items: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+              let list = items as? [[String: Any]] else { return [] }
+        return list.compactMap { $0[kSecAttrAccount as String] as? String }.filter { $0.hasPrefix(prefix) }
+    }
+
     static func string(_ account: String) -> String? {
         read(account).data.flatMap { String(data: $0, encoding: .utf8) }
     }

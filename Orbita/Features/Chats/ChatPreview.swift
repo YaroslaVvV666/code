@@ -9,11 +9,16 @@ struct ChatPreviewBody: View {
     var maxHeight: CGFloat? = nil
     var onThread: ((ChatThread) -> Void)? = nil
 
-    @Environment(\.theme) private var theme
+    @Environment(\.theme) private var baseTheme
+    @ObservedObject private var appearance = ChatAppearanceStore.shared
+    private var theme: Theme { appearance.theme(baseTheme, for: peer.id) }
     @Environment(\.lang) private var lang
     @State private var messages: [ChatMessage] = []
     @State private var firstUnread: String?
     @State private var loading = true
+    // Предпросмотр не проигрывает звук, но пузырь с аудио требует AudioPlayer в окружении.
+    // Даём собственный «пустой» плеер, чтобы превью работало и в баннере, и в списке — без краша.
+    @StateObject private var previewPlayer = AudioPlayer()
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -25,7 +30,7 @@ struct ChatPreviewBody: View {
                     if !loading && messages.isEmpty {
                         Text(s.chatStart).font(.system(size: 14)).foregroundStyle(theme.textTertiary).padding(.vertical, 30)
                     }
-                    ForEach(messages) { m in
+                    ForEach(Array(messages.enumerated()), id: \.element.key) { index, m in
                         if m.id == firstUnread {
                             Text(s.t("Новые сообщения", "New messages"))
                                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.accentColor)
@@ -34,17 +39,20 @@ struct ChatPreviewBody: View {
                                 .padding(.horizontal, -12).padding(.vertical, 4)
                                 .id("strip")
                         }
-                        bubble(m).id(m.key)
+                        bubble(m, index: index).id(m.key)
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
             }
             .frame(maxHeight: maxHeight)
-            .onChange(of: messages.count) { _, _ in
-                if firstUnread != nil { proxy.scrollTo("strip", anchor: .top) }
-                else if let last = messages.last { proxy.scrollTo(last.key, anchor: .bottom) }
-            }
+            .onChange(of: messages.count) { _, _ in jump(proxy) }
         }
+        .background {
+            // свои обои чата — и в предпросмотре
+            if appearance.appearance(peer.id).wallpaper != "default" { ChatWallpaperView(chatID: peer.id) }
+        }
+        .environment(\.theme, theme)
+        .environmentObject(previewPlayer)
         .task(id: peer.id) {
             let thread = try? await repo.thread(peerID: peer.id, limit: limit, peek: true)
             firstUnread = thread?.firstUnread
@@ -54,22 +62,34 @@ struct ChatPreviewBody: View {
         }
     }
 
-    private func bubble(_ m: ChatMessage) -> some View {
-        HStack {
-            if m.mine { Spacer(minLength: 40) }
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(m.summary.isEmpty ? "…" : m.summary)
-                    .font(.system(size: 15))
-                    .foregroundStyle(m.mine ? Color.white : theme.text)
-                    .multilineTextAlignment(.leading)
-                Text(ChatTime.clock(m.createdAt))
-                    .font(.system(size: 10)).foregroundStyle(m.mine ? Color.white.opacity(0.7) : theme.textTertiary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(m.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            if !m.mine { Spacer(minLength: 40) }
+    /// Сразу (без анимации) ставим карточку на ПЕРВОЕ непрочитанное — не на последнее и не внизу.
+    /// Пара повторов с задержкой — чтобы точно сработало после первой компоновки списка.
+    private func jump(_ proxy: ScrollViewProxy) {
+        guard !messages.isEmpty else { return }
+        let hasStrip = firstUnread != nil && messages.contains { $0.id == firstUnread }
+        let target: String
+        let anchor: UnitPoint
+        if hasStrip { target = "strip"; anchor = .top }
+        else if firstUnread != nil, let top = messages.first?.key { target = top; anchor = .top }   // непрочитанных больше, чем в окне — показываем с самого верха
+        else if let last = messages.last { target = last.key; anchor = .bottom }                    // непрочитанного нет — вниз
+        else { return }
+        proxy.scrollTo(target, anchor: anchor)
+        for delay in [0.05, 0.16] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { proxy.scrollTo(target, anchor: anchor) }
         }
+    }
+
+    /// Настоящий пузырь из переписки (без нажатий): видно фото, кружки, стикеры и крупные анимированные эмодзи,
+    /// а не надписи «Фото», «Видеосообщение»
+    private func bubble(_ m: ChatMessage, index: Int) -> some View {
+        let prev = index > 0 ? messages[index - 1] : nil
+        let next = index + 1 < messages.count ? messages[index + 1] : nil
+        let isFirst = prev.map { $0.mine != m.mine || $0.sender?.id != m.sender?.id } ?? true
+        let isLast = next.map { $0.mine != m.mine || $0.sender?.id != m.sender?.id } ?? true
+        return MessageRow(message: m, isFirst: isFirst, isLast: isLast,
+                          onReply: {}, onEdit: {}, onDelete: {}, onOpenMedia: { _, _ in }, onOpenFile: { _ in },
+                          showSender: peer.isGroup && !peer.isChannel, noForward: peer.noForward, interactive: false)
+            .allowsHitTesting(false)
     }
 }
 
@@ -205,54 +225,73 @@ struct ChatPeekOverlay: View {
 
 extension ChatPeer: Identifiable {}
 
-/// Строка списка чатов: короткое нажатие открывает, долгое — показывает карточку с перепиской
-/// Свайп строки влево открывает быстрые кнопки (закрепить, без звука, удалить), как в Telegram
+/// Строка списка чатов: короткое нажатие открывает, долгое — показывает карточку с перепиской.
+/// Свайп влево — быстрые кнопки справа (закрепить, без звука, удалить) с подписями, как в Telegram.
+/// Свайп вправо — одна кнопка слева (архив).
 struct SwipeActionsRow<Content: View>: View {
     struct Action: Identifiable {
         let id = UUID()
         let icon: String
+        var label: String = ""
         let tint: Color
         let run: () -> Void
     }
 
     let id: String
     @Binding var openID: String?
-    let actions: [Action]
+    var leading: Action? = nil
+    let actions: [Action]                       // кнопки справа (свайп влево)
     @ViewBuilder var content: () -> Content
 
     @State private var drag: CGFloat = 0
-    private let unit: CGFloat = 72
-    private var full: CGFloat { unit * CGFloat(actions.count) }
-    private var base: CGFloat { openID == id ? -full : 0 }
-    private var offset: CGFloat { max(-full - 24, min(0, base + drag)) }
+    @State private var side: Int = 0            // -1 открыто справа, +1 открыто слева, 0 закрыто
+    private let unit: CGFloat = 80
+    private var trailingFull: CGFloat { unit * CGFloat(actions.count) }
+    private var leadingFull: CGFloat { leading != nil ? unit : 0 }
 
-    var body: some View {
-        ZStack(alignment: .trailing) {
-            HStack(spacing: 0) {
-                ForEach(actions) { a in
-                    Button {
-                        Haptics.impact(.light)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil }
-                        a.run()
-                    } label: {
-                        Image(systemName: a.icon).font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
-                            .frame(width: unit).frame(maxHeight: .infinity).background(a.tint)
-                    }
-                    .buttonStyle(.plain)
+    private var base: CGFloat {
+        guard openID == id else { return 0 }
+        return side < 0 ? -trailingFull : (side > 0 ? leadingFull : 0)
+    }
+    private var offset: CGFloat { max(-trailingFull - 24, min(leadingFull + 24, base + drag)) }
+
+    private func button(_ a: Action) -> some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 }
+            a.run()
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: a.icon).font(.system(size: 20, weight: .semibold))
+                if !a.label.isEmpty {
+                    Text(a.label).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
-            .frame(width: full)
-            .mask(alignment: .trailing) { Rectangle().frame(width: max(0, -offset)) }      // видна только открытая часть
+            .foregroundStyle(.white)
+            .frame(width: unit).frame(maxHeight: .infinity).background(a.tint)
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        ZStack {
+            // кнопка слева (свайп вправо) — архив
+            if let leading {
+                HStack(spacing: 0) { button(leading); Spacer(minLength: 0) }
+                    .mask(alignment: .leading) { Rectangle().frame(width: max(0, offset)) }
+            }
+            // кнопки справа (свайп влево)
+            HStack(spacing: 0) { Spacer(minLength: 0); ForEach(actions) { button($0) } }
+                .mask(alignment: .trailing) { Rectangle().frame(width: max(0, -offset)) }
 
             content()
                 .background(Color.clear)
                 .offset(x: offset)
                 .allowsHitTesting(openID != id)
                 .overlay {
-                    // открытая строка: нажатие по ней закрывает кнопки
                     if openID == id {
                         Color.clear.contentShape(Rectangle()).offset(x: offset)
-                            .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil } }
+                            .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 } }
                     }
                 }
         }
@@ -261,23 +300,28 @@ struct SwipeActionsRow<Content: View>: View {
             DragGesture(minimumDistance: 18, coordinateSpace: .local)
                 .onChanged { v in
                     guard abs(v.translation.width) > abs(v.translation.height) * 1.6, v.startLocation.x > 30 else { return }
+                    // вправо тянем только если есть кнопка слева
+                    if v.translation.width > 0 && leading == nil && base == 0 { return }
                     drag = v.translation.width
                 }
                 .onEnded { v in
                     let horizontal = abs(v.translation.width) > abs(v.translation.height) * 1.6 && v.startLocation.x > 30
                     let final = base + (horizontal ? v.translation.width : 0)
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                        if horizontal, final < -full * 0.45 {
-                            if openID != id { Haptics.select() }
-                            openID = id
-                        } else if horizontal {
-                            openID = nil
+                        if horizontal, final < -trailingFull * 0.45 {
+                            if openID != id || side != -1 { Haptics.select() }
+                            openID = id; side = -1
+                        } else if horizontal, leading != nil, final > leadingFull * 0.5 {
+                            if openID != id || side != 1 { Haptics.select() }
+                            openID = id; side = 1
+                        } else {
+                            openID = nil; side = 0
                         }
                         drag = 0
                     }
                 }
         )
-        .onChange(of: openID) { _, new in if new != id { drag = 0 } }
+        .onChange(of: openID) { _, new in if new != id { drag = 0; side = 0 } }
     }
 }
 

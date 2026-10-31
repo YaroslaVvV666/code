@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import CryptoKit
 
 enum APIError: Error, Equatable {
     case notConfigured
@@ -100,14 +102,45 @@ actor ServerAPI {
         req.httpMethod = method
         let token = try await ensureToken()
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(Self.deviceLanguage, forHTTPHeaderField: "X-Orbita-Lang")     // для статистики «Языки» в каналах
         return req
     }
+
+    /// Язык телефона: "ru", "en", "uk"…
+    static let deviceLanguage: String = Locale.preferredLanguages.first.map { String($0.prefix(2)).lowercased() } ?? "ru"
 
     static func tokenAccount(for userID: String) -> String { "orbita.token.\(userID)@\(ServerConfig.urlString)" }
     private var tokenAccount: String { Self.tokenAccount(for: userID) }
 
+    /// GET с запасом на диске: пока сети нет, отдаём последний удачный ответ — чаты и переписки видны до момента пропадания связи.
+    /// slot — отдельная ячейка для разных видов одного запроса (быстрый просмотр и полная загрузка), fallback — откуда брать, если своя пуста
+    func requestCached(_ path: String, query: [String: String] = [:], slot: String = "", fallback: [String] = []) async throws -> Data {
+        do {
+            let data = try await request("GET", path, query: query)
+            OfflineStore.save(data, user: userID, path: path, slot: slot)
+            await NetworkState.shared.set(offline: false)
+            return data
+        } catch let error as APIError where error == .offline {
+            await NetworkState.shared.set(offline: true)
+            for s in [slot] + fallback {
+                if let cached = OfflineStore.load(user: userID, path: path, slot: s) { return cached }
+            }
+            throw error
+        }
+    }
+
+    /// Последний сохранённый ответ без обращения к сети: экран показывается сразу (и без интернета),
+    /// а свежие данные приходят следом обычным запросом
+    nonisolated func cachedResponse(_ path: String, slot: String = "", fallback: [String] = []) -> Data? {
+        for s in [slot] + fallback {
+            if let data = OfflineStore.load(user: userID, path: path, slot: s) { return data }
+        }
+        return nil
+    }
+
     /// Выход: завершаем свой сеанс на сервере и забываем токен
     func signOut() async {
+        OfflineStore.wipe(user: userID)
         if let data = try? await request("GET", "/v1/sessions"),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = object["sessions"] as? [[String: Any]],
@@ -133,10 +166,37 @@ actor ServerAPI {
         // Несколько запросов стартуют одновременно (профиль, лента…): регистрируемся один раз,
         // остальные ждут тот же результат. Иначе второй запрос получил бы «user_exists» и выкинул из аккаунта.
         if let pendingRegistration { return try await pendingRegistration.value }
-        let task = Task { try await self.register() }
+        let task = Task { () throws -> String in
+            if let moved = try await self.adoptPreviousToken() { return moved }
+            return try await self.register()
+        }
         pendingRegistration = task
         defer { pendingRegistration = nil }
         return try await task.value
+    }
+
+    /// Тот же сервер, но у компьютера сменился адрес (другой IP в Wi-Fi): токен хранится под старым адресом.
+    /// Пробуем токены этого аккаунта, сохранённые для прежних адресов: принял сервер — переносим токен на новый адрес.
+    /// Без этого приложение пыталось зарегистрироваться заново, получало «такой пользователь уже есть» и выходило из аккаунта.
+    /// Другой сервер чужие токены не примет, там всё как раньше — обычная регистрация
+    private func adoptPreviousToken() async throws -> String? {
+        let others = Keychain.accounts(withPrefix: "orbita.token.\(userID)@").filter { $0 != tokenAccount }
+        for account in others {
+            guard let candidate = Keychain.string(account) else { continue }
+            var req = URLRequest(url: try makeURL("/v1/me", query: [:]), timeoutInterval: 20)
+            req.setValue("Bearer \(candidate)", forHTTPHeaderField: "Authorization")
+            do {
+                _ = try await perform(req, upload: nil)
+            } catch APIError.unauthorized {
+                continue                                        // токен от другого сервера или отозван
+            } catch APIError.server {
+                continue
+            }
+            Keychain.setString(candidate, account: tokenAccount)
+            token = candidate
+            return candidate
+        }
+        return nil
     }
 
     private func register() async throws -> String {
@@ -178,7 +238,11 @@ actor ServerAPI {
             case 401:       throw APIError.unauthorized
             default:
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                throw APIError.server(status: http.statusCode, code: (object?["error"] as? String) ?? "error")
+                let code = (object?["error"] as? String) ?? "error"
+                if code == "content_blocked" {                 // нейросеть отклонила файл — крупная плашка «Я понял»
+                    await MainActor.run { ContentNotice.show() }
+                }
+                throw APIError.server(status: http.statusCode, code: code)
             }
         } catch let error as APIError {
             throw error
@@ -186,4 +250,64 @@ actor ServerAPI {
             throw APIError.offline
         }
     }
+}
+
+
+/// Копия последних ответов сервера для работы без сети. Лежит в Application Support (не в iCloud-копии), под защитой данных iOS
+enum OfflineStore {
+    private static let dir: URL = {
+        var base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("offline", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? base.setResourceValues(values)
+        return base
+    }()
+
+    private static func hash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func file(user: String, path: String, slot: String) -> URL {
+        dir.appendingPathComponent(hash(user) + "_" + hash(path + "#" + slot) + ".json")
+    }
+
+    static func save(_ data: Data, user: String, path: String, slot: String) {
+        try? data.write(to: file(user: user, path: path, slot: slot), options: [.atomic, .completeFileProtection])
+    }
+
+    static func load(user: String, path: String, slot: String) -> Data? {
+        guard let data = try? Data(contentsOf: file(user: user, path: path, slot: slot)) else { return nil }
+        return scrubTyping(data)
+    }
+
+    /// Выход из аккаунта: чужие переписки на диске не остаются
+    static func wipe(user: String) {
+        let prefix = hash(user) + "_"
+        for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        where url.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// «Печатает…» из старого ответа без сети показывалось бы вечно — убираем
+    private static func scrubTyping(_ data: Data) -> Data {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }
+        if object["typing"] != nil { object["typing"] = NSNull() }
+        if var chats = object["chats"] as? [[String: Any]] {
+            for i in chats.indices where chats[i]["typing"] != nil { chats[i]["typing"] = NSNull() }
+            object["chats"] = chats
+        }
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? data
+    }
+}
+
+
+/// Есть ли связь с сервером: по результату опросов списка чатов и переписок. От него зависят «Соединение…» и повторная отправка
+@MainActor
+final class NetworkState: ObservableObject {
+    static let shared = NetworkState()
+    @Published private(set) var offline = false
+    func set(offline value: Bool) { if offline != value { offline = value } }
 }

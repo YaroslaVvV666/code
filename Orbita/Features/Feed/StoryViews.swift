@@ -19,6 +19,18 @@ final class StoryStore: ObservableObject {
     @Published var preparing = false
     @Published var toast: String?
     var myID = ""
+    /// Что уже смотрели на этом устройстве: кольцо серое сразу, не дожидаясь ответа сервера (и для своих историй тоже)
+    private var localSeen: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "storySeen") ?? [])
+
+    func markSeen(_ id: String) {
+        guard localSeen.insert(id).inserted else { return }
+        UserDefaults.standard.set(Array(localSeen.suffix(600)), forKey: "storySeen")
+        for gi in groups.indices {
+            guard let ii = groups[gi].items.firstIndex(where: { $0.id == id }) else { continue }
+            groups[gi].items[ii].viewed = true
+            groups[gi].allViewed = groups[gi].items.allSatisfy(\.viewed)
+        }
+    }
 
     var mine: StoryGroup? { groups.first { $0.user.id == myID } }
     /// Сначала те, чьи истории ещё не смотрели; просмотренные уходят в конец списка
@@ -33,7 +45,13 @@ final class StoryStore: ObservableObject {
     var firstUnseen: Int? { display.firstIndex { $0.user.id != myID && !$0.allViewed } }
 
     func reload(_ extras: ExtrasAPI) async {
-        if let g = await extras.stories() { groups = g }
+        if var g = await extras.stories() {
+            for gi in g.indices {
+                for ii in g[gi].items.indices where localSeen.contains(g[gi].items[ii].id) { g[gi].items[ii].viewed = true }
+                g[gi].allViewed = g[gi].items.allSatisfy(\.viewed)
+            }
+            groups = g
+        }
     }
 
     func openFirstUnseen() -> Bool {
@@ -131,7 +149,7 @@ struct StoryTray: View {
                 VStack(spacing: 5) {
                     ZStack {
                         if let group {
-                            StoryRing(viewed: group.items.map { _ in false }, size: 70, staticColor: theme.accentColor)
+                            StoryRing(viewed: group.items.map(\.viewed), size: 70)
                         }
                         AvatarView(name: session.profile.profile?.name ?? "", size: 58, avatarID: session.profile.profile?.avatarID)
                             .clipShape(Circle())
@@ -181,29 +199,80 @@ struct StoryAddPicker<Label: View>: View {
     @ViewBuilder var label: () -> Label
 
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    @State private var showing = false
     @State private var item: PhotosPickerItem?
+    @State private var busy = false
+    @State private var prepared: PreparedMedia?
 
     var body: some View {
-        PhotosPicker(selection: $item, matching: .any(of: [.images, .videos])) { label() }
-            .onChange(of: item) { _, picked in
-                guard let picked else { return }
-                store.preparing = true
-                let s = Strings(lang: lang)
-                Task {
-                    do {
-                        store.composing = try await MediaPreparer.prepare(picked)
-                    } catch MediaError.tooLong {
-                        store.flash(s.t("Видео слишком длинное", "The video is too long"))
-                    } catch MediaError.tooLarge {
-                        store.flash(s.t("Видео слишком большое", "The video is too large"))
-                    } catch {
-                        store.flash(s.t("Не удалось подготовить файл. Попробуйте другое фото или видео.",
-                                        "Couldn't prepare the file. Try another photo or video."))
-                    }
-                    store.preparing = false
-                    item = nil
+        Button { showing = true } label: { label() }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showing, onDismiss: {
+                if let p = prepared { store.composing = p; prepared = nil }
+                item = nil; busy = false
+            }) { pickerSheet }
+    }
+
+    private var pickerSheet: some View {
+        let s = Strings(lang: lang)
+        return NavigationStack {
+            VStack(spacing: 0) {
+                InlineStoryPicker(item: $item)
+            }
+            .navigationTitle(s.t("Выложить историю", "Add to your story"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(s.t("Отмена", "Cancel")) { showing = false }.disabled(busy)
                 }
             }
+            .overlay {
+                if busy {
+                    ZStack {
+                        Rectangle().fill(.black.opacity(0.6)).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView().tint(.white).scaleEffect(1.3)
+                            Text(s.t("Загружаем…", "Loading…")).font(.system(size: 15, weight: .medium)).foregroundStyle(.white)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: busy)
+        }
+        .presentationDragIndicator(.visible)
+        .onChange(of: item) { _, picked in
+            guard let picked else { return }
+            busy = true
+            Task {
+                do {
+                    prepared = try await MediaPreparer.prepare(picked, compress: false)
+                    showing = false
+                } catch MediaError.tooLong {
+                    busy = false; item = nil
+                    store.flash(s.t("Видео слишком длинное", "The video is too long"))
+                } catch MediaError.tooLarge {
+                    busy = false; item = nil
+                    store.flash(s.t("Видео слишком большое", "The video is too large"))
+                } catch {
+                    busy = false; item = nil
+                    store.flash(s.t("Не удалось подготовить файл. Попробуйте другое фото или видео.",
+                                    "Couldn't prepare the file. Try another photo or video."))
+                }
+            }
+        }
+    }
+}
+
+/// Встроенная галерея в окне «Выложить историю»
+private struct InlineStoryPicker: View {
+    @Binding var item: PhotosPickerItem?
+    var body: some View {
+        PhotosPicker("", selection: $item, matching: .any(of: [.images, .videos]))
+            .photosPickerStyle(.inline)
+            .photosPickerDisabledCapabilities([.selectionActions])
+            .ignoresSafeArea(edges: .bottom)
     }
 }
 
@@ -220,6 +289,14 @@ struct StoryPresenters: ViewModifier {
                 if let toast = store.toast { ToastView(text: toast).padding(.top, 62).transition(.opacity) }
             }
             .animation(.easeOut(duration: 0.2), value: store.toast)
+            .overlay {
+                // пока видео готовится после выбора — видно, что что-то происходит, а не пустой экран
+                if store.preparing {
+                    ZStack { Color.black.opacity(0.45).ignoresSafeArea(); ProgressView().tint(.white).scaleEffect(1.3) }
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: store.preparing)
             .sheet(item: $store.composing) { media in
                 StoryComposeSheet(media: media) {
                     store.composing = nil
@@ -232,7 +309,7 @@ struct StoryPresenters: ViewModifier {
             .fullScreenCover(item: $store.open, onDismiss: {
                 Task { await store.reload(session.extras) }
             }) { o in
-                StoryViewerScreen(groups: store.display, startGroup: o.group, startIndex: o.item)
+                StoryViewerScreen(groups: store.display, startGroup: o.group, startIndex: o.item, onSeen: { store.markSeen($0) })
                     .environmentObject(session)
                     .environment(\.theme, theme).environment(\.lang, lang)
             }
@@ -252,16 +329,45 @@ struct StoryComposeSheet: View {
     @State private var failed = false
     @State private var errorText = ""
     @State private var forever = false
+    // тот же редактор, что и при публикации шортса: обрезка, фильтры, текст, стикеры, музыка
+    @State private var edited: PreparedMedia?
+    @State private var editModel: ReelEditModel?
+    @State private var showEditor = false
+    @State private var tracks: [Track] = []
+    @State private var openedOnce = false
+    private var current: PreparedMedia { edited ?? media }
+
+    private func openEditor() {
+        editModel?.cleanup()
+        switch media.source {
+        case .video(let url): editModel = ReelEditModel(video: url)
+        case .image(let data):
+            guard let image = UIImage(data: data) else { return }
+            editModel = ReelEditModel(photos: [image])
+        default: return
+        }
+        showEditor = true
+    }
 
     var body: some View {
         let s = Strings(lang: lang)
         VStack(spacing: 14) {
             Text(s.t("Новая история", "New story")).font(.system(size: 20, weight: .bold)).foregroundStyle(theme.text)
                 .padding(.top, 20)
-            if let image = UIImage(data: media.thumbnail) {
-                Image(uiImage: image).resizable().scaledToFill()
-                    .frame(width: 180, height: 300).clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            if let image = UIImage(data: current.thumbnail) {
+                // как будет в истории: вписано по ширине с сохранением пропорций, остальное чёрное
+                Color.black
+                    .frame(width: 180, height: 320)
+                    .overlay { Image(uiImage: image).resizable().scaledToFit() }
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
+            Button { openEditor() } label: {
+                Label(s.t("Редактировать", "Edit"), systemImage: "wand.and.stars")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 42)
+                    .background(theme.accent, in: Capsule())
+            }
+            .buttonStyle(PressStyle()).padding(.horizontal, 20)
             TextField(s.t("Подпись", "Caption"), text: $caption)
                 .padding(.horizontal, 14).frame(height: 44).card(theme, radius: 14).padding(.horizontal, 20)
             VStack(alignment: .leading, spacing: 2) {
@@ -282,7 +388,14 @@ struct StoryComposeSheet: View {
             Button {
                 busy = true; failed = false
                 Task {
-                    do { try await session.extras.publishStory(media, caption: caption, forever: forever); onDone() }
+                    do {
+                        var out = current
+                        // видео брали без сжатия (чтобы редактор открылся сразу): если его не правили, сжимаем перед отправкой
+                        if edited == nil, case .video(let url) = media.source {
+                            out = try await MediaPreparer.prepare(videoFile: url)
+                        }
+                        try await session.extras.publishStory(out, caption: caption, forever: forever); onDone()
+                    }
                     catch {
                         errorText = s.api((error as? APIError) ?? .offline)
                         failed = true; busy = false
@@ -297,6 +410,21 @@ struct StoryComposeSheet: View {
             }
             .buttonStyle(PressStyle()).disabled(busy).padding(.horizontal, 20)
             Spacer()
+        }
+        .fullScreenCover(isPresented: $showEditor) {
+            if let editModel {
+                ReelEditorView(model: editModel, tracks: tracks, onDone: { done, _ in
+                    if let done { edited = done }
+                    showEditor = false
+                }, onClose: { showEditor = false })
+            }
+        }
+        .task {
+            if let list = try? await session.socialRepo.playlist(userID: session.serverID) { tracks = list }
+        }
+        .onAppear {
+            // как в шортсах: сразу открываем редактор, а подпись и срок — после него
+            if !openedOnce { openedOnce = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { openEditor() } }
         }
     }
 }
@@ -329,7 +457,10 @@ struct StoryViewerScreen: View {
 
     private let tick = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
-    init(groups: [StoryGroup], startGroup: Int, startIndex: Int = -1) {
+    var onSeen: ((String) -> Void)? = nil
+
+    init(groups: [StoryGroup], startGroup: Int, startIndex: Int = -1, onSeen: ((String) -> Void)? = nil) {
+        self.onSeen = onSeen
         _groups = State(initialValue: groups)
         _gi = State(initialValue: startGroup)
         let items = groups.indices.contains(startGroup) ? groups[startGroup].items : []
@@ -421,7 +552,7 @@ struct StoryViewerScreen: View {
                         if isMine { glassButton("trash") { confirmDelete = true } }
                         glassButton("xmark") { dismiss() }
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.leading, 12).padding(.trailing, 6)          // у кнопок своя увеличенная зона нажатия
                 }
                 Spacer()
                 if let item, !item.caption.isEmpty {
@@ -473,6 +604,9 @@ struct StoryViewerScreen: View {
         Button(action: action) {
             Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 .frame(width: 38, height: 38).glassCircle()
+                // нажимается квадрат 50×50, а не только значок: стеклянный круг на iOS 26 не считается областью нажатия
+                .frame(width: 50, height: 50)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -482,28 +616,45 @@ struct StoryViewerScreen: View {
     @ViewBuilder
     private func media(_ item: StoryItem) -> some View {
         if item.isVideo, let player {
-            PlayerLayerView(player: player)
+            // широкое видео вписывается по ширине с сохранением пропорций, остальное чёрное; вертикальное заполняет экран
+            let size = player.currentItem?.presentationSize ?? .zero
+            let portrait = size.height > 0 && size.width / size.height < 0.7
+            PlayerLayerView(player: player, gravity: portrait || size.height == 0 ? .resizeAspectFill : .resizeAspect)
+                .background(Color.black)
         } else if item.isVideo {
             Color.black
         } else {
-            RemoteImage(id: item.mediaId, fill: false)
+            RemoteImage(id: item.mediaId, fill: false, backdrop: .black)
         }
     }
 
     @ViewBuilder
     private func bottomBar(_ s: Strings) -> some View {
         if isMine {
-            Button { showViewers = true } label: {
-                HStack(spacing: 14) {
-                    Label("\(item?.views ?? 0)", systemImage: "eye.fill")
-                    Label("\(item?.likes ?? 0)", systemImage: "heart.fill")
-                        .foregroundStyle(Color(red: 1, green: 0.4, blue: 0.5))
+            HStack(spacing: 10) {
+                Button { showViewers = true } label: {
+                    HStack(spacing: 14) {
+                        Label("\(item?.views ?? 0)", systemImage: "eye.fill")
+                        Label("\(item?.likes ?? 0)", systemImage: "heart.fill")
+                            .foregroundStyle(Color(red: 1, green: 0.4, blue: 0.5))
+                    }
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 18).frame(height: 46).glassCapsule(interactive: true)
+                    .padding(.horizontal, 10).padding(.vertical, 10).contentShape(Rectangle())
                 }
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                .padding(.horizontal, 18).frame(height: 44).glassCapsule(interactive: true)
+                .buttonStyle(.plain)
+                .padding(.horizontal, -10).padding(.vertical, -10)
+                // свою историю тоже можно лайкнуть
+                Button(action: toggleLike) {
+                    StoryHeart(liked: item?.liked ?? false, burst: burst, size: 22)
+                        .frame(width: 46, height: 46)
+                        .glassCircle(interactive: true)
+                        .padding(10).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(-10)
             }
-            .buttonStyle(.plain)
-            .padding(.bottom, 20)
+            .padding(.bottom, 24)
         } else {
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
@@ -541,8 +692,10 @@ struct StoryViewerScreen: View {
             .padding(.horizontal, 14).frame(height: 46)
             .glassCapsule(interactive: true)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: count)
+            .padding(10).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .padding(-10)
     }
 
     // MARK: Логика
@@ -550,16 +703,26 @@ struct StoryViewerScreen: View {
     private func startItem() {
         progress = 0
         guard let item, let g = group else { player?.pause(); return }
+        if g.user.id == session.serverID { onSeen?(item.id) }
         if g.user.id != session.serverID && !item.viewed {
+            onSeen?(item.id)
             groups[gi].items[ii].viewed = true
             groups[gi].allViewed = groups[gi].items.allSatisfy(\.viewed)
             Task { await session.extras.markViewed(storyID: item.id) }
         }
-        if item.isVideo, let url = ServerConfig.mediaURL(item.mediaId) {
+        if item.isVideo, !CallGate.blocks(.video), let url = ServerConfig.mediaURL(item.mediaId) {
+            // без этого сразу после запуска приложения звук идёт по «беззвучному» режиму и пропадает
+            let av = AVAudioSession.sharedInstance()
+            try? av.setCategory(.playback, mode: .moviePlayback)
+            AudioSessionGate.willActivate()
+            try? av.setActive(true)
             let p = player ?? AVPlayer()
+            p.isMuted = false
+            p.volume = 1
             p.pause()
             p.replaceCurrentItem(with: AVPlayerItem(url: url))
             p.seek(to: .zero)
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)      // музыка — на паузу
             p.play()
             if player == nil { player = p }
         } else {
@@ -850,6 +1013,66 @@ struct StoryViewersSheet: View {
     }
 }
 
+// MARK: - Вкладка «Истории» в профиле (сетка, как шортсы)
+
+struct StoriesGrid: View {
+    let userID: String
+    let name: String
+    let avatarID: String?
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var items: [StoryItem] = []
+    @State private var loaded = false
+    @State private var open: StoryStart?
+
+    private struct StoryStart: Identifiable { let id = UUID(); let index: Int }
+
+    var body: some View {
+        Group {
+            if items.isEmpty {
+                Text(loaded ? Strings(lang: lang).t("Историй пока нет", "No stories yet") : " ")
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary).padding(.vertical, 40)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        Color.black.aspectRatio(9.0 / 16.0, contentMode: .fit)
+                            .overlay {
+                                // у видео-истории картинка — это обложка, а не сам ролик (иначе серый квадрат)
+                                if !item.isVideo || item.thumb != nil { RemoteImage(id: item.thumb ?? item.mediaId) }
+                            }
+                            .overlay {
+                                if item.isVideo {
+                                    Image(systemName: "play.fill").font(.system(size: 20))
+                                        .foregroundStyle(.white.opacity(0.9)).shadow(color: .black.opacity(0.5), radius: 3)
+                                }
+                            }
+                            .clipped()
+                            .contentShape(Rectangle())
+                            .onTapGesture { open = StoryStart(index: index) }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 30)
+            }
+        }
+        .task(id: userID) {
+            items = await session.extras.profileStories(userID: userID)
+            loaded = true
+        }
+        .fullScreenCover(item: $open, onDismiss: {
+            Task { items = await session.extras.profileStories(userID: userID) }
+        }) { start in
+            StoryViewerScreen(groups: [StoryGroup(user: StoryUser(id: userID, name: name, username: nil, avatar: avatarID),
+                                                  items: items, allViewed: true)], startGroup: 0, startIndex: start.index)
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+    }
+}
+
 // MARK: - Истории «навсегда» в профиле
 
 struct PermanentStoriesStrip: View {
@@ -878,8 +1101,9 @@ struct PermanentStoriesStrip: View {
                                 Button { open = StoryStart(index: index) } label: {
                                     ZStack {
                                         if item.isVideo {
-                                            Color.black.opacity(0.85)
+                                            if let t = item.thumb { RemoteImage(id: t) } else { Color.black.opacity(0.85) }
                                             Image(systemName: "play.fill").foregroundStyle(.white.opacity(0.9))
+                                                .shadow(color: .black.opacity(0.5), radius: 3)
                                         } else {
                                             RemoteImage(id: item.mediaId)
                                         }

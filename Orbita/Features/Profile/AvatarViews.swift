@@ -53,11 +53,17 @@ struct AvatarPager: View {
     var size: CGFloat = 112
     @Binding var index: Int                 // оставлен для совместимости, всегда показываем главную
     var addStore: ProfileStore? = nil       // если задан — рядом с аватаркой кнопка «+»
+    var listening = false                   // человек сейчас слушает музыку (по данным сервера)
+    var isMine = false                      // свой профиль: волна идёт, пока играет наш плеер
     var onTap: () -> Void = {}
 
     @Environment(\.theme) private var theme
 
     var body: some View {
+        ListeningFXHost(remote: listening, mine: isMine, size: size) { core }
+    }
+
+    private var core: some View {
         ZStack {
             if let first = photos.first {
                 RemoteImage(id: first.mediaID)
@@ -99,6 +105,8 @@ struct AvatarViewer: View {
     @State private var showOrder = false
     @State private var shareItems: ShareItems?
     @State private var sharing = false
+    @State private var dragY: CGFloat = 0          // свайп вверх/вниз: фото едет за пальцем, отпустили дальше порога — просмотр закрывается
+    @State private var dragVertical: Bool?         // направление жеста определяется в начале: вбок — листание фото
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.lang) private var lang
@@ -120,10 +128,37 @@ struct AvatarViewer: View {
     private var index: Int { photos.firstIndex { $0.id == currentID } ?? 0 }
     private var isEditable: Bool { onReorder != nil }
 
+    /// 0 — фото на месте, 1 — утянуто далеко (фон и кнопки почти исчезли)
+    private var pull: CGFloat { min(1, abs(dragY) / 420) }
+
+    private var dismissDrag: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { v in
+                if dragVertical == nil { dragVertical = abs(v.translation.height) > abs(v.translation.width) * 1.3 }
+                guard dragVertical == true else { return }
+                dragY = v.translation.height
+            }
+            .onEnded { v in
+                defer { dragVertical = nil }
+                guard dragVertical == true else { return }
+                let dy = v.translation.height, fling = v.predictedEndTranslation.height
+                if abs(dy) > 110 || abs(fling) > 320 {
+                    // улетает в сторону свайпа (вверх — вверх), затем просмотр закрывается
+                    Haptics.impact(.light)
+                    let up = (abs(fling) > abs(dy) ? fling : dy) < 0
+                    withAnimation(.easeOut(duration: 0.2)) { dragY = (up ? -1 : 1) * UIScreen.main.bounds.height }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { close() }
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) { dragY = 0 }
+                }
+            }
+    }
+
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - Double(pull) * 0.85).ignoresSafeArea()
 
+            Group {
             if photos.isEmpty {
                 AvatarView(name: name, size: 200).clipShape(Circle())
             } else {
@@ -141,6 +176,10 @@ struct AvatarViewer: View {
                 .scrollPosition(id: $currentID)
                 .ignoresSafeArea()
             }
+            }
+            .offset(y: dragY)
+            .scaleEffect(1 - pull * 0.12)
+            .simultaneousGesture(dismissDrag)
 
             VStack(spacing: 10) {
                 topBar
@@ -157,6 +196,7 @@ struct AvatarViewer: View {
             }
             .padding(.top, 8)
             .padding(.bottom, 10)
+            .opacity(1 - Double(pull) * 2)              // кнопки уходят быстрее фото
         }
         .preferredColorScheme(.dark)
         .confirmationDialog(s.deletePhotoQuestion, isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -186,9 +226,10 @@ struct AvatarViewer: View {
                     .foregroundStyle(Color.white)
                     .frame(width: 42, height: 42)
                     .glassCircle()
-                    .frame(width: 48, height: 48).contentShape(Rectangle())
+                    .frame(width: 64, height: 64).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .padding(.leading, -11)
             .zIndex(10)
 
             Spacer(minLength: 8)
@@ -224,7 +265,10 @@ struct AvatarViewer: View {
                         .padding(.horizontal, 16)
                         .frame(height: 42)
                         .glassCapsule()
+                        .padding(.horizontal, 8).padding(.vertical, 10)
+                        .contentShape(Rectangle())
                 }
+                .padding(.trailing, -8)
             } else {
                 Color.clear.frame(width: 42, height: 42)
             }
@@ -246,8 +290,10 @@ struct AvatarViewer: View {
                     .foregroundStyle(Color.white)
                     .frame(width: 46, height: 46)
                     .glassCircle()
+                    .frame(width: 66, height: 66).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, -10)
                 .disabled(photos.isEmpty || sharing)
 
                 Spacer()
@@ -259,8 +305,10 @@ struct AvatarViewer: View {
                             .foregroundStyle(Color.white)
                             .frame(width: 46, height: 46)
                             .glassCircle()
+                            .frame(width: 66, height: 66).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .padding(.trailing, -10)
                 }
             }
             .padding(.horizontal, 16)
@@ -295,6 +343,8 @@ struct AvatarViewer: View {
                                 .overlay(RoundedRectangle(cornerRadius: 10)
                                     .stroke(Color.white, lineWidth: selected ? 2 : 0))
                                 .opacity(selected ? 1 : 0.65)
+                                .padding(.horizontal, 3).padding(.vertical, 2)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .id("t-" + photo.id)
@@ -334,5 +384,157 @@ struct AvatarViewer: View {
         }
         onDelete?(removed.id)
         if photos.isEmpty { close() }
+    }
+}
+
+
+// MARK: - Музыкальный визуализатор вокруг аватарки, пока человек слушает музыку
+
+/// Выбирает, чьё воспроизведение показывать: своё (плеер приложения, с настоящей громкостью) или чужое (по данным сервера)
+struct ListeningFXHost<Content: View>: View {
+    let remote: Bool
+    let mine: Bool
+    let size: CGFloat
+    @ViewBuilder let content: Content
+    @EnvironmentObject private var session: AppSession
+
+    var body: some View {
+        if mine {
+            LocalFX(player: session.player, size: size) { content }
+        } else {
+            ListeningFX(active: remote, size: size, energy: { Beat.calm($0) }) { content }
+        }
+    }
+}
+
+private struct LocalFX<Content: View>: View {
+    @ObservedObject var player: AudioPlayer
+    let size: CGFloat
+    @ViewBuilder let content: Content
+    var body: some View { ListeningFX(active: player.isPlaying, size: size, energy: { _ in player.energy() }) { content } }
+}
+
+/// Аватарка «дышит» в такт, вокруг мягкая капля с волнами и всплывающие капельки.
+/// Чем громче звук — тем сильнее толчок и больше движения; в тихих местах всё плавно и почти незаметно
+struct ListeningFX<Content: View>: View {
+    let active: Bool
+    let size: CGFloat
+    let energy: (Double) -> Double
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        if active {
+            TimelineView(.animation) { ctx in
+                let t = ctx.date.timeIntervalSinceReferenceDate
+                let e = energy(t)
+                content
+                    .scaleEffect(1 + 0.04 * CGFloat(e))
+                    .background { BeatVisualizer(size: size, energy: e, time: t).allowsHitTesting(false) }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+enum Beat {
+    static func hash(_ i: Int, _ salt: Double) -> Double {
+        let x = sin(Double(i) * 127.1 + salt * 311.7) * 43758.5453
+        return x - floor(x)
+    }
+
+    /// Для чужой страницы настоящей громкости нет: мягкие «вдохи» разной силы, без резких пиков
+    static func calm(_ t: Double) -> Double {
+        let slow = 0.5 + 0.5 * sin(t * 1.9)
+        let swell = 0.5 + 0.5 * sin(t * 0.45 + 1.3)
+        let pulse = pow(0.5 + 0.5 * sin(t * 4.2), 3) * 0.5
+        return min(1, 0.12 + 0.28 * slow * (0.5 + 0.5 * swell) + pulse * (0.3 + 0.5 * swell))
+    }
+}
+
+struct BeatVisualizer: View {
+    let size: CGFloat
+    let energy: Double
+    let time: Double
+    var hue: Double? = nil            // свой цвет (аватарки на орбите); nil — плывущая радуга, как у основной аватарки
+
+    /// Цвет почти не меняется в пределах кадра (соседние оттенки), а сам оттенок очень медленно плывёт по кругу:
+    /// жёлтый → зелёный → голубой → … Полный круг около минуты
+    private func tint(_ x: Double, _ t: Double, sat: Double = 0.55, bri: Double = 1) -> Color {
+        if let base = hue {
+            let h = (base + (x - 0.5) * 0.06 + 1).truncatingRemainder(dividingBy: 1)
+            return Color(hue: h, saturation: min(1, sat + 0.25), brightness: bri)
+        }
+        let h = (t * 0.017 + x * 0.07).truncatingRemainder(dividingBy: 1)
+        return Color(hue: h < 0 ? h + 1 : h, saturation: sat, brightness: bri)
+    }
+
+    var body: some View {
+        Canvas { gc, sz in
+            let t = time
+            let c = CGPoint(x: sz.width / 2, y: sz.height / 2)
+            let r = size / 2
+            let e = CGFloat(energy)
+            let eD = energy
+
+            // 1. Мягкое свечение позади аватарки
+            gc.drawLayer { l in
+                l.addFilter(.blur(radius: size * 0.16))
+                l.blendMode = .plusLighter
+                for i in 0..<2 {
+                    let a = t * (0.30 + Double(i) * 0.1) * (i == 0 ? 1 : -1) + Double(i) * 3.1
+                    let cx = c.x + cos(a) * r * 0.5, cy = c.y + sin(a) * r * 0.5
+                    let big = r * (0.70 + 0.35 * e)
+                    l.fill(Path(ellipseIn: CGRect(x: cx - big, y: cy - big, width: big * 2, height: big * 2)),
+                           with: .color(tint(Double(i), t, sat: 0.7).opacity(0.20 + 0.26 * eD)))
+                }
+            }
+
+            // 2. Капля вокруг аватарки: плавно колышется, на громком — сильнее толчок
+            func drop(grow: CGFloat, amp: CGFloat, phase: Double) -> Path {
+                var path = Path()
+                let m = 120
+                for i in 0...m {
+                    let a = Double(i) / Double(m) * 2 * Double.pi
+                    let w = sin(a * 2 + t * 0.9 + phase) * 0.6 + sin(a * 3 - t * 1.3 + phase * 1.7) * 0.4
+                    let rr = r * 1.06 + grow + r * amp * CGFloat(w)
+                    let pt = CGPoint(x: c.x + cos(a) * rr, y: c.y + sin(a) * rr)
+                    if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+                }
+                path.closeSubpath()
+                return path
+            }
+            let amp = 0.012 + 0.07 * e
+            let body = drop(grow: 0, amp: amp, phase: 0)
+            gc.drawLayer { l in
+                l.addFilter(.blur(radius: 5 + 4 * e))
+                l.fill(body, with: .color(tint(0.5, t, sat: 0.6).opacity(0.30 + 0.35 * eD)))
+            }
+            let line = GraphicsContext.Shading.conicGradient(
+                Gradient(colors: [tint(0, t, sat: 0.5), tint(0.5, t, sat: 0.55), tint(1, t, sat: 0.5),
+                                  tint(0.5, t, sat: 0.55), tint(0, t, sat: 0.5)]),
+                center: c, angle: .degrees(t * 20))
+            gc.stroke(body, with: line, lineWidth: 1.8 + 1.4 * e)
+            gc.stroke(drop(grow: 4 + 9 * e, amp: amp * 1.3, phase: 2.2), with: line, lineWidth: 0.8)
+
+            // 3. Капельки отрываются и уплывают вверх
+            let count = 9 + Int(9 * e)
+            for i in 0..<count {
+                let h1 = Beat.hash(i + 40, 2.1), h2 = Beat.hash(i + 40, 5.7), h3 = Beat.hash(i + 40, 9.3)
+                let life = 3.4 + h1 * 3.5
+                let ph = (t / life + h2).truncatingRemainder(dividingBy: 1)
+                let ang = h3 * 2 * Double.pi + sin(t * 0.35 + h1 * 6) * 0.3
+                let dist = r * (1.2 + 0.65 * CGFloat(ph))
+                let x = c.x + cos(ang) * dist + CGFloat(sin(t * 0.7 + h2 * 8)) * 3
+                let y = c.y + sin(ang) * dist - CGFloat(ph) * size * 0.26
+                let alpha = sin(ph * Double.pi) * (0.35 + 0.5 * h1)
+                let d = (2.4 + 3.2 * CGFloat(h2) + 2.6 * e) * (1 - CGFloat(ph) * 0.35)
+                gc.fill(Path(ellipseIn: CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d)),
+                        with: .color(tint(h1, t, sat: 0.45).opacity(alpha)))
+            }
+        }
+        .frame(width: size * 2.8, height: size * 2.8)
+        .frame(width: size, height: size)
+        .allowsHitTesting(false)
     }
 }

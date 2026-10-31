@@ -168,7 +168,7 @@ private struct ReelTextEditor: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 16).padding(.top, 8)
+                .padding(.horizontal, 16).padding(.top, 18)
 
                 Spacer(minLength: 0)
                 TextField("", text: $item.text, axis: .vertical)
@@ -222,7 +222,7 @@ struct ReelEditorView: View {
     @Environment(\.lang) private var lang
     private var s: Strings { Strings(lang: lang) }
 
-    private enum Tool { case music, filter, trim }
+    private enum Tool { case music, sound, filter, trim }
 
     @State private var tool: Tool?
     @State private var editing: ReelText?
@@ -232,6 +232,9 @@ struct ReelEditorView: View {
     @State private var addPhotoPick: [PhotosPickerItem] = []
     @State private var confirmClose = false
     @State private var thumbs: [UIImage] = []
+    @State private var selected: UUID?          // выбранный текст или стикер; nil — выбрано само видео
+    @State private var panBase: CGSize?
+    @State private var zoomBase: Double?
 
     var body: some View {
         ZStack {
@@ -241,6 +244,8 @@ struct ReelEditorView: View {
                 stage
                 if let tool { panel(tool).transition(.move(edge: .bottom).combined(with: .opacity)) }
             }
+            // верх считаем сами от выреза экрана: кнопки всегда ниже статус-бара и Dynamic Island, где касания перехватывает система
+            .ignoresSafeArea(edges: .top)
             .animation(.spring(response: 0.34, dampingFraction: 0.86), value: tool)
 
             if editing != nil {
@@ -262,6 +267,10 @@ struct ReelEditorView: View {
         }
         .preferredColorScheme(.dark)
         .task { await model.start() }
+        .onChange(of: model.ready) { _, ready in
+            // видео длиннее минуты — сразу открываем выбор момента (обрезку), чтобы было видно, что оставить
+            if ready, tool == nil, model.kind == .video, model.baseDuration > ReelEditModel.maxSeconds { tool = .trim }
+        }
         .onDisappear { model.pause() }
         .task(id: model.baseURL) { await loadThumbs() }
         .onChange(of: stickerPick) { _, items in
@@ -298,28 +307,41 @@ struct ReelEditorView: View {
                     confirmClose = true
                 } else { onClose() }
             } label: {
-                Image(systemName: "xmark").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                    .frame(width: 40, height: 40).background(.white.opacity(0.16), in: Circle())
-                    .frame(width: 48, height: 48).contentShape(Rectangle())
+                Image(systemName: "xmark").font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    .frame(width: 52, height: 52).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             Spacer()
             if model.ready {
-                Text(clock(model.trimLength)).font(.system(size: 13, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(0.8))
-                    .padding(.horizontal, 10).frame(height: 28).background(.white.opacity(0.12), in: Capsule())
+                HStack(spacing: 6) {
+                    Image(systemName: "clock").font(.system(size: 12, weight: .semibold))
+                    Text(clock(model.trimLength)).font(.system(size: 14, weight: .semibold).monospacedDigit())
+                }
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 14).frame(height: 32)
+                .background(.ultraThinMaterial, in: Capsule())
                 Spacer()
             }
             Button { finish() } label: {
-                Text(s.t("Далее", "Next")).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 20).frame(height: 40)
-                    .background(Color(red: 0.99, green: 0.17, blue: 0.33), in: Capsule())
-                    .contentShape(Capsule())
+                HStack(spacing: 6) {
+                    Text(s.t("Далее", "Next")).font(.system(size: 16, weight: .bold))
+                    Image(systemName: "arrow.right").font(.system(size: 13, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20).frame(height: 44)
+                .background(LinearGradient(colors: [Color(red: 1.0, green: 0.25, blue: 0.42), Color(red: 0.90, green: 0.12, blue: 0.30)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing), in: Capsule())
+                .shadow(color: Color(red: 0.99, green: 0.17, blue: 0.33).opacity(0.45), radius: 8, y: 3)
+                .padding(8).contentShape(Rectangle()).padding(-8)       // зона нажатия шире самой кнопки
             }
             .buttonStyle(.plain)
             .disabled(!model.ready || model.exporting)
             .opacity(model.ready ? 1 : 0.5)
         }
-        .padding(.horizontal, 14).padding(.vertical, 6)
+        .padding(.horizontal, 16).padding(.top, TopInset.value + 26).padding(.bottom, 12)
     }
 
     // MARK: Сцена
@@ -331,15 +353,21 @@ struct ReelEditorView: View {
             let size = CGSize(width: w, height: h)
             ZStack {
                 ReelPlayerLayer(player: model.player)
-                Color.clear.contentShape(Rectangle()).onTapGesture { if tool != nil { tool = nil } else { model.togglePlay() } }
+                    .scaleEffect(model.zoom)
+                    .offset(x: model.offsetX * w, y: model.offsetY * h)
+                    .allowsHitTesting(false)
+                Color.clear.contentShape(Rectangle()).onTapGesture { selected = nil; if tool != nil { tool = nil } else { model.togglePlay() } }
+                    .gesture(placementDrag(w: w, h: h), including: model.kind == .video ? .all : .subviews)
+                    .simultaneousGesture(placementZoom(), including: model.kind == .video ? .all : .subviews)
 
                 ForEach($model.stickers) { $st in
                     ReelDraggable(cx: $st.cx, cy: $st.cy, scale: $st.scale, rotation: $st.rotation, size: size,
-                                  onDragging: { cy in dragging = true; overTrash = cy > 0.86 },
+                                  onTap: { selected = st.id },
+                                  onDragging: { cy in dragging = true; overTrash = cy > 0.86; if selected != st.id { selected = st.id } },
                                   onEnd: { cy in
                         dragging = false; overTrash = false
                         if cy > 0.86 { model.stickers.removeAll { $0.id == st.id }; Haptics.impact(.medium) }
-                    }) { ReelStickerView(item: st, unit: w) }
+                    }) { ReelStickerView(item: st, unit: w).overlay { outline(selected == st.id) } }
                     .contextMenu {
                         Button(role: .destructive) { model.stickers.removeAll { $0.id == st.id } } label: {
                             Label(s.t("Удалить", "Delete"), systemImage: "trash")
@@ -349,12 +377,12 @@ struct ReelEditorView: View {
                 ForEach($model.texts) { $t in
                     if editing?.id != t.id {
                         ReelDraggable(cx: $t.cx, cy: $t.cy, scale: $t.scale, rotation: $t.rotation, size: size,
-                                      onTap: { editing = t },
-                                      onDragging: { cy in dragging = true; overTrash = cy > 0.86 },
+                                      onTap: { if selected == t.id { editing = t } else { selected = t.id } },
+                                      onDragging: { cy in dragging = true; overTrash = cy > 0.86; if selected != t.id { selected = t.id } },
                                       onEnd: { cy in
                             dragging = false; overTrash = false
                             if cy > 0.86 { model.texts.removeAll { $0.id == t.id }; Haptics.impact(.medium) }
-                        }) { ReelTextView(item: t, unit: w) }
+                        }) { ReelTextView(item: t, unit: w).overlay { outline(selected == t.id) } }
                         .contextMenu {
                             Button { editing = t } label: { Label(s.t("Изменить", "Edit"), systemImage: "pencil") }
                             Button(role: .destructive) { model.texts.removeAll { $0.id == t.id } } label: {
@@ -382,13 +410,127 @@ struct ReelEditorView: View {
                     .allowsHitTesting(false)
                 }
                 rail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                if model.moved {
+                    Button { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { model.resetPlacement() }; Haptics.impact(.light) } label: {
+                        Label(s.t("Сбросить", "Reset"), systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .background(.black.opacity(0.5), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(10)
+                }
             }
             .coordinateSpace(name: "reelStage")
             .frame(width: w, height: h)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                // границы итогового кадра 9:16 и рамка самого видео (она может выходить за кадр)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.28), lineWidth: 1)
+                    if model.kind == .video { videoBounds(w: w, h: h) }
+                }
+                .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if model.kind == .video || selected != nil { scaleControls }
+            }
             .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }
         .padding(.vertical, 4)
+    }
+
+    /// Красная пунктирная рамка видео: видно, где его края и как далеко оно вылезло за кадр
+    private func videoBounds(w: CGFloat, h: CGFloat) -> some View {
+        let aspect = CGFloat(model.videoAspect)
+        // размер видео в кадре: вписанное или заполняющее
+        let fit: CGSize = {
+            let vw = h * aspect
+            if model.videoFills {
+                let s = max(w / vw, 1)
+                return CGSize(width: vw * s, height: h * s)
+            } else {
+                let s = min(w / vw, 1)
+                return CGSize(width: vw * s, height: h * s)
+            }
+        }()
+        let size = CGSize(width: fit.width * model.zoom, height: fit.height * model.zoom)
+        let on = selected == nil
+        return RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .stroke(on ? Color.red : Color.white.opacity(0.5), style: StrokeStyle(lineWidth: on ? 2 : 1, dash: [6, 4]))
+            .frame(width: size.width, height: size.height)
+            .offset(x: model.offsetX * w, y: model.offsetY * h)
+    }
+
+    private func outline(_ on: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .stroke(Color.red, lineWidth: 2)
+            .padding(-5)
+            .opacity(on ? 1 : 0)
+    }
+
+    /// Масштаб выбранного (видео, текста или стикера) кнопками − и +, шаг 5%
+    private var scaleControls: some View {
+        HStack(spacing: 0) {
+            scaleButton("minus") { adjustScale(-0.05) }
+            Text("\(Int((currentScale * 100).rounded()))%")
+                .font(.system(size: 13, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                .frame(minWidth: 46)
+            scaleButton("plus") { adjustScale(0.05) }
+        }
+        .background(.black.opacity(0.5), in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+        .padding(10)
+    }
+
+    private func scaleButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 38, height: 34).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var currentScale: Double {
+        if let id = selected {
+            if let t = model.texts.first(where: { $0.id == id }) { return t.scale }
+            if let st = model.stickers.first(where: { $0.id == id }) { return st.scale }
+        }
+        return model.zoom
+    }
+
+    private func adjustScale(_ delta: Double) {
+        Haptics.impact(.light)
+        if let id = selected {
+            if let i = model.texts.firstIndex(where: { $0.id == id }) {
+                model.texts[i].scale = min(4, max(0.3, model.texts[i].scale + delta)); return
+            }
+            if let i = model.stickers.firstIndex(where: { $0.id == id }) {
+                model.stickers[i].scale = min(4, max(0.3, model.stickers[i].scale + delta)); return
+            }
+        }
+        model.zoom = min(4, max(0.3, model.zoom + delta))
+    }
+
+    private func placementDrag(w: CGFloat, h: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { v in
+                if panBase == nil { panBase = CGSize(width: model.offsetX, height: model.offsetY) }
+                guard let base = panBase else { return }
+                model.offsetX = min(1.2, max(-1.2, base.width + v.translation.width / w))
+                model.offsetY = min(1.2, max(-1.2, base.height + v.translation.height / h))
+            }
+            .onEnded { _ in panBase = nil }
+    }
+
+    private func placementZoom() -> some Gesture {
+        MagnifyGesture()
+            .onChanged { v in
+                if zoomBase == nil { zoomBase = model.zoom }
+                model.zoom = min(4, max(0.3, (zoomBase ?? 1) * v.magnification))
+            }
+            .onEnded { _ in zoomBase = nil }
     }
 
     private var rail: some View {
@@ -398,6 +540,7 @@ struct ReelEditorView: View {
                 model.pause()
                 editing = ReelText(text: "")
                 model.texts.append(editing!)
+                selected = editing?.id
             }
             PhotosPicker(selection: $stickerPick, maxSelectionCount: 4, matching: .images) {
                 railLabel("photo.on.rectangle.angled", s.t("Фото", "Photo"))
@@ -406,9 +549,8 @@ struct ReelEditorView: View {
             railButton("music.note", s.t("Музыка", "Music"), active: model.music != nil || tool == .music) { toggle(.music) }
             if model.kind == .video {
                 railButton(model.originalVolume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill", s.t("Звук", "Sound"),
-                           active: model.originalVolume < 0.01) {
-                    model.originalVolume = model.originalVolume < 0.01 ? 1 : 0
-                    Haptics.impact(.light)
+                           active: model.originalVolume < 0.01 || tool == .sound) {
+                    toggle(.sound)
                 }
             }
             railButton("camera.filters", s.t("Фильтры", "Filters"), active: model.filter != .none || tool == .filter) { toggle(.filter) }
@@ -452,6 +594,7 @@ struct ReelEditorView: View {
             }
             switch tool {
             case .music: musicPanel
+            case .sound: soundPanel
             case .filter: filterPanel
             case .trim: model.kind == .video ? AnyView(trimPanel) : AnyView(slidesPanel)
             }
@@ -463,6 +606,7 @@ struct ReelEditorView: View {
     private func title(of tool: Tool) -> String {
         switch tool {
         case .music: return s.t("Музыка и звук", "Music & sound")
+        case .sound: return s.t("Громкость", "Volume")
         case .filter: return s.t("Фильтры", "Filters")
         case .trim: return model.kind == .video ? s.t("Обрезка", "Trim") : s.t("Фото в шортсе", "Slides")
         }
@@ -501,6 +645,25 @@ struct ReelEditorView: View {
                     Label(s.t("Убрать музыку", "Remove music"), systemImage: "trash")
                         .font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(red: 1, green: 0.35, blue: 0.35))
                         .frame(maxWidth: .infinity).frame(height: 40).background(.white.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Громкость каждого звука отдельно: самого видео и музыки (если выбрана)
+    private var soundPanel: some View {
+        VStack(spacing: 14) {
+            volumeRow(model.originalVolume < 0.01 ? "speaker.slash.fill" : "video.fill", s.t("Звук видео", "Video sound"),
+                      $model.originalVolume, enabled: model.kind == .video)
+            if model.music != nil {
+                volumeRow(model.musicVolume < 0.01 ? "speaker.slash.fill" : "music.note", s.t("Музыка", "Music"),
+                          $model.musicVolume, enabled: true)
+            } else {
+                Button { tool = .music } label: {
+                    Label(s.t("Добавить музыку", "Add music"), systemImage: "music.note")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 40).background(.white.opacity(0.1), in: Capsule())
                 }
                 .buttonStyle(.plain)
             }
@@ -574,7 +737,8 @@ struct ReelEditorView: View {
             }
             .font(.system(size: 13)).foregroundStyle(.white.opacity(0.65))
             if model.baseDuration > ReelEditModel.maxSeconds {
-                Text(s.t("Шортс — не длиннее 3 минут", "A short can't be longer than 3 minutes"))
+                Text(s.t("Видео длиннее минуты — выберите нужный момент (до 1:00)",
+                         "Video is longer than a minute — pick the part to keep (up to 1:00)"))
                     .font(.system(size: 12)).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
         }

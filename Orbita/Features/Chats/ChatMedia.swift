@@ -53,20 +53,24 @@ final class VoiceRecorder: NSObject, ObservableObject {
             startedAt = Date()
             isRecording = true
             tick = 0
-            timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+            // Снимаем громкость 30 раз в секунду — как раз частота перерисовки диаграммы, поэтому она идёт почти в реальном времени.
+            // Главное: таймер в режиме .common, иначе пока палец держит кнопку записи (трекинг касания) он замирает и волна «залипает».
+            let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
                     guard let self, let r = self.recorder else { return }
                     r.updateMeters()
                     let power = r.averagePower(forChannel: 0)                   // дБ: -160...0
                     let linear = pow(10, power / 20)
                     self.level = min(1, sqrt(linear) * 1.5)
                     self.recent.append(self.level)
-                    if self.recent.count > 60 { self.recent.removeFirst(self.recent.count - 60) }
+                    if self.recent.count > 90 { self.recent.removeFirst(self.recent.count - 90) }
                     self.tick += 1
-                    if self.tick % 2 == 0 { self.samples.append(self.level) }       // 10 отсчётов в секунду
+                    if self.tick % 3 == 0 { self.samples.append(self.level) }       // ~10 отсчётов в секунду в сохранённую волну
                     if r.currentTime >= Self.maxDuration { self.timer?.invalidate() }
                 }
             }
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
             return true
         } catch {
             return false
@@ -91,14 +95,16 @@ final class VoiceRecorder: NSObject, ObservableObject {
     private func stopEngine() {
         timer?.invalidate()
         timer = nil
+        let wasRecording = recorder != nil
         recorder?.stop()
         recorder = nil
         isRecording = false
         level = 0
         recent = []
         startedAt = nil
-        // деактивация сессии на главном потоке может подвесить интерфейс — делаем в фоне
-        AudioSessionGate.deactivate()
+        // деактивация сессии на главном потоке может подвесить интерфейс — делаем в фоне.
+        // Если записи не было (например, вышли из переписки), сессию не трогаем: иначе замолкает играющий трек
+        if wasRecording { AudioSessionGate.deactivate() }
     }
 
     /// Сжимает запись до 40 столбиков 0...31 (как рисует Telegram)
@@ -117,6 +123,15 @@ final class VoiceRecorder: NSObject, ObservableObject {
 }
 
 // MARK: - Воспроизведение голосовых
+
+/// Следующее голосовое или кружок в чате
+struct ChatMediaNext {
+    let id: String              // как у плеера: mediaID вложения
+    let mediaID: String
+    let duration: Double
+    let circle: Bool
+    let messageID: String
+}
 
 @MainActor
 final class VoicePlayer: ObservableObject {
@@ -140,6 +155,42 @@ final class VoicePlayer: ObservableObject {
     /// Музыкальный плеер гасится, когда начинается голосовое
     var onStart: (() -> Void)?
 
+    /// Открытый чат подсказывает, что идёт следом: дослушали голосовое или досмотрели кружок — сразу играет
+    /// следующее голосовое или кружок этого чата (как в Telegram)
+    var nextProvider: ((String) -> ChatMediaNext?)?
+    /// Перешли к следующему сам — чат прокручивается к этому сообщению
+    var onAdvance: ((String) -> Void)?
+
+    /// Включает то, что идёт в чате после голосового или кружка `id`
+    func playNext(after id: String) {
+        guard !CallGate.busy, let next = nextProvider?(id) else { return }
+        onAdvance?(next.messageID)
+        if next.circle {
+            CircleFocus.shared.playback(for: next.id).start(mediaID: next.mediaID, duration: next.duration)
+        } else {
+            toggle(id: next.id, mediaID: next.mediaID, duration: next.duration)
+        }
+    }
+
+    /// Где остановились в каждом голосовом: переключились на другое и вернулись — продолжаем с того же места
+    private var positions: [String: Double] = {
+        (UserDefaults.standard.dictionary(forKey: "voice_positions") as? [String: Double]) ?? [:]
+    }()
+
+    private func remember(_ id: String, _ fraction: Double) {
+        if fraction > 0.02 && fraction < 0.97 { positions[id] = fraction } else { positions[id] = nil }
+        if positions.count > 200 { positions = Dictionary(uniqueKeysWithValues: positions.suffix(150).map { ($0.key, $0.value) }) }
+        UserDefaults.standard.set(positions, forKey: "voice_positions")
+    }
+
+    /// Дослушали до конца: следующее голосовое из чата, если оно есть
+    private func finished(_ id: String) {
+        positions[id] = nil
+        UserDefaults.standard.set(positions, forKey: "voice_positions")
+        stop(save: false)
+        playNext(after: id)
+    }
+
     func resume() { player?.rate = rate; isPlaying = player != nil }
     func pause() { player?.pause(); isPlaying = false }
     func seek(toFraction f: Double) {
@@ -155,8 +206,10 @@ final class VoicePlayer: ObservableObject {
             return
         }
         stop()
+        CircleFocus.shared.stop()
         onStart?()
-        guard let url = ServerConfig.mediaURL(mediaID) else { return }
+        guard let url = MediaFileCache.shared.playableURL(mediaID) else { return }      // скачано — с телефона, без сети тоже
+        if !url.isFileURL { MediaFileCache.shared.prefetch(mediaID, fallback: "m4a") }
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         AudioSessionGate.willActivate()
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -166,6 +219,10 @@ final class VoicePlayer: ObservableObject {
         currentID = id
         total = max(duration, 0.1)
         progress = 0
+        if let saved = positions[id] {                          // продолжаем с места, где остановились
+            progress = saved
+            p.seek(to: CMTime(seconds: saved * total, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
@@ -174,7 +231,7 @@ final class VoicePlayer: ObservableObject {
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
                                                              queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stop() }
+            Task { @MainActor in self?.finished(id) }
         }
         p.rate = rate
         isPlaying = true
@@ -187,7 +244,10 @@ final class VoicePlayer: ObservableObject {
         if isPlaying { player?.rate = rate }
     }
 
-    func stop() {
+    func stop() { stop(save: true) }
+
+    private func stop(save: Bool) {
+        if save, let id = currentID { remember(id, progress) }
         if let observer, let player { player.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         observer = nil
@@ -203,7 +263,7 @@ final class VoicePlayer: ObservableObject {
 // MARK: - Запись «кружка» (видеосообщения)
 
 @MainActor
-final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
+final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCapturePhotoCaptureDelegate {
     let session = AVCaptureSession()
     @Published private(set) var isRecording = false
     @Published private(set) var ready = false
@@ -215,14 +275,33 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 
     /// Момент, когда AVFoundation реально начала писать (для счётчика с долями секунды)
     private(set) var startedAt: Date?
+    /// Для часов и кольца: реальный старт записи, а пока AVFoundation не ответила — момент запроса
+    var clockStart: Date? { startedAt ?? (startRequested ? requestedAt : nil) }
     var elapsed: TimeInterval { startedAt.map { Date().timeIntervalSince($0) } ?? 0 }
 
     private let output = AVCaptureMovieFileOutput()
+    private let photoCapture = AVCapturePhotoOutput()
+    private var onPhoto: ((Data) -> Void)?
+    /// Ловит жесты рукой во время записи — по ним вылетают эмодзи-эффекты
+    let gestures = HandGestureDetector()
+    private let dataOutput = AVCaptureVideoDataOutput()
+    private let gestureQueue = DispatchQueue(label: "orbita.hands")
     private let queue = DispatchQueue(label: "orbita.circle.session")
     private var requestedAt: Date?
     private var observers: [NSObjectProtocol] = []
     private var finishing: CheckedContinuation<URL?, Never>?
     nonisolated static let maxDuration: TimeInterval = 60
+
+    /// Кадр последнего записанного кружка: размытым показываем в круге, пока камера включается (вместо пустоты)
+    nonisolated static let lastFrameURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("last-circle.jpg")
+    static var lastFrame: UIImage? = UIImage(contentsOfFile: CircleRecorder.lastFrameURL.path)
+    static func rememberFrame(_ jpeg: Data) {
+        guard !jpeg.isEmpty, let image = UIImage(data: jpeg) else { return }
+        lastFrame = image
+        let url = lastFrameURL
+        Task.detached(priority: .utility) { try? jpeg.write(to: url, options: .atomic) }
+    }
 
     /// Разрешения и подготовка фронтальной камеры
     func prepare() async -> Bool {
@@ -253,8 +332,19 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                         session.addInput(micInput)
                     }
                     if session.canAddOutput(output) { session.addOutput(output) }
+                    if session.canAddOutput(self.photoCapture) { session.addOutput(self.photoCapture) }   // режим «Фото» в шортсах
                     output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
+                    // параллельный выход кадров для распознавания жестов (Vision)
+                    self.dataOutput.alwaysDiscardsLateVideoFrames = true
+                    self.dataOutput.setSampleBufferDelegate(self.gestures, queue: self.gestureQueue)
+                    if session.canAddOutput(self.dataOutput) { session.addOutput(self.dataOutput) }
                     session.commitConfiguration()
+                }
+                // микрофон мог быть снят после неудачной записи — возвращаем
+                if !session.inputs.contains(where: { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.audio) == true }),
+                   let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
+                   session.canAddInput(micInput) {
+                    session.beginConfiguration(); session.addInput(micInput); session.commitConfiguration()
                 }
                 if let connection = output.connection(with: .video) {
                     if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
@@ -296,10 +386,59 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private var startRequested = false          // запись запрошена, но AVFoundation могла ещё не начать
     private var stopWhenStarted = false
 
-    /// Переключает фронтальную и основную камеру (можно и во время записи)
+    /// Вспышка-фонарик (работает на основной камере)
+    func setTorch(_ on: Bool) {
+        let session = session
+        queue.async {
+            guard let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: { $0.device.hasMediaType(.video) })?.device,
+                  device.hasTorch else { return }
+            try? device.lockForConfiguration()
+            device.torchMode = on ? .on : .off
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// Текущее приближение камеры (1 — без увеличения); обновляется при щипке во время записи
+    @Published private(set) var zoom: CGFloat = 1
+
+    /// Приближение камеры во время записи кружка. Значение зажимается до возможностей устройства (но не больше 8×).
+    func setZoom(_ factor: CGFloat) {
+        let session = session
+        queue.async { [weak self] in
+            guard let self,
+                  let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                    .first(where: { $0.device.hasMediaType(.video) })?.device else { return }
+            let maxZ = min(device.activeFormat.videoMaxZoomFactor, 8)
+            let z = max(1, min(factor, maxZ))
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            device.videoZoomFactor = z
+            device.unlockForConfiguration()
+            Task { @MainActor in self.zoom = z }
+        }
+    }
+
+    /// Куски записи: при смене камеры во время записи текущий кусок закрывается, камера меняется и запись
+    /// продолжается новым куском; в конце куски склеиваются в один кружок (см. merge). Раньше смена камеры
+    /// убирала видеовход посреди записи — AVFoundation закрывала файл, и кружок обрывался на переключении.
+    private var segments: [URL] = []
+    private var flipping = false
+    private var flipTarget = true
+
+    /// Переключает фронтальную и основную камеру (можно и во время записи — кружок не обрывается)
     func flipCamera() {
-        let session = session, output = output
         let wantFront = !isFront
+        guard !flipping else { return }
+        if startRequested, output.isRecording {
+            flipping = true
+            flipTarget = wantFront
+            output.stopRecording()            // кусок закроется → в didFinish переключим камеру и продолжим
+            return
+        }
+        applyFlip(front: wantFront) {}
+    }
+
+    private func applyFlip(front wantFront: Bool, then done: @escaping @MainActor () -> Void) {
+        let session = session, output = output
         queue.async { [weak self] in
             session.beginConfiguration()
             if let old = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: { $0.device.hasMediaType(.video) }) {
@@ -317,14 +456,113 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                     connection.isVideoMirrored = wantFront
                 }
             }
+            // новая камера начинает без приближения
+            if let device = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                .first(where: { $0.device.hasMediaType(.video) })?.device,
+               (try? device.lockForConfiguration()) != nil {
+                device.videoZoomFactor = 1
+                device.unlockForConfiguration()
+            }
             session.commitConfiguration()
-            Task { @MainActor in self?.isFront = wantFront }
+            Task { @MainActor in
+                self?.isFront = wantFront; self?.zoom = 1
+                done()
+            }
         }
+    }
+
+    /// После смены камеры — следующий кусок записи (или сборка, если за это время нажали «стоп»)
+    private func continueAfterFlip() {
+        guard startRequested else { return }
+        if finishing != nil || stopWhenStarted {
+            stopWhenStarted = false
+            finalize(segments)
+            segments = []
+            return
+        }
+        let remaining = Self.maxDuration - (startedAt.map { Date().timeIntervalSince($0) } ?? 0)
+        guard remaining > 0.7 else { finalize(segments); segments = []; return }
+        output.maxRecordedDuration = CMTime(seconds: remaining, preferredTimescale: 600)
+        applyMirror()
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+        output.startRecording(to: file, recordingDelegate: self)
+    }
+
+    /// Готовый результат: один кусок — как есть, несколько — склеиваем
+    private func finalize(_ parts: [URL]) {
+        if parts.count <= 1 { complete(parts.first); return }
+        Task { [weak self] in
+            let merged = await CircleRecorder.merge(parts)
+            self?.complete(merged)
+        }
+    }
+
+    private func complete(_ url: URL?) {
+        isRecording = false
+        gestures.active = false
+        startRequested = false
+        stopWhenStarted = false
+        if let finishing {
+            finishing.resume(returning: url)
+            self.finishing = nil
+        } else if let url {
+            autoFinished = url
+        }
+    }
+
+    /// Склейка кусков в один ролик. У кусков с разных камер разные размер и поворот, поэтому каждый
+    /// вписывается в общий кадр своей трансформацией (по размеру первого куска).
+    nonisolated static func merge(_ parts: [URL]) async -> URL? {
+        let comp = AVMutableComposition()
+        guard let vTrack = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return parts.first }
+        let aTrack = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: vTrack)
+        var render = CGSize.zero
+        var cursor = CMTime.zero
+        for url in parts {
+            let asset = AVURLAsset(url: url)
+            guard let src = try? await asset.loadTracks(withMediaType: .video).first,
+                  let duration = try? await asset.load(.duration), duration.seconds > 0.05,
+                  let natural = try? await src.load(.naturalSize),
+                  let t = try? await src.load(.preferredTransform) else { continue }
+            let range = CMTimeRange(start: .zero, duration: duration)
+            do { try vTrack.insertTimeRange(range, of: src, at: cursor) } catch { continue }
+            if let a = try? await asset.loadTracks(withMediaType: .audio).first {
+                try? aTrack?.insertTimeRange(range, of: a, at: cursor)
+            }
+            let rect = CGRect(origin: .zero, size: natural).applying(t)
+            let oriented = CGSize(width: abs(rect.width), height: abs(rect.height))
+            if render == .zero { render = oriented }
+            let k = max(render.width / max(oriented.width, 1), render.height / max(oriented.height, 1))
+            let fit = t.concatenating(CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+                .concatenating(CGAffineTransform(scaleX: k, y: k))
+                .concatenating(CGAffineTransform(translationX: (render.width - oriented.width * k) / 2,
+                                                 y: (render.height - oriented.height * k) / 2))
+            layer.setTransform(fit, at: cursor)
+            cursor = CMTimeAdd(cursor, duration)
+        }
+        guard cursor.seconds > 0.1, render.width > 1, render.height > 1 else { return parts.first }
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: cursor)
+        instruction.layerInstructions = [layer]
+        let video = AVMutableVideoComposition()
+        video.renderSize = CGSize(width: (render.width / 2).rounded(.down) * 2, height: (render.height / 2).rounded(.down) * 2)
+        video.frameDuration = CMTime(value: 1, timescale: 30)
+        video.instructions = [instruction]
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else { return parts.first }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+        export.outputURL = out
+        export.outputFileType = .mov
+        export.videoComposition = video
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+        guard export.status == .completed else { return parts.first }
+        for p in parts { try? FileManager.default.removeItem(at: p) }
+        return out
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         Task { @MainActor in
-            self.startedAt = Date()
+            if self.startedAt == nil { self.startedAt = Date() }     // часы — от первого куска (смена камеры не сбрасывает)
             if self.stopWhenStarted { self.stopWhenStarted = false; self.scheduleStop() }
         }
     }
@@ -337,17 +575,74 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { output.stopRecording() }
     }
 
+    private var attempt = 0
+
+    private func retryRecording() {
+        attempt += 1
+        startedAt = nil                       // часы идут от requestedAt — человек не видит перезапуска
+        let session = session, output = output, dropMic = attempt >= 2
+        if !dropMic { configureAudio() }
+        queue.async { [weak self] in
+            if dropMic {
+                session.beginConfiguration()
+                for input in session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }) where input.device.hasMediaType(.audio) {
+                    session.removeInput(input)
+                }
+                session.commitConfiguration()
+            }
+            if !session.isRunning { session.startRunning() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                guard let self, self.startRequested, !output.isRecording else { return }
+                self.applyMirror()
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+                output.startRecording(to: file, recordingDelegate: self)
+            }
+        }
+    }
+
+    /// Кружок пишется зеркально (как видишь себя в превью) — иначе кадр «перевёрнут» и выглядит непривычно.
+    private func applyMirror() {
+        guard let c = output.connection(with: .video) else { return }
+        if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+        if c.isVideoMirroringSupported {
+            c.automaticallyAdjustsVideoMirroring = false
+            c.isVideoMirrored = isFront
+        }
+    }
+
+    /// Режим «Фото» в шортсах: один снимок текущим кадром (зеркально для фронталки, как в превью).
+    func capturePhoto(_ done: @escaping (Data) -> Void) {
+        guard ready, onPhoto == nil else { return }
+        onPhoto = done
+        if let c = photoCapture.connection(with: .video) {
+            if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+            if c.isVideoMirroringSupported { c.automaticallyAdjustsVideoMirroring = false; c.isVideoMirrored = isFront }
+        }
+        photoCapture.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let data = (error == nil) ? photo.fileDataRepresentation() : nil
+        DispatchQueue.main.async { self.onPhoto?(data ?? Data()); self.onPhoto = nil }
+    }
+
     func startRecording() {
         guard ready, !output.isRecording, !startRequested else { return }
+        attempt = 0
         autoFinished = nil
+        segments = []
+        flipping = false
+        output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
         startRequested = true
         stopWhenStarted = false
         startedAt = nil
         requestedAt = Date()
         configureAudio()
+        applyMirror()
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
         output.startRecording(to: file, recordingDelegate: self)
         isRecording = true
+        gestures.active = true          // эффекты по жестам ловим только во время записи
     }
 
     /// Останавливает запись и возвращает файл (nil — не получилось)
@@ -365,12 +660,16 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     }
 
     func shutdown() {
+        for p in segments { try? FileManager.default.removeItem(at: p) }
+        segments = []
+        flipping = false
         if output.isRecording { output.stopRecording() }
         startedAt = nil
         let session = session
         queue.async { if session.isRunning { session.stopRunning() } }
         ready = false
         isRecording = false
+        gestures.active = false
         startRequested = false
         stopWhenStarted = false
         isFront = true
@@ -396,16 +695,24 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         let usable = error == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) == true || size > 4096
         let code = nsError?.code
         Task { @MainActor in
-            self.lastErrorCode = usable ? nil : code
-            self.isRecording = false
-            self.startRequested = false
-            self.stopWhenStarted = false
-            if let finishing = self.finishing {
-                finishing.resume(returning: usable ? outputFileURL : nil)
-                self.finishing = nil
-            } else if usable {
-                self.autoFinished = outputFileURL
+            if self.flipping {
+                // кусок закрыт ради смены камеры: сохраняем его, меняем камеру и пишем дальше
+                self.flipping = false
+                if usable { self.segments.append(outputFileURL) }
+                self.applyFlip(front: self.flipTarget) { [weak self] in self?.continueAfterFlip() }
+                return
             }
+            // запись оборвалась сразу после старта, а человек ещё держит кнопку — тихо пробуем снова:
+            // сначала с обновлённым звуком, затем без микрофона (лучше видео без звука, чем ничего)
+            if !usable, self.segments.isEmpty, self.finishing == nil, self.startRequested, self.attempt < 2,
+               Date().timeIntervalSince(self.requestedAt ?? Date()) < 3 {
+                self.retryRecording()
+                return
+            }
+            let parts = self.segments + (usable ? [outputFileURL] : [])
+            self.segments = []
+            self.lastErrorCode = parts.isEmpty ? code : nil
+            self.finalize(parts)
         }
     }
 
@@ -435,6 +742,9 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 /// Живое изображение с камеры
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
+    /// Явное зеркало превью: true — отражать (фронталка «как в зеркале»), nil — автоповедение системы.
+    /// Нужно, чтобы живое превью совпадало с тем, как записывается кружок.
+    var mirrored: Bool? = nil
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
@@ -445,10 +755,17 @@ struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
+        applyMirror(view)
         return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIView(_ uiView: PreviewView, context: Context) { applyMirror(uiView) }
+
+    private func applyMirror(_ view: PreviewView) {
+        guard let mirrored, let c = view.previewLayer.connection, c.isVideoMirroringSupported else { return }
+        c.automaticallyAdjustsVideoMirroring = false
+        c.isVideoMirrored = mirrored
+    }
 }
 
 /// Видео в круге/прямоугольнике (воспроизведение кружков)

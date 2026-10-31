@@ -8,10 +8,16 @@ private struct InfoViewerItem: Identifiable {
     var hero: HeroSource.Snapshot?
 }
 
+private struct InfoAvatarTopKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 // MARK: - Профиль переписки (как в Telegram: нажали на имя сверху)
 
 struct ChatInfoView: View {
     @ObservedObject var model: ChatModel
+    @ObservedObject private var prefs = ChatListPrefs.shared
     var onPlayMusic: (Track, [Track]) -> Void
     var onLeftGroup: () -> Void
 
@@ -32,12 +38,31 @@ struct ChatInfoView: View {
     @State private var openedMember: String?
     @State private var confirmBlock = false
     @State private var confirmLeave = false
+    @State private var showStats = false
+    @State private var showQR = false
+    @State private var membersList: MembersListKind?
+    @State private var aboutExpanded = false
     @State private var viewer: InfoViewerItem?
     @State private var frames = FrameBoxes()
     @State private var previewFile: PreviewFile?
     @State private var notice: String?
+    @State private var showTTLPicker = false            // «Другое…» — выбор 1–30 дней
+    @State private var ttlDays = 1
+    @State private var showAppearance = false           // «Обои и цвет» этого чата
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
+    // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
+    @State private var stage = 0
+    @State private var stageForward = true
+    @State private var stageStarted = false            // при первом открытии сразу встаём в среднее положение
+    @State private var avatarTop: CGFloat = 0
+    @State private var pullArmed = true
+    @State private var tracker = PageScrollTracker()
+    private var pageTop: CGFloat { TopInset.value }
+    private static let avatarPad: CGFloat = 40
+    private var headerHeight: CGFloat { UIScreen.main.bounds.width * 0.96 }
+    private var hasStagePhotos: Bool { !isGroup && profile?.blockedMe != true && !(profile?.avatars.isEmpty ?? true) }
+    private var st: Int { hasStagePhotos ? stage : 0 }
 
     private var s: Strings { Strings(lang: lang) }
     private var isGroup: Bool { model.peer.isGroup }
@@ -72,14 +97,28 @@ struct ChatInfoView: View {
                     headerBlock
                     actionRow
                     dmRows
+                    appearanceRow
                     infoCard
-                    if isGroup, let group, !group.members.isEmpty { membersCard(group) }
+                    if !isGroup { CommonChatsCard(userID: model.peer.id) }
+                    if isGroup, let group, group.isAdmin { adminCard(group) }
+                    // в канале подписчики — в отдельном списке, как в Telegram; в группе участники видны сразу
+                    if isGroup, let group, !group.members.isEmpty, !group.isChannel { membersCard(group) }
                     sharedSection
                 }
-                .padding(.top, 56)
+                .coordinateSpace(name: "infoBody")
+                .environmentObject(tracker)
+                .overlay(alignment: .topLeading) { stageOverlay }
+                .onPreferenceChange(InfoAvatarTopKey.self) { v in if st == 0 { avatarTop = v } }
+                .onAppear {
+                    tracker.onChange = { offset in handleScroll(offset) }
+                }
+                .padding(.top, pageTop)                         // отступ снаружи: фото рисуется от верха страницы без сдвига, пустоты под ним нет
                 .padding(.bottom, 40)
             }
+            .coordinateSpace(name: "pageScroll")
             .scrollIndicators(.hidden)
+            .ignoresSafeArea(edges: .top)
+            .environment(\.pageTopInset, pageTop)
             topBar
         }
         .overlay {
@@ -135,6 +174,37 @@ struct ChatInfoView: View {
                     .presentationBackground(theme.sheet)
             }
         }
+        .sheet(isPresented: $showStats) {
+            NavigationStack {
+                GroupStatsView(groupID: model.peer.id, title: model.peer.name, channel: group?.isChannel ?? model.peer.isChannel)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button(s.close) { showStats = false } } }
+            }
+            .environmentObject(session)
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showQR) {
+            if let link = groupLink {
+                GroupQRSheet(link: link, title: model.peer.name)
+                    .environment(\.theme, theme).environment(\.lang, lang)
+                    .presentationDetents([.medium])
+                    .presentationBackground(theme.sheet)
+            }
+        }
+        .sheet(item: $membersList) { kind in
+            if let group {
+                GroupMembersListSheet(group: group, adminsOnly: kind == .admins, me: session.serverID,
+                                      onOpen: { id in
+                                          membersList = nil
+                                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openedMember = id }
+                                      },
+                                      onSetRole: { setRole($0, $1) },
+                                      onRemove: { remove($0) },
+                                      canRemove: { canRemove($0, in: group) })
+                    .environment(\.theme, theme).environment(\.lang, lang)
+                    .presentationBackground(theme.sheet)
+            }
+        }
         .sheet(isPresented: $showRequests) {
             GroupRequestsSheet(groupID: model.peer.id) { await model.refresh() }
                 .environmentObject(session).environmentObject(flow)
@@ -181,10 +251,9 @@ struct ChatInfoView: View {
             .buttonStyle(.plain)
             .zIndex(10)
             Spacer()
+            // «Изм.» — только в своей группе (админу); на профиле человека кнопки нет
             if isGroup, group?.isAdmin == true {
                 Button { showEdit = true } label: { pillLabel(s.t("Изм.", "Edit")) }.buttonStyle(.plain)
-            } else if !isGroup {
-                Button { showContact = true } label: { pillLabel(s.t("Изм.", "Edit")) }.buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 14).padding(.top, 6)
@@ -200,37 +269,115 @@ struct ChatInfoView: View {
     private var headerBlock: some View {
         VStack(spacing: 6) {
             // фото профиля сразу здесь: нажали — раскрывается на весь экран и листается
-            if !isGroup, let photos = profile?.avatars, !photos.isEmpty {
+            if hasStagePhotos, let photos = profile?.avatars {
                 AvatarPager(name: model.peer.name, photos: photos, size: 112, index: $pagerIndex) {
-                    avatarRoute = AvatarViewerRoute(index: 0)
+                    setStage(1)
                 }
+                .opacity(st >= 1 ? 0 : 1)                              // вместо кружка рисует AvatarStage
+                .frame(height: st >= 1 ? max(112, headerHeight - (Self.avatarPad + pageTop) - 4) : 112, alignment: .top)
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: InfoAvatarTopKey.self, value: g.frame(in: .named("infoBody")).minY)
+                })
+                .padding(.top, Self.avatarPad)
             } else {
                 AvatarView(name: model.peer.name, size: 112, avatarID: model.peer.avatarID).clipShape(Circle())
+                    .padding(.top, Self.avatarPad)
             }
-            Text(model.peer.name)
-                .font(.system(size: 26, weight: .bold)).foregroundStyle(theme.text)
-                .multilineTextAlignment(.center).padding(.horizontal, 24)
-            if let real = model.realName, model.isContact, real != model.peer.name, !isGroup {
-                Text(real).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
+            if st == 0 {
+                Text(model.peer.name)
+                    .font(.system(size: 26, weight: .bold)).foregroundStyle(theme.text)
+                    .multilineTextAlignment(.center).padding(.horizontal, 24)
+                if let real = model.realName, model.isContact, real != model.peer.name, !isGroup {
+                    Text(real).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
+                }
+                Text(subtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(theme.textSecondary)
             }
-            Text(subtitle)
-                .font(.system(size: 15))
-                .foregroundStyle(theme.textSecondary)
             requestsBanner.padding(.top, 8)
         }
         .frame(maxWidth: .infinity)
+        .background(alignment: .top) { PageScrollMarker(lockTop: true, reportPull: hasStagePhotos) }
+    }
+
+    // MARK: Три положения аватарки
+
+    @ViewBuilder
+    private var stageOverlay: some View {
+        if hasStagePhotos, let p = profile {
+            let count = p.avatars.count
+            AvatarStage(expand: CGFloat(st), circleTop: avatarTop + pageTop, screen: UIScreen.main.bounds.size,
+                        headerHeight: headerHeight, topInset: pageTop,
+                        photos: p.avatars, page: pagerIndex, forward: stageForward,
+                        name: model.peer.name, status: subtitle,
+                        onStep: { stepPhoto($0, count: count) },
+                        onCenter: { setStage(stage == 1 ? 2 : 1) },
+                        onVertical: { stageDrag($0) },
+                        onClose: { setStage(0) })
+                .offset(y: -pageTop)
+                .allowsHitTesting(st >= 1)
+            if st == 2 {
+                AvatarViewer(name: p.name, photos: p.avatars, start: pagerIndex, onClose: { setStage(0) })
+                    .padding(.top, pageTop)
+                    .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+                    .background(Color.black)
+                    .offset(y: -pageTop)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private func handleScroll(_ offset: CGFloat) {
+        if offset > -8, !pullArmed { pullArmed = true }
+        guard hasStagePhotos else { return }
+        let pull = -offset
+        if pull > 62, stage == 0, pullArmed { pullArmed = false; Haptics.impact(.medium); setStage(1) }
+        if pull > 150, stage == 1, pullArmed { pullArmed = false; Haptics.impact(.heavy); setStage(2) }
+        if offset > 40, stage == 1 { setStage(0) }
+    }
+
+    private func setStage(_ n: Int) {
+        guard stage != n else { return }
+        Haptics.impact(.light)
+        if n == 0 || stage == 0 { stageForward = false }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
+            stage = n
+            if n == 0 { pagerIndex = 0 }
+        }
+    }
+
+    private func stepPhoto(_ delta: Int, count: Int) {
+        guard count > 1 else { return }
+        let next = max(0, min(count - 1, pagerIndex + delta))
+        guard next != pagerIndex else { return }
+        Haptics.select()
+        stageForward = delta > 0
+        withAnimation(.easeInOut(duration: 0.28)) { pagerIndex = next }
+    }
+
+    private func stageDrag(_ dy: CGFloat) {
+        if stage == 1 {
+            if dy > 50 { Haptics.impact(.medium); setStage(2) } else if dy < -50 { setStage(0) }
+        } else if stage == 2, abs(dy) > 60 {
+            setStage(1)
+        }
     }
 
     private var subtitle: String {
         if isGroup {
             let count = group?.count ?? model.peer.memberCount
             let channel = group?.isChannel ?? model.peer.isChannel
-            let open = group?.isOpen ?? (model.peer.kind == "open")
-            let kind = channel ? (open ? s.t("Публичный канал", "Public channel") : s.t("Закрытый канал", "Private channel"))
-                               : (open ? s.t("Открытая группа", "Open group") : s.t("Закрытая группа", "Private group"))
-            return "\(kind) · \(count) \(s.memberWord(channel: channel))"
+            // «661 подписчик», как в Telegram
+            return "\(count) " + Self.countWord(count, channel: channel, lang: lang)
         }
         return s.lastSeenText(model.lastSeen)
+    }
+
+    static func countWord(_ n: Int, channel: Bool, lang: AppLanguage) -> String {
+        guard lang == .ru else { return channel ? (n == 1 ? "subscriber" : "subscribers") : (n == 1 ? "member" : "members") }
+        let m100 = n % 100, m10 = n % 10
+        let form = (11...14).contains(m100) ? 2 : (m10 == 1 ? 0 : ((2...4).contains(m10) ? 1 : 2))
+        return (channel ? ["подписчик", "подписчика", "подписчиков"] : ["участник", "участника", "участников"])[form]
     }
 
     // MARK: Кнопки
@@ -238,25 +385,46 @@ struct ChatInfoView: View {
     private var actionRow: some View {
         HStack(spacing: 10) {
             if isGroup {
-                if let g = group, g.isAdmin || (g.isOpen && !g.isChannel) {
-                    tile("person.badge.plus", s.t("Пригласить", "Invite")) { showInvite = true }
-                }
-                if let link = groupLink {
-                    ShareLink(item: link, message: Text(s.t("Заходи в Orbita", "Join on Orbita"))) {
-                        tileLabel("link", s.t("Ссылка", "Link"))
-                    }
-                    .buttonStyle(PressStyle())
-                }
+                // как в Telegram: звук, чат обсуждения (или «пригласить»), ещё
                 tile(group?.muted == true ? "bell.slash.fill" : "bell.fill",
-                     group?.muted == true ? s.t("Включить", "Unmute") : s.t("Без звука", "Mute")) { toggleMute() }
-                tile("rectangle.portrait.and.arrow.right",
-                     (group?.isChannel ?? model.peer.isChannel) ? s.t("Отписаться", "Unfollow") : s.t("Выйти", "Leave"),
-                     danger: true) { confirmLeave = true }
+                     group?.muted == true ? s.t("без звука", "muted") : s.t("звук", "sound")) { toggleMute() }
+                if let d = group?.discussion {
+                    tile("bubble.left.fill", s.t("чат", "chat")) { openDiscussion(d) }
+                } else if canInvite {
+                    tile("person.badge.plus", s.t("пригласить", "invite")) { showInvite = true }
+                }
+                Menu {
+                    if canInvite && group?.discussion != nil {
+                        Button { showInvite = true } label: { Label(s.t("Пригласить", "Invite"), systemImage: "person.badge.plus") }
+                    }
+                    if let link = groupLink {
+                        ShareLink(item: link, message: Text(s.t("Заходи в Orbita", "Join on Orbita"))) {
+                            Label(s.t("Поделиться ссылкой", "Share link"), systemImage: "square.and.arrow.up")
+                        }
+                        Button { showQR = true } label: { Label(s.t("QR-код", "QR code"), systemImage: "qrcode") }
+                    }
+                    if group?.isAdmin == true {
+                        Button { showStats = true } label: { Label(s.t("Статистика", "Statistics"), systemImage: "chart.bar.fill") }
+                        Button { showEdit = true } label: { Label(s.t("Настройки", "Settings"), systemImage: "gearshape") }
+                    }
+                    Divider()
+                    Button(role: .destructive) { confirmLeave = true } label: {
+                        Label((group?.isChannel ?? model.peer.isChannel) ? s.t("Отписаться", "Unfollow") : s.t("Покинуть группу", "Leave group"),
+                              systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                } label: {
+                    tileLabel("ellipsis", s.t("ещё", "more"))
+                }
             } else {
                 tile("phone.fill", s.t("Звонок", "Call")) { callPeer(video: false) }
                 tile("video.fill", s.t("Видео", "Video")) { callPeer(video: true) }
                 tile("person.crop.circle", s.t("Профиль", "Profile")) { showProfile = true }
-                tile("bell.fill", s.t("Звук", "Sound")) { notice = s.t("Звук личных чатов настраивается в профиле", "Set sound in the profile") }
+                let dmMuted = { _ = prefs.muteTick; return prefs.isDMMuted(model.peer.id) }()
+                tile(dmMuted ? "bell.slash.fill" : "bell.fill",
+                     dmMuted ? s.t("Без звука", "Muted") : s.t("Звук", "Sound")) {
+                    prefs.setDMMuted(model.peer.id, !prefs.isDMMuted(model.peer.id))
+                    Haptics.impact(.light)
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -271,6 +439,7 @@ struct ChatInfoView: View {
                       model.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
                     showContact = true
                 }
+                ttlMenu
                 dmRow(profile?.blockedByMe == true ? "hand.raised.slash" : "hand.raised.fill",
                       profile?.blockedByMe == true ? s.unblockUser : s.blockUser, danger: profile?.blockedByMe != true) {
                     if profile?.blockedByMe == true { setBlocked(false) } else { confirmBlock = true }
@@ -278,6 +447,119 @@ struct ChatInfoView: View {
             }
             .padding(.horizontal, 16)
         }
+    }
+
+    /// «Обои и цвет» — свой фон и цвет моих сообщений в этом чате (только у меня)
+    private var appearanceRow: some View {
+        Button { showAppearance = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "paintbrush.fill").font(.system(size: 17)).frame(width: 24)
+                Text(s.t("Обои и цвет", "Wallpaper & colour")).font(.system(size: 17))
+                Spacer()
+                ZStack {
+                    ChatWallpaperView(chatID: model.peer.id)
+                    Circle().fill(theme.accent).frame(width: 12, height: 12)
+                }
+                .frame(width: 26, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+            }
+            .foregroundStyle(theme.accentColor)
+            .padding(.horizontal, 16).frame(height: 52)
+            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .sheet(isPresented: $showAppearance) {
+            ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
+    }
+
+    /// Быстрые варианты таймера исчезающих сообщений (секунды). «Другое…» — отдельно, выбор 1–30 дней.
+    private static let ttlOptions: [Int] = [0, 86400, 7 * 86400, 30 * 86400]
+
+    /// «N дней» с правильным склонением
+    private func daysLabel(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "дней" : (m10 == 1 ? "день" : (m10 >= 2 && m10 <= 4 ? "дня" : "дней"))
+            return "\(n) \(word)"
+        }
+        return "\(n) day\(n == 1 ? "" : "s")"
+    }
+
+    private func ttlLabel(_ sec: Int) -> String {
+        switch sec {
+        case 0: return s.t("Выключено", "Off")
+        case 86400: return s.t("1 день", "1 day")
+        case 7 * 86400: return s.t("1 неделя", "1 week")
+        case 30 * 86400: return s.t("1 месяц", "1 month")
+        default: return daysLabel(max(1, sec / 86400))
+        }
+    }
+
+    private var ttlMenu: some View {
+        Menu {
+            ForEach(Self.ttlOptions, id: \.self) { sec in
+                Button {
+                    Task { await model.setTTL(sec) }
+                } label: {
+                    if model.ttl == sec { Label(ttlLabel(sec), systemImage: "checkmark") } else { Text(ttlLabel(sec)) }
+                }
+            }
+            Divider()
+            Button {
+                ttlDays = Self.ttlOptions.contains(model.ttl) || model.ttl == 0 ? 1 : max(1, min(30, model.ttl / 86400))
+                showTTLPicker = true
+            } label: {
+                // галочка, если выбран нестандартный срок (кастомные дни)
+                let custom = model.ttl > 0 && !Self.ttlOptions.contains(model.ttl)
+                if custom { Label(s.t("Другое…", "Other…"), systemImage: "checkmark") } else { Text(s.t("Другое…", "Other…")) }
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "timer").font(.system(size: 17)).frame(width: 24)
+                Text(s.t("Исчезающие сообщения", "Disappearing messages")).font(.system(size: 17))
+                Spacer()
+                Text(model.ttl == 0 ? s.t("Выкл", "Off") : ttlLabel(model.ttl))
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+            }
+            .foregroundStyle(theme.accentColor)
+            .padding(.horizontal, 16).frame(height: 52)
+            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        }
+        .sheet(isPresented: $showTTLPicker) { ttlDaysPicker }
+    }
+
+    /// Выбор произвольного срока: 1–30 дней
+    private var ttlDaysPicker: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("", selection: $ttlDays) {
+                    ForEach(1...30, id: \.self) { d in Text(daysLabel(d)).tag(d) }
+                }
+                .pickerStyle(.wheel)
+                .frame(maxHeight: .infinity)
+                Button {
+                    Task { await model.setTTL(ttlDays * 86400) }
+                    showTTLPicker = false
+                } label: {
+                    Text(s.t("Готово", "Done")).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 52)
+                        .background(theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain).padding(16)
+            }
+            .navigationTitle(s.t("Исчезающие сообщения", "Disappearing messages"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(s.t("Отмена", "Cancel")) { showTTLPicker = false } } }
+        }
+        .environment(\.theme, theme).environment(\.lang, lang)
+        .presentationDetents([.height(360)])
+        .presentationBackground(theme.sheet)
     }
 
     private func dmRow(_ icon: String, _ title: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
@@ -292,6 +574,17 @@ struct ChatInfoView: View {
             .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
         }
         .buttonStyle(.plain)
+    }
+
+    private var canInvite: Bool {
+        guard let g = group else { return false }
+        return g.isAdmin || (!g.isChannel && (g.isOpen || g.perms.invite))
+    }
+
+    private func openDiscussion(_ d: DiscussionRef) {
+        let peer = ChatPeer(id: d.id, name: d.name, username: nil, avatarID: nil, isGroup: true, type: "group")
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { PushManager.shared.openChat = ChatRoute(peer: peer) }
     }
 
     private var groupLink: URL? {
@@ -339,8 +632,12 @@ struct ChatInfoView: View {
 
     @ViewBuilder
     private var infoCard: some View {
-        let rows = infoRows
-        if !rows.isEmpty { ProfileInfoCard(rows: rows).padding(.horizontal, 16) }
+        if isGroup {
+            groupAboutCard
+        } else {
+            let rows = infoRows
+            if !rows.isEmpty { ProfileInfoCard(rows: rows).padding(.horizontal, 16) }
+        }
     }
 
     private var infoRows: [ProfileInfoRow] {
@@ -367,6 +664,120 @@ struct ChatInfoView: View {
             if !p.bio.isEmpty { rows.append(ProfileInfoRow(label: s.bioLabel, value: p.bio)) }
         }
         return rows
+    }
+
+    /// Ссылка (с QR-кодом) и описание, длинное сворачивается в «ещё» — как в Telegram
+    @ViewBuilder
+    private var groupAboutCard: some View {
+        let g = group
+        let about = g?.about ?? ""
+        let link = (g?.isOpen == true || g?.isAdmin == true) ? groupLink : nil
+        let slow = g.map { !$0.isChannel && $0.slow > 0 } ?? false
+        if link != nil || !about.isEmpty || g?.noForward == true || slow {
+            VStack(alignment: .leading, spacing: 0) {
+                if let link {
+                    HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(s.t("ссылка", "link")).font(.system(size: 14)).foregroundStyle(theme.text)
+                            Text(link.absoluteString).font(.system(size: 17)).foregroundStyle(theme.accentColor).lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            UIPasteboard.general.string = link.absoluteString
+                            Haptics.notify(.success)
+                            notice = s.t("Ссылка скопирована", "Link copied")
+                        }
+                        Spacer(minLength: 8)
+                        Button { showQR = true } label: {
+                            Image(systemName: "qrcode").font(.system(size: 24)).foregroundStyle(theme.accentColor)
+                                .frame(width: 44, height: 44).contentShape(Rectangle())
+                        }
+                        .buttonStyle(PressStyle())
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 11)
+                    if !about.isEmpty { aboutDivider }
+                }
+                if !about.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(s.t("описание", "description")).font(.system(size: 14)).foregroundStyle(theme.text)
+                        RichInlineText(text: about, entities: [], size: 17, color: theme.text, linkColor: theme.accentColor, detect: true)
+                            .lineLimit(aboutExpanded ? nil : 3)
+                            .environment(\.openURL, OpenURLAction { url in ChatEntity(url: url) != nil ? .handled : .systemAction })
+                        if !aboutExpanded && (about.count > 110 || about.filter { $0 == "\n" }.count > 2) {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    Haptics.select()
+                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { aboutExpanded = true }
+                                } label: {
+                                    Text(s.t("ещё", "more")).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.accentColor)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 11)
+                }
+                if g?.noForward == true {
+                    aboutDivider
+                    smallRow(s.t("Копирование запрещено", "Copying is restricted"), icon: "lock.fill")
+                }
+                if slow, let g {
+                    aboutDivider
+                    smallRow(s.t("Медленный режим: ", "Slow mode: ") + s.slowLabel(g.slow), icon: "timer")
+                }
+            }
+            .card(theme, radius: 18)
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var aboutDivider: some View { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 16) }
+
+    private func smallRow(_ text: String, icon: String) -> some View {
+        Label(text, systemImage: icon).font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    /// Для админов: «Администраторы», «Подписчики», «Статистика», «Настройки канала» — как в Telegram
+    private func adminCard(_ group: GroupInfo) -> some View {
+        let admins = group.members.filter { $0.role == "owner" || $0.role == "admin" }.count
+        return VStack(spacing: 0) {
+            adminRow("checkmark.shield.fill", Color(red: 0.2, green: 0.78, blue: 0.35), s.t("Администраторы", "Administrators"),
+                     value: admins > 0 ? "\(admins)" : nil) { membersList = .admins }
+            aboutDivider.padding(.leading, 46)
+            adminRow("person.2.fill", Color(red: 0.2, green: 0.55, blue: 1.0),
+                     group.isChannel ? s.t("Подписчики", "Subscribers") : s.t("Участники", "Members"),
+                     value: "\(group.count)") { membersList = .all }
+            aboutDivider.padding(.leading, 46)
+            adminRow("chart.bar.fill", Color(red: 0.69, green: 0.32, blue: 0.87), s.t("Статистика", "Statistics"), value: nil) {
+                showStats = true
+            }
+            aboutDivider.padding(.leading, 46)
+            adminRow("slider.horizontal.3", Color(red: 1.0, green: 0.62, blue: 0.04),
+                     group.isChannel ? s.t("Настройки канала", "Channel settings") : s.t("Настройки группы", "Group settings"),
+                     value: group.requests > 0 ? "\(group.requests)" : nil) { showEdit = true }
+        }
+        .card(theme, radius: 18)
+        .padding(.horizontal, 16)
+    }
+
+    private func adminRow(_ icon: String, _ color: Color, _ title: String, value: String?, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.select()
+            action()
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: icon).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 32, height: 32).background(color, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text(title).font(.system(size: 17)).foregroundStyle(theme.text)
+                Spacer()
+                if let value { Text(value).font(.system(size: 17)).foregroundStyle(theme.textSecondary) }
+                Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.textTertiary)
+            }
+            .padding(.horizontal, 12).frame(height: 54).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func canRemove(_ member: GroupMember, in group: GroupInfo) -> Bool {
@@ -456,6 +867,7 @@ struct ChatInfoView: View {
                         var image: UIImage?
                         if let url = ServerConfig.mediaURL(item.thumbID ?? item.id) { image = ImageCache.shared.cached(url, maxPixel: 1280) }
                         HeroSource.shared.set(id: item.id, rect: frames.box(index).rect, image: image)
+                        hideKeyboard()
                         viewer = InfoViewerItem(media: items, start: index, hero: HeroSource.shared.take())
                     }
             }
@@ -540,6 +952,10 @@ struct ChatInfoView: View {
     private func loadProfile() async {
         guard !isGroup else { return }
         profile = try? await session.profileRepo.profile(id: model.peer.id)
+        if !stageStarted, hasStagePhotos {                     // по умолчанию человек открывается в среднем положении
+            stageStarted = true
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) { stage = 1 }
+        }
     }
 
     private func setBlocked(_ blocked: Bool) {
@@ -841,5 +1257,166 @@ struct GroupInviteSheet: View {
                 dismiss()
             } catch { errorText = s.api((error as? APIError) ?? .offline) }
         }
+    }
+}
+
+enum MembersListKind: String, Identifiable {
+    case admins, all
+    var id: String { rawValue }
+}
+
+/// Список администраторов или всех участников / подписчиков; владельцу — смахнуть влево: админ, удалить
+struct GroupMembersListSheet: View {
+    let group: GroupInfo
+    let adminsOnly: Bool
+    let me: String
+    var onOpen: (String) -> Void
+    var onSetRole: (GroupMember, String) -> Void
+    var onRemove: (GroupMember) -> Void
+    var canRemove: (GroupMember) -> Bool
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    private var s: Strings { Strings(lang: lang) }
+
+    private var list: [GroupMember] {
+        let base = adminsOnly ? group.members.filter { $0.role == "owner" || $0.role == "admin" } : group.members
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return q.isEmpty ? base : base.filter { $0.name.lowercased().contains(q) || ($0.username ?? "").lowercased().contains(q) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(list) { m in
+                    Button { if m.id.lowercased() != me { onOpen(m.id) } } label: {
+                        HStack(spacing: 12) {
+                            AvatarView(name: m.name, size: 40, avatarID: m.avatarID).clipShape(Circle())
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.name).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                                if let u = m.username { Text("@" + u).font(.system(size: 13)).foregroundStyle(theme.textTertiary) }
+                            }
+                            Spacer()
+                            if m.role != "member" {
+                                Text(m.role == "owner" ? s.t("владелец", "owner") : s.t("админ", "admin"))
+                                    .font(.system(size: 12)).foregroundStyle(theme.accentColor)
+                            }
+                        }
+                    }
+                    .listRowBackground(theme.surface)
+                    .swipeActions(edge: .trailing) {
+                        if canRemove(m) {
+                            Button(role: .destructive) { onRemove(m) } label: { Label(s.t("Удалить", "Remove"), systemImage: "person.badge.minus") }
+                        }
+                        if group.isOwner, m.id.lowercased() != me, m.role != "owner" {
+                            Button { onSetRole(m, m.role == "admin" ? "member" : "admin") } label: {
+                                Label(m.role == "admin" ? s.t("Снять админа", "Remove admin") : s.t("Сделать админом", "Make admin"),
+                                      systemImage: "person.badge.shield.checkmark")
+                            }
+                            .tint(theme.accentColor)
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .searchable(text: $query, prompt: s.t("Поиск", "Search"))
+            .navigationTitle(adminsOnly ? s.t("Администраторы", "Administrators")
+                             : (group.isChannel ? s.t("Подписчики", "Subscribers") : s.t("Участники", "Members")))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(s.close) { dismiss() } } }
+        }
+    }
+}
+
+/// QR-код ссылки на канал или группу
+struct GroupQRSheet: View {
+    let link: URL
+    let title: String
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text(title).font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text).padding(.top, 24)
+            QRCodeView(text: link.absoluteString)
+                .frame(width: 210, height: 210)
+                .padding(16)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            Text(link.absoluteString).font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(1).padding(.horizontal, 24)
+            ShareLink(item: link) {
+                Label(s.t("Поделиться", "Share"), systemImage: "square.and.arrow.up")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 50).background(theme.accent, in: Capsule())
+            }
+            .padding(.horizontal, 24)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+
+/// «Общие чаты» в профиле человека — группы, где вы оба (как в Telegram и MAX). Нет общих — блока нет.
+/// Нажатие открывает группу
+struct CommonChatsCard: View {
+    let userID: String
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var chats: [ChatPeer] = []
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        Group {
+            if !chats.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(s.t("ОБЩИЕ ЧАТЫ", "GROUPS IN COMMON"))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                        .padding(.leading, 16)
+                    VStack(spacing: 0) {
+                        ForEach(chats, id: \.id) { peer in
+                            Button { open(peer) } label: {
+                                HStack(spacing: 14) {
+                                    AvatarView(name: peer.name, size: 48, avatarID: peer.avatarID).clipShape(Circle())
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(peer.name).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                                        Text("\(peer.memberCount) " + ChatInfoView.countWord(peer.memberCount, channel: false, lang: lang))
+                                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textTertiary)
+                                }
+                                .padding(.horizontal, 14).padding(.vertical, 9)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if peer.id != chats.last?.id {
+                                Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 76)
+                            }
+                        }
+                    }
+                    .card(theme, radius: 18)
+                }
+                .padding(.horizontal, 16)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: chats.count)
+        .task(id: userID) {
+            guard userID.lowercased() != session.serverID else { return }
+            chats = await session.extras.commonChats(userID: userID)
+        }
+    }
+
+    private func open(_ peer: ChatPeer) {
+        Haptics.impact(.light)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { PushManager.shared.openChat = ChatRoute(peer: peer) }
     }
 }

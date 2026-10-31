@@ -21,7 +21,20 @@ final class CallWindowController {
         w.rootViewController = host
         w.capturesAll = true
         bag.removeAll()
-        manager.$minimized.receive(on: DispatchQueue.main).sink { [weak w] m in w?.capturesAll = !m }.store(in: &bag)
+        // Свёрнутый звонок: окно сжимается до плашки сверху по центру и целиком ловит нажатия — плашка всегда поверх всего,
+        // а всё остальное экрана (кнопки «назад», «Изм.» и т.д.) остаётся доступным
+        w.capturesAll = true
+        manager.$minimized.receive(on: DispatchQueue.main).sink { [weak w] m in
+            guard let w else { return }
+            let b = UIScreen.main.bounds
+            if m {
+                let top = w.safeAreaInsets.top > 0 ? w.safeAreaInsets.top : 54
+                let width: CGFloat = 220
+                w.frame = CGRect(x: (b.width - width) / 2, y: 0, width: width, height: top + 56)
+            } else {
+                w.frame = b
+            }
+        }.store(in: &bag)
         w.isHidden = false
         window = w
     }
@@ -78,8 +91,9 @@ struct CallScreen: View {
                     }
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 16).frame(height: 36)
+                .padding(.horizontal, 16).frame(height: 36).frame(maxWidth: 212)
                 .background(Color.green.opacity(0.92), in: Capsule())
+                .contentShape(Capsule())
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
             }
             .buttonStyle(.plain)

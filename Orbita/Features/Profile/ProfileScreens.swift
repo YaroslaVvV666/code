@@ -10,8 +10,19 @@ struct ProfileSubScreen: View {
     @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @ObservedObject private var leave = LeaveGuard.shared
+    @State private var showUnsaved = false
 
     private var s: Strings { Strings(lang: lang) }
+
+    private func doLeave() {
+        leave.dirty = false
+        if let parent { session.profileRoute = parent } else { back() }
+    }
+
+    private func attemptLeave() {
+        if leave.dirty { showUnsaved = true } else { doLeave() }
+    }
 
     private var title: String {
         switch route {
@@ -49,7 +60,7 @@ struct ProfileSubScreen: View {
     /// а стрелка «назад» просто лежит поверх — без отдельной тёмной плашки
     private var wallBody: some View {
         ZStack(alignment: .topLeading) {
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content.padding(.top, TopInset.value).padding(.bottom, 24)
             }
             .coordinateSpace(name: "pageScroll")
@@ -82,7 +93,7 @@ struct ProfileSubScreen: View {
         VStack(spacing: 0) {
             HStack {
                 Button {
-                    if let parent { session.profileRoute = parent } else { back() }
+                    attemptLeave()
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .semibold))
@@ -104,7 +115,7 @@ struct ProfileSubScreen: View {
             .padding(.horizontal, 16)
             .frame(height: 54)
 
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content
                     .padding(.top, 8)
                     .padding(.bottom, 24)
@@ -113,7 +124,15 @@ struct ProfileSubScreen: View {
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.interactively)
         }
-        .edgeSwipeBack { if let parent { session.profileRoute = parent } else { back() } }
+        .edgeSwipeBack { attemptLeave() }
+        .unsavedChangesDialog(isPresented: $showUnsaved,
+                              title: s.t("Несохранённые изменения", "Unsaved changes"),
+                              message: s.t("Вы не сохранили изменения. Применить их?",
+                                           "You have unsaved changes. Apply them?"),
+                              saveTitle: s.t("Применить", "Apply"),
+                              discardTitle: s.t("Сбросить", "Discard"),
+                              onSave: { leave.saveSignal += 1 },
+                              onDiscard: { doLeave() })
     }
 
     @ViewBuilder
@@ -408,7 +427,7 @@ struct DataScreen: View {
     @AppStorage("autoplay") private var autoplay = true
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    @State private var cacheBytes = URLCache.shared.currentDiskUsage
+    @State private var cacheBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
     @State private var clearing = false
     @State private var freedBytes = 0
 
@@ -442,9 +461,11 @@ struct DataScreen: View {
                             value: ByteCountFormatter.string(fromByteCount: Int64(cacheBytes), countStyle: .file))
                 SettingsDivider()
                 Button {
-                    freedBytes = URLCache.shared.currentDiskUsage
+                    // вместе с картинками удаляются и скачанные видео, голосовые и кружки из переписок
+                    freedBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
                     URLCache.shared.removeAllCachedResponses()
-                    cacheBytes = URLCache.shared.currentDiskUsage
+                    MediaFileCache.shared.clear()
+                    cacheBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
                     Haptics.impact(.soft)
                     clearing = true
                 } label: {

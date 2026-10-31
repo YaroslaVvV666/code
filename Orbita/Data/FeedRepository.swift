@@ -1,9 +1,17 @@
 import Foundation
 
 protocol FeedRepository: Sendable {
-    func loadFeed(forYou: Bool) async throws -> [Post]
+    func loadFeed(forYou: Bool) async throws -> FeedPage
+    // реклама
+    func adImpression(id: String) async
+    func adClick(id: String) async -> String                 // возвращает ссылку
+    func myAds() async throws -> (ads: [AdCampaign], balanceCents: Int)
+    func createAd(_ draft: AdDraft) async throws -> AdCampaign
+    func setAdPaused(id: String, paused: Bool) async throws
+    func deleteAd(id: String) async throws
+    func topUpAds(amountCents: Int) async throws -> Int
     func uploadMedia(_ media: PreparedMedia) async throws -> MediaItem
-    func createPost(text: String, entities: [TextEntity], media: [MediaItem]) async throws -> Post
+    func createPost(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post
     func setLike(postID: String, liked: Bool) async throws
     func likers(postID: String) async throws -> [FriendUser]
     func deletePost(id: String) async throws
@@ -48,6 +56,7 @@ struct PostDTO: Decodable {
     let media: [MediaDTO]
     let createdAt: Double
     let likes: Int
+    let views: Int?
     let comments: Int
     let likedByMe: Bool
     let mine: Bool
@@ -57,6 +66,11 @@ struct PostDTO: Decodable {
     let savedByMe: Bool?
     let reposts: Int?
     let repostedByMe: Bool?
+    let isRepost: Bool?
+    let allowRepost: Bool?
+    let sensitive: Bool?
+    let repostFriends: [AuthorDTO]?
+    let origin: AuthorDTO?
     let music: MusicDTO?
 
     struct MusicDTO: Decodable { let title: String; let artist: String; let media: String }
@@ -65,10 +79,14 @@ struct PostDTO: Decodable {
         Post(id: id, author: author.model, text: text, entities: entities, media: media.map(\.model),
              createdAt: Date(timeIntervalSince1970: createdAt), likes: likes, comments: comments,
              likedByMe: likedByMe, isMine: mine, commentsEnabled: commentsEnabled,
+             views: views ?? 0,
              editedAt: editedAt.map { Date(timeIntervalSince1970: $0) },
              saves: saves ?? 0, savedByMe: savedByMe ?? false,
              reposts: reposts ?? 0, repostedByMe: repostedByMe ?? false,
-             music: music.map { PostMusic(title: $0.title, artist: $0.artist, mediaID: $0.media) })
+             music: music.map { PostMusic(title: $0.title, artist: $0.artist, mediaID: $0.media) },
+             isRepost: isRepost ?? false, allowRepost: allowRepost ?? true,
+             sensitive: sensitive ?? false,
+             repostFriends: (repostFriends ?? []).map(\.model), origin: origin?.model)
     }
 }
 
@@ -90,7 +108,7 @@ struct CommentDTO: Decodable {
     }
 }
 
-struct PostListDTO: Decodable { let posts: [PostDTO] }
+struct PostListDTO: Decodable { let posts: [PostDTO]; let ads: [AdDTO]? }
 private struct CommentListDTO: Decodable { let comments: [CommentDTO] }
 
 func decodeAPI<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -102,11 +120,12 @@ func decodeAPI<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
 struct RemoteFeedRepository: FeedRepository {
     let api: ServerAPI
 
-    func loadFeed(forYou: Bool) async throws -> [Post] {
+    func loadFeed(forYou: Bool) async throws -> FeedPage {
         var query = ["limit": "60"]
         if forYou { query["sort"] = "for_you" }
         let data = try await api.request("GET", "/v1/posts", query: query)
-        return try decodeAPI(PostListDTO.self, from: data).posts.map(\.model)
+        let dto = try decodeAPI(PostListDTO.self, from: data)
+        return FeedPage(posts: dto.posts.map(\.model), ads: (dto.ads ?? []).map(\.model))
     }
 
     func uploadMedia(_ media: PreparedMedia) async throws -> MediaItem {
@@ -136,7 +155,7 @@ struct RemoteFeedRepository: FeedRepository {
         }
     }
 
-    private func postBody(text: String, entities: [TextEntity], media: [MediaItem]) -> Data {
+    private func postBody(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions = PostOptions()) -> Data {
         let entityList: [[String: Any]] = entities.map { e in
             var item: [String: Any] = ["type": e.type, "offset": e.offset, "length": e.length]
             if let url = e.url { item["url"] = url }
@@ -145,11 +164,16 @@ struct RemoteFeedRepository: FeedRepository {
         let mediaList: [[String: Any]] = media.map { m in
             ["id": m.id, "width": m.width, "height": m.height]
         }
-        return ServerAPI.json(["text": text, "entities": entityList, "media": mediaList] as [String: Any])
+        var body: [String: Any] = ["text": text, "entities": entityList, "media": mediaList]
+        if options.commentsOff { body["comments_off"] = true }
+        if options.noRepost { body["no_repost"] = true }
+        if options.wallOnly { body["wall_only"] = true }
+        if options.sensitive { body["sensitive"] = true }
+        return ServerAPI.json(body)
     }
 
-    func createPost(text: String, entities: [TextEntity], media: [MediaItem]) async throws -> Post {
-        let data = try await api.request("POST", "/v1/posts", body: postBody(text: text, entities: entities, media: media))
+    func createPost(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post {
+        let data = try await api.request("POST", "/v1/posts", body: postBody(text: text, entities: entities, media: media, options: options))
         return try decodeAPI(PostDTO.self, from: data).model
     }
 

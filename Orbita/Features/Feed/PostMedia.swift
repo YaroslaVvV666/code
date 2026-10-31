@@ -9,12 +9,12 @@ struct RemoteImage: View {
     let id: String
     var fill = true
     var maxPixel: CGFloat = 1280
-    var backdrop = true                       // false — без подложки (вокруг вписанного фото виден фон снизу)
+    var backdrop: Color? = nil
     @Environment(\.theme) private var theme
 
     var body: some View {
         ZStack {
-            if backdrop { theme.surface }
+            backdrop ?? theme.surface
             CachedImage(url: ServerConfig.mediaURL(id), maxPixel: maxPixel) { image, failed in
                 if let image {
                     if fill { Image(uiImage: image).resizable().scaledToFill() }
@@ -251,26 +251,68 @@ struct MediaGrid: View {
 // MARK: - Видео
 
 /// Беззвучное зацикленное видео прямо в ленте (настройка «Автовоспроизведение»)
+/// Сообщение сейчас рассыпается на частицы: видео показывает превью-кадр — живой видеослой iOS не отдаёт в снимок экрана,
+/// и вместо картинки рассыпалась бы чёрная или пустая область
+private struct MediaFrozenKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var mediaFrozen: Bool {
+        get { self[MediaFrozenKey.self] }
+        set { self[MediaFrozenKey.self] = newValue }
+    }
+}
+
 struct InlineVideo: View {
     let item: MediaItem
+    @Environment(\.mediaFrozen) private var frozen
     @State private var player: AVPlayer?
     @State private var endObserver: NSObjectProtocol?
     @State private var statusObserver: NSKeyValueObservation?
+    @State private var visible = false
+    @State private var ready = false                // первый кадр готов — видео плавно проявляется поверх превью
+    @State private var startTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
-            if let player {
-                VideoPlayer(player: player).allowsHitTesting(false)
-            } else {
-                MediaCell(item: item)
+            MediaCell(item: item)
+            if let player, !frozen {
+                // лёгкий слой AVPlayerLayer вместо VideoPlayer из AVKit: тот строит целый контроллер с элементами управления
+                PlayerLayerView(player: player, gravity: .resizeAspectFill)
+                    .allowsHitTesting(false)
+                    .opacity(ready ? 1 : 0)
+                    .animation(.easeOut(duration: 0.25), value: ready)
             }
         }
-        .onAppear(perform: start)
-        .onDisappear(perform: stop)
+        // играет только то, что сейчас на экране: в переписке все строки построены сразу, и раньше
+        // одновременно декодировались все видео чата — отсюда рывки при прокрутке
+        .background(GeometryReader { g in
+            let f = g.frame(in: .global)
+            let on = f.maxY > -60 && f.minY < UIScreen.main.bounds.height + 60 && f.height > 0
+            Color.clear
+                .onAppear { setVisible(on) }
+                .onChange(of: on) { _, now in setVisible(now) }
+        })
+        .onDisappear { setVisible(false) }
+    }
+
+    private func setVisible(_ now: Bool) {
+        guard now != visible else { return }
+        visible = now
+        startTask?.cancel()
+        if now {
+            // стартуем, только если видео задержалось на экране: при быстрой прокрутке плееры не создаются зря
+            startTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled, visible else { return }
+                start()
+            }
+        } else {
+            stop()
+        }
     }
 
     private func start() {
-        guard player == nil, let url = ServerConfig.mediaURL(item.id) else { return }
+        guard player == nil, !CallGate.busy, let url = MediaFileCache.shared.playableURL(item.id) else { return }
         let newPlayer = AVPlayer(url: url)
         newPlayer.isMuted = true
         newPlayer.volume = 0
@@ -280,6 +322,7 @@ struct InlineVideo: View {
             statusObserver = item.observe(\.status, options: [.initial, .new]) { item, _ in
                 guard item.status == .readyToPlay else { return }
                 for track in item.tracks where track.assetTrack?.mediaType == .audio { track.isEnabled = false }
+                DispatchQueue.main.async { ready = true }
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -295,6 +338,7 @@ struct InlineVideo: View {
     private func stop() {
         player?.pause()
         player = nil
+        ready = false
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         statusObserver?.invalidate()
@@ -302,28 +346,260 @@ struct InlineVideo: View {
     }
 }
 
+/// Полоса перемотки без ползунка: тонкая, при нажатии становится толще; тянуть можно за любую точку
+private struct SeekBar: View {
+    @Binding var time: Double
+    let total: Double
+    @Binding var pressing: Bool
+    var onChange: (Bool) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = max(1, geo.size.width)
+            let frac = total > 0 ? min(1, max(0, time / total)) : 0
+            let h: CGFloat = pressing ? 14 : 6
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.28)).frame(height: h)
+                Capsule().fill(Color.white).frame(width: w * frac, height: h)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: pressing)
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    if !pressing { pressing = true; onChange(true) }
+                    time = total * Double(min(1, max(0, v.location.x / w)))
+                }
+                .onEnded { v in
+                    time = total * Double(min(1, max(0, v.location.x / w)))
+                    pressing = false
+                    onChange(false)
+                })
+        }
+        .frame(height: 40)
+    }
+}
+
 private struct ViewerVideo: View {
     let item: MediaItem
+    var chrome = true
+    var isCurrent = true
+    @Binding var playing: Bool
+    var onActivity: () -> Void = {}
+    var bottomPad: CGFloat = max(10, BottomInset.value)       // как у кнопки «поделиться»: скорость стоит с ней на одном уровне
     @State private var player: AVPlayer?
+    @State private var time: Double = 0
+    @State private var total: Double = 0
+    @State private var scrubbing = false
+    @State private var rate: Float = 1
+    @State private var observer: Any?
+    @State private var endObserver: NSObjectProtocol?
+    @State private var statusObserver: NSKeyValueObservation?
+    /// Видео нет на телефоне и не загрузить с сервера (нет сети / кэш очищен) — кнопка «скачать», как в Telegram
+    @State private var needsDownload = false
+    @State private var downloadFailed = false
+    @ObservedObject private var downloads = DownloadCenter.shared
     @Environment(\.lang) private var lang
+
+    private func glass(_ size: CGFloat) -> some View {
+        Circle().fill(.ultraThinMaterial).frame(width: size, height: size)
+            .overlay(Circle().stroke(Color.white.opacity(0.16), lineWidth: 1))
+    }
+
+    private func skip(_ icon: String, _ delta: Double) -> some View {
+        Button {
+            guard let player else { return }
+            Haptics.impact(.light)
+            let target = max(0, min(total, time + delta))
+            time = target
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            onActivity()
+        } label: {
+            Image(systemName: icon).font(.system(size: 26, weight: .regular)).foregroundStyle(.white)
+                .frame(width: 66, height: 66).background(glass(66))
+        }
+        .buttonStyle(.plain)
+    }
 
     var body: some View {
         ZStack {
+            Color.black
             if CallGate.busy {
                 Text(CallGate.message(lang)).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                     .multilineTextAlignment(.center).padding(30)
-            } else if let player { VideoPlayer(player: player) }
+            } else if needsDownload {
+                downloadPlaceholder
+            } else if let player {
+                // целиком по центру, чёрные поля вокруг — как фото
+                PlayerLayerView(player: player, gravity: .resizeAspect)
+                    .allowsHitTesting(false)
+                if chrome {
+                    HStack(spacing: 40) {
+                        skip("gobackward.15", -15)
+                        Button { toggle(); onActivity() } label: {
+                            Image(systemName: playing ? "pause.fill" : "play.fill")
+                                .font(.system(size: 32)).foregroundStyle(.white)
+                                .frame(width: 78, height: 78).background(glass(78))
+                        }
+                        .buttonStyle(.plain)
+                        skip("goforward.15", 15)
+                    }
+                    .transition(.opacity)
+
+                    VStack(spacing: 12) {
+                        Spacer()
+                        HStack(spacing: 12) {
+                            Text(Self.clock(time)).font(.system(size: 14, weight: .medium).monospacedDigit()).foregroundStyle(.white)
+                            SeekBar(time: $time, total: total, pressing: $scrubbing) { editing in
+                                onActivity()
+                                if !editing { player.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+                            }
+                            Text(Self.clock(total)).font(.system(size: 14, weight: .medium).monospacedDigit()).foregroundStyle(.white.opacity(0.75))
+                        }
+                        .padding(.horizontal, 20).frame(height: 56)
+                        .background(Color(white: 0.09).opacity(0.92), in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1))
+                        .padding(.horizontal, 12)
+
+                        // скорость воспроизведения
+                        Menu {
+                            ForEach([Float(0.5), 1, 1.5, 2], id: \.self) { r in
+                                Button { setRate(r); onActivity() } label: {
+                                    Label(r == 1 ? "Обычная" : "\(r.formatted())×", systemImage: rate == r ? "checkmark" : "speedometer")
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "gearshape").font(.system(size: 18))
+                                if rate != 1 { Text("\(rate.formatted())×").font(.system(size: 14, weight: .semibold)) }
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 22).frame(height: 44)
+                            .background(Color(white: 0.09).opacity(0.92), in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1))
+                        }
+                    }
+                    .padding(.bottom, bottomPad)
+                    .transition(.opacity)
+                }
+            }
         }
-        .onAppear {
-            guard player == nil, !CallGate.busy, let url = ServerConfig.mediaURL(item.id) else { return }
-            let newPlayer = AVPlayer(url: url)
-            newPlayer.play()
-            player = newPlayer
+        .contentShape(Rectangle())
+        .animation(.easeOut(duration: 0.22), value: chrome)
+        .onAppear(perform: start)
+        .onDisappear(perform: stop)
+        .onChange(of: isCurrent) { _, now in
+            if now, let player {
+                NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
+                player.play(); player.rate = rate; playing = true
+            } else { player?.pause() }
         }
-        .onDisappear {
-            player?.pause()
-            player = nil
+    }
+
+    private func setRate(_ r: Float) {
+        rate = r
+        player?.defaultRate = r
+        if playing { player?.rate = r }
+    }
+
+    private func toggle() {
+        guard let player else { return }
+        if playing { player.pause(); playing = false }
+        else {
+            if total > 0, time >= total - 0.05 { player.seek(to: .zero) }
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
+            player.play(); player.rate = rate; playing = true
         }
+    }
+
+    /// Превью и кнопка «скачать» / кольцо загрузки
+    private var downloadPlaceholder: some View {
+        let progress = downloads.progress[item.id]
+        return ZStack {
+            if let thumb = item.thumbID { RemoteImage(id: thumb, fill: false, backdrop: .black).opacity(0.6) }
+            VStack(spacing: 12) {
+                Button { download() } label: {
+                    TransferRing(progress: progress, icon: progress == nil ? "arrow.down" : "xmark", size: 64)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                }
+                .buttonStyle(.plain)
+                .disabled(progress != nil)
+                if downloadFailed && progress == nil {
+                    Text(lang == .en ? "No connection. Tap to try again" : "Нет сети. Нажмите, чтобы повторить")
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.85))
+                }
+            }
+        }
+    }
+
+    private func download() {
+        downloadFailed = false
+        Task {
+            if let local = await MediaFileCache.shared.download(item.id) {
+                needsDownload = false
+                begin(local)
+            } else {
+                downloadFailed = true
+            }
+        }
+    }
+
+    private func start() {
+        guard player == nil, !CallGate.busy else { return }
+        // уже на телефоне — играем с него (и без сети)
+        if let local = MediaFileCache.shared.cached(item.id) { begin(local); return }
+        if NetworkState.shared.offline { needsDownload = true; return }
+        guard let url = ServerConfig.mediaURL(item.id) else { return }
+        begin(url)
+        // пока смотришь — сохраняется на телефон (сразу, без очереди фоновых загрузок)
+        let id = item.id
+        Task.detached(priority: .utility) { await MediaFileCache.shared.download(id) }
+    }
+
+    private func begin(_ url: URL) {
+        guard player == nil else { return }
+        let av = AVAudioSession.sharedInstance()
+        try? av.setCategory(.playback, mode: .moviePlayback)
+        AudioSessionGate.willActivate()
+        try? av.setActive(true)
+        let newPlayer = AVPlayer(url: url)
+        observer = newPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main) { t in
+            if !scrubbing { time = t.seconds.isFinite ? t.seconds : 0 }
+            if let d = newPlayer.currentItem?.duration.seconds, d.isFinite, d > 0 { total = d }
+        }
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: newPlayer.currentItem, queue: .main) { _ in
+            if isCurrent { playing = false }
+        }
+        // с сервера не грузится (сеть пропала) — вместо чёрного экрана кнопка «скачать»
+        if !url.isFileURL {
+            statusObserver = newPlayer.currentItem?.observe(\.status, options: [.new]) { item, _ in
+                guard item.status == .failed else { return }
+                DispatchQueue.main.async {
+                    guard MediaFileCache.shared.cached(self.item.id) == nil else { return }
+                    stop()
+                    needsDownload = true
+                }
+            }
+        }
+        if isCurrent {
+            NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)      // музыка — на паузу
+            newPlayer.play(); playing = true
+        }
+        player = newPlayer
+    }
+
+    private func stop() {
+        if let observer { player?.removeTimeObserver(observer) }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        statusObserver?.invalidate()
+        observer = nil; endObserver = nil; statusObserver = nil
+        player?.pause()
+        player = nil
+    }
+
+    private static func clock(_ t: Double) -> String {
+        let n = Int(max(0, t.isFinite ? t : 0))
+        return String(format: "%d:%02d", n / 60, n % 60)
     }
 }
 
@@ -350,6 +626,9 @@ struct MediaViewer: View {
     @State private var toast: String?
     @State private var saving = false
     @State private var chrome = true
+    @State private var tick = 0
+    @State private var videoPlaying = true
+    @State private var lastID: String?
     /// Режим «герой»: фон рисует хозяин, шапка и низ вылетают отдельно, закрытие делает хозяин
     var embedded = false
     var pagesVisible = true
@@ -373,23 +652,28 @@ struct MediaViewer: View {
     private var current: MediaItem? { media.indices.contains(index) ? media[index] : nil }
 
     var body: some View {
+        viewerContent.onAppear { hideKeyboard() }
+    }
+
+    private var viewerContent: some View {
         ZStack {
             if !embedded { Color.black.ignoresSafeArea() }
 
             TabView(selection: $index) {
                 ForEach(Array(media.enumerated()), id: \.offset) { item in
-                    page(item.element).tag(item.offset)
-                        .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { chrome.toggle() } }
+                    page(item.element, at: item.offset).tag(item.offset)
+                        .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { chrome.toggle() }; tick += 1 }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
+            .id(media.count)            // список дополнился — страницы собираются заново, иначе листание зависает
             .ignoresSafeArea()
             .opacity(pagesVisible ? 1 : 0)
 
             if chrome {
                 VStack {
                     HStack(spacing: 10) {
-                        roundButton("xmark") { if let onClose { onClose() } else { dismiss() } }
+                        roundButton("chevron.left") { if let onClose { onClose() } else { dismiss() } }
                         Spacer()
                         VStack(spacing: 1) {
                             if meta.indices.contains(index) {
@@ -405,7 +689,14 @@ struct MediaViewer: View {
                         .padding(.horizontal, 16).padding(.vertical, 6)
                         .background(.ultraThinMaterial, in: Capsule())
                         Spacer()
-                        roundButton(saving ? "ellipsis" : "arrow.down.to.line") { Task { await save() } }
+                        Menu {
+                            Button { Task { await save() } } label: { Label("Сохранить в галерею", systemImage: "arrow.down.to.line") }
+                        } label: {
+                            Image(systemName: saving ? "arrow.down.circle" : "ellipsis")
+                                .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                                .frame(width: 40, height: 40)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
                     }
                     .padding(.horizontal, 14).padding(.top, embedded ? TopInset.value + 4 : 8)
                     .offset(y: flyIn ? 0 : -70).opacity(flyIn ? 1 : 0)
@@ -444,7 +735,18 @@ struct MediaViewer: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onChange(of: index) { _, v in onIndex?(v) }
+        .onChange(of: index) { _, v in onIndex?(v); lastID = media.indices.contains(v) ? media[v].id : nil }
+        // список дополнился (подтянулась вся история) — остаёмся на том же файле, а не на том же номере
+        .onChange(of: media.map(\.id)) { _, ids in
+            if let id = lastID, let i = ids.firstIndex(of: id), i != index { index = i }
+        }
+        .onAppear { lastID = current?.id }
+        // у видео кнопки сами пропадают через 5 секунд, как в шортсах; нажатие по экрану возвращает их
+        .task(id: "\(tick)-\(chrome)-\(videoPlaying)-\(index)") {
+            guard chrome, videoPlaying, current?.kind == .video else { return }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if !Task.isCancelled { withAnimation(.easeOut(duration: 0.25)) { chrome = false } }
+        }
     }
 
     private func roundButton(_ icon: String, action: @escaping () -> Void) -> some View {
@@ -494,11 +796,54 @@ struct MediaViewer: View {
     }
 
     @ViewBuilder
-    private func page(_ item: MediaItem) -> some View {
+    private func page(_ item: MediaItem, at i: Int) -> some View {
         switch item.kind {
-        case .image: RemoteImage(id: item.id, fill: false)
+        case .image: ZoomableViewerImage(id: item.id)
         case .art:   PostArt(kind: item.artIndex).aspectRatio(item.aspect, contentMode: .fit)
-        case .video: ViewerVideo(item: item)
+        case .video: ViewerVideo(item: item, chrome: chrome, isCurrent: i == index, playing: $videoPlaying, onActivity: { tick += 1 },
+                                bottomPad: embedded ? max(10, BottomInset.value) : 10)
+        }
+    }
+}
+
+
+/// Фото в просмотре: чёрный фон до краёв, щипок и двойной тап — увеличение
+struct ZoomableViewerImage: View {
+    let id: String
+    @State private var scale: CGFloat = 1
+    @State private var base: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var dragBase: CGSize = .zero
+
+    var body: some View {
+        RemoteImage(id: id, fill: false, backdrop: .black)
+            .background(Color.black)
+            .scaleEffect(scale)
+            .offset(offset)
+            .gesture(MagnifyGesture()
+                .onChanged { v in scale = min(5, max(1, base * v.magnification)) }
+                .onEnded { _ in
+                    base = scale
+                    if scale <= 1.02 { reset() }
+                })
+            // перетаскивание нужно только при увеличении; иначе оно перехватывает свайп и фото не листаются
+            .simultaneousGesture(DragGesture()
+                .onChanged { v in
+                    guard scale > 1 else { return }
+                    offset = CGSize(width: dragBase.width + v.translation.width, height: dragBase.height + v.translation.height)
+                }
+                .onEnded { _ in if scale > 1 { dragBase = offset } },
+                including: scale > 1.02 ? .all : .none)
+            .onTapGesture(count: 2) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    if scale > 1 { reset() } else { scale = 2.5; base = 2.5 }
+                }
+            }
+    }
+
+    private func reset() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            scale = 1; base = 1; offset = .zero; dragBase = .zero
         }
     }
 }

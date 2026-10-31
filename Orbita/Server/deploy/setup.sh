@@ -11,9 +11,15 @@ apt-get install -y python3 python3-venv python3-pip caddy ufw
 id orbita >/dev/null 2>&1 || useradd --system --home /opt/orbita --shell /usr/sbin/nologin orbita
 mkdir -p /opt/orbita/app /var/lib/orbita
 cp -r "$SRC"/. /opt/orbita/app/
-rm -rf /opt/orbita/app/deploy /opt/orbita/app/__pycache__
+# чистим кэш питона, но папку deploy оставляем — из неё при запуске берётся проверка целостности
+find /opt/orbita/app -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+chmod +x /opt/orbita/app/deploy/integrity.sh
 python3 -m venv /opt/orbita/venv
 /opt/orbita/venv/bin/pip install -q -r /opt/orbita/app/requirements.txt
+
+# эталон целостности кода: по нему служба при каждом запуске проверяет, что .py не подменили.
+# Пересоздавайте его после легальных обновлений кода (повторный запуск setup.sh делает это сам).
+bash /opt/orbita/app/deploy/integrity.sh generate /opt/orbita/app
 
 # мастер-ключ шифрования: создаётся один раз. ПОТЕРЯ КЛЮЧА = потеря всех данных, сделайте копию!
 if [ ! -f /etc/orbita.key ]; then

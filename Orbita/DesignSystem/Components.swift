@@ -211,6 +211,14 @@ struct AvatarView: View {
         (Color(red: 0.34, green: 0.60, blue: 0.52), Color(red: 0.22, green: 0.42, blue: 0.38))
     ]
 
+    /// Размер декодирования — по фиксированным ступеням, а не «размер × 3». Иначе у анимированных аватарок
+    /// (орбита друзей «дышит» каждый кадр) каждый кадр получался новый ключ кэша → чтение и декодирование заново.
+    static func pixelBucket(_ size: CGFloat) -> CGFloat {
+        let want = size * 3
+        for b: CGFloat in [96, 160, 256, 384, 512, 768] where want <= b { return b }
+        return 1024
+    }
+
     private var palette: (Color, Color) {
         let h = name.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
         return Self.palettes[h % Self.palettes.count]
@@ -235,7 +243,7 @@ struct AvatarView: View {
             if let id = avatarID, let url = ServerConfig.mediaURL(id) {
                 // аватарки маленькие: декодируем сразу в нужный размер (с запасом под @3x) и держим в памяти.
                 // Буквы и цветной фон — только пока фото грузится, под готовой картинкой их нет
-                CachedImage(url: url, maxPixel: min(1024, max(160, size * 3))) { image, _ in
+                CachedImage(url: url, maxPixel: Self.pixelBucket(size), persistKey: id) { image, _ in
                     if let image {
                         Image(uiImage: image).resizable().scaledToFill()
                             .frame(width: size, height: size)
@@ -545,6 +553,7 @@ struct SettingsGroup<Content: View>: View {
 struct ToastView: View {
     let text: String
     @Environment(\.theme) private var theme
+    @State private var shown = false
 
     var body: some View {
         Text(text)
@@ -556,5 +565,10 @@ struct ToastView: View {
             .background(theme.danger.opacity(0.95), in: RoundedRectangle(cornerRadius: 14))
             .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
             .padding(.horizontal, 24)
+            // мягко выезжает сверху с лёгкой пружинкой, а не появляется рывком
+            .offset(y: shown ? 0 : -28)
+            .scaleEffect(shown ? 1 : 0.92, anchor: .top)
+            .opacity(shown ? 1 : 0)
+            .onAppear { withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { shown = true } }
     }
 }

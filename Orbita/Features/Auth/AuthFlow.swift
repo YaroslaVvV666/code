@@ -21,6 +21,9 @@ struct SettingsRestore: Equatable {
 final class AuthFlow: ObservableObject {
     let backend: AuthBackend = LocalAuthBackend()
     private let sessionAccount = "orbita.session"
+    // телефон и имя — в Keychain: переживают удаление приложения, чтобы после переустановки вернуть тот же аккаунт
+    private let sessionPhoneAccount = "orbita.session.phone"
+    private let sessionNameAccount = "orbita.session.name"
 
     @Published var step: FlowStep = .launch { didSet { error = nil } }
     @Published var isLoading = false
@@ -86,9 +89,20 @@ final class AuthFlow: ObservableObject {
 
     private func restoreSession() async {
         try? await Task.sleep(nanoseconds: 700_000_000)          // короткая заставка
-        if let id = Keychain.string(sessionAccount), let record = await backend.user(id: id) {
+        guard let id = Keychain.string(sessionAccount) else { step = .phone; return }
+        // локальная запись об аккаунте стирается при удалении приложения; если её нет, но в Keychain
+        // сохранились id, телефон и токен — пересобираем запись и входим в тот же аккаунт, без «назовите имя»
+        var record = await backend.user(id: id)
+        if record == nil, let phone = Keychain.string(sessionPhoneAccount),
+           Keychain.string(ServerAPI.tokenAccount(for: id)) != nil {
+            record = await backend.adoptAccount(id: id, phone: phone, name: Keychain.string(sessionNameAccount))
+            await backend.pullAccount(phone: phone)
+            record = await backend.user(id: id) ?? record
+        }
+        if let record {
             adopt(record)
             signedInPhone = record.phone
+            persistSession(record)
             if let saved = await backend.loadSettings(phone: record.phone) {
                 deviceSettings = saved
                 restore = SettingsRestore(settings: saved)
@@ -96,8 +110,17 @@ final class AuthFlow: ObservableObject {
             step = .home
         } else {
             Keychain.delete(sessionAccount)
+            Keychain.delete(sessionPhoneAccount)
+            Keychain.delete(sessionNameAccount)
             step = .phone
         }
+    }
+
+    /// Сохранить, кто вошёл: id, телефон и имя — в Keychain, чтобы вернуть аккаунт после переустановки
+    private func persistSession(_ record: UserRecord) {
+        Keychain.setString(record.id, account: sessionAccount)
+        Keychain.setString(record.phone, account: sessionPhoneAccount)
+        if let name = record.name, !name.isEmpty { Keychain.setString(name, account: sessionNameAccount) }
     }
 
     private func adopt(_ record: UserRecord) {
@@ -540,7 +563,7 @@ final class AuthFlow: ObservableObject {
         let phone = result.phone.isEmpty ? "+0" + String(result.userID.filter(\.isHexDigit).prefix(11)) : result.phone
         let record = await completeLogin(result, phone: phone)
         isExistingUser = true
-        Keychain.setString(record.id, account: sessionAccount)
+        persistSession(record)
         inbox = nil
         step = .home
     }
@@ -548,7 +571,10 @@ final class AuthFlow: ObservableObject {
     // MARK: Навигация и служебное
 
     func enterApp() {
-        if let id = userID { Keychain.setString(id, account: sessionAccount) }
+        if let id = userID {
+            persistSession(UserRecord(id: id, phone: signedInPhone ?? phone, name: userName,
+                                      email: linkedEmail, hasTwoFactor: twoFAEnabled, createdAt: Date()))
+        }
         step = .home
     }
 
@@ -570,6 +596,8 @@ final class AuthFlow: ObservableObject {
 
     func logout() {
         Keychain.delete(sessionAccount)
+        Keychain.delete(sessionPhoneAccount)
+        Keychain.delete(sessionNameAccount)
         step = .phone
         phone = ""
         email = ""
