@@ -798,6 +798,7 @@ struct ChatScreen: View {
     @State private var userDragged = false          // пока не листали сами — длинная история не должна уводить экран от низа
     @State private var atBottom = true
     @State private var unreadIDs: Set<String> = []      // входящие, которые ещё не показывались на экране
+    @ObservedObject private var listPrefs = ChatListPrefs.shared
     @State private var viewH: CGFloat = 800
     @State private var downloading = false
     /// Зажатое сообщение хранится в отдельном объекте: его смена перерисовывает только меню, а не весь экран чата со списком
@@ -1760,7 +1761,7 @@ struct ChatScreen: View {
                                         .font(.system(size: 12, weight: .bold)).monospacedDigit()
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 6).frame(minWidth: 20, minHeight: 20)
-                                        .background(theme.accentColor, in: Capsule())
+                                        .background(chatMuted ? theme.textTertiary : theme.accentColor, in: Capsule())
                                         .offset(y: -12)
                                         .transition(.scale.combined(with: .opacity))
                                 }
@@ -1774,6 +1775,13 @@ struct ChatScreen: View {
             }
             .animation(.easeOut(duration: 0.2), value: atBottom)
         }
+    }
+
+    /// Выключены ли уведомления этого чата — тогда счётчик на кнопке «вниз» серый, а не цветной
+    private var chatMuted: Bool {
+        _ = listPrefs.muteTick
+        let summary = session.chats.chats.first { $0.id == model.peer.id }
+        return (summary?.muted ?? false) || (!model.peer.isGroup && listPrefs.isDMMuted(model.peer.id))
     }
 
     /// Какие входящие ещё не прочитаны: всё от первого непрочитанного и ниже

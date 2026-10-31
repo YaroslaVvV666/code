@@ -43,10 +43,7 @@ struct ChatPreviewBody: View {
                 .padding(.horizontal, 12).padding(.vertical, 8)
             }
             .frame(maxHeight: maxHeight)
-            .onChange(of: messages.count) { _, _ in
-                if firstUnread != nil { proxy.scrollTo("strip", anchor: .top) }
-                else if let last = messages.last { proxy.scrollTo(last.key, anchor: .bottom) }
-            }
+            .onChange(of: messages.count) { _, _ in jump(proxy) }
         }
         .environmentObject(previewPlayer)
         .task(id: peer.id) {
@@ -55,6 +52,23 @@ struct ChatPreviewBody: View {
             if let thread { onThread?(thread) }
             messages = thread?.messages ?? []
             loading = false
+        }
+    }
+
+    /// Сразу (без анимации) ставим карточку на ПЕРВОЕ непрочитанное — не на последнее и не внизу.
+    /// Пара повторов с задержкой — чтобы точно сработало после первой компоновки списка.
+    private func jump(_ proxy: ScrollViewProxy) {
+        guard !messages.isEmpty else { return }
+        let hasStrip = firstUnread != nil && messages.contains { $0.id == firstUnread }
+        let target: String
+        let anchor: UnitPoint
+        if hasStrip { target = "strip"; anchor = .top }
+        else if firstUnread != nil, let top = messages.first?.key { target = top; anchor = .top }   // непрочитанных больше, чем в окне — показываем с самого верха
+        else if let last = messages.last { target = last.key; anchor = .bottom }                    // непрочитанного нет — вниз
+        else { return }
+        proxy.scrollTo(target, anchor: anchor)
+        for delay in [0.05, 0.16] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { proxy.scrollTo(target, anchor: anchor) }
         }
     }
 
