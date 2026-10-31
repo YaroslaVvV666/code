@@ -82,6 +82,14 @@
    {
     "id": "spasibo",
     "emoji": "🙏"
+   },
+   {
+    "id": "cry",
+    "emoji": "😭"
+   },
+   {
+    "id": "heartface",
+    "emoji": "💖"
    }
   ]
  }
