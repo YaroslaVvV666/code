@@ -54,6 +54,32 @@ enum EmojiData {
     }
 }
 
+/// Избранные стикеры (локально на устройстве) — как «⭐ Избранное» в Telegram.
+enum FavoriteStickers {
+    private static let key = "orbita.stickers.favorites"
+    private struct Stored: Codable { let id: String; let emoji: String; let mediaID: String?; let animated: Bool; let packID: String? }
+
+    static var all: [Sticker] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let list = try? JSONDecoder().decode([Stored].self, from: data) else { return [] }
+        return list.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
+    }
+
+    static func contains(_ s: Sticker) -> Bool { all.contains { $0.id == s.id } }
+
+    /// Переключает избранное; возвращает, в избранном ли стикер теперь.
+    @discardableResult
+    static func toggle(_ s: Sticker) -> Bool {
+        var list = all
+        let was = list.contains { $0.id == s.id }
+        list.removeAll { $0.id == s.id }
+        if !was { list.insert(s, at: 0) }
+        let stored = list.prefix(60).map { Stored(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
+        UserDefaults.standard.set(try? JSONEncoder().encode(Array(stored)), forKey: key)
+        return !was
+    }
+}
+
 extension String {
     /// Только эмодзи (до трёх штук) — такие сообщения показываются крупно, без «пузыря»
     var isEmojiOnly: Bool {
@@ -154,6 +180,8 @@ struct EmojiStickerPanel: View {
     @State private var category = "smileys"
     @State private var packID: String?
     @State private var recent = EmojiData.recent
+    @State private var favs: [Sticker] = FavoriteStickers.all
+    private let favID = "__fav__"
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -221,6 +249,22 @@ struct EmojiStickerPanel: View {
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
 
+    private func stickerGrid(_ stickers: [Sticker]) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+            ForEach(stickers) { sticker in
+                Button {
+                    Haptics.impact(.light)
+                    onSticker(sticker)
+                } label: {
+                    StickerImage(sticker: sticker, size: 74).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
+    }
+
     private var stickerTab: some View {
         VStack(spacing: 0) {
             if packs.isEmpty {
@@ -230,10 +274,20 @@ struct EmojiStickerPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                let current = packID ?? packs.first?.id
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
+                        if !favs.isEmpty {
+                            Button { packID = favID } label: {
+                                Image(systemName: "star.fill").font(.system(size: 16))
+                                    .foregroundStyle(current == favID ? theme.accentColor : theme.textSecondary)
+                                    .frame(width: 42, height: 38)
+                                    .background(current == favID ? theme.accentColor.opacity(0.14) : Color.clear, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
                         ForEach(packs) { pack in
-                            let selected = (packID ?? packs.first?.id) == pack.id
+                            let selected = current == pack.id
                             Button { packID = pack.id } label: {
                                 Group {
                                     if let icon = pack.stickers.first(where: { $0.id == pack.icon }) ?? pack.stickers.first {
@@ -251,22 +305,16 @@ struct EmojiStickerPanel: View {
                 .frame(height: 42)
 
                 ScrollView {
-                    let pack = packs.first { $0.id == (packID ?? packs.first?.id) } ?? packs[0]
-                    Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
-                        ForEach(pack.stickers) { sticker in
-                            Button {
-                                Haptics.impact(.light)
-                                onSticker(sticker)
-                            } label: {
-                                StickerImage(sticker: sticker, size: 74).frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.plain)
-                        }
+                    if current == favID {
+                        Text(s.t("Избранное", "Favorites")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
+                        stickerGrid(favs)
+                    } else {
+                        let pack = packs.first { $0.id == current } ?? packs[0]
+                        Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
+                        stickerGrid(pack.stickers)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 4)
                     createStickersButton
                 }
             }

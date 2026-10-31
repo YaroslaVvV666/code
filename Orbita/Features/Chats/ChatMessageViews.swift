@@ -1736,52 +1736,166 @@ struct StickerPackSheet: View {
 
     private var s: Strings { Strings(lang: lang) }
 
+    @State private var preview: Sticker?            // нажали на стикер — показать крупно с меню
+    @State private var showCreator = false
+
     var body: some View {
-        VStack(spacing: 14) {
+        ZStack {
             if let pack {
-                Text(pack.pack.title).font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text).padding(.top, 20)
-                Text(s.t("\(pack.pack.stickers.count) стикеров", "\(pack.pack.stickers.count) stickers"))
-                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
-                ScrollView {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
-                        ForEach(pack.pack.stickers) { st in
-                            Button {
-                                guard let onSend else { return }
-                                Haptics.impact(.light); onSend(st); dismiss()
-                            } label: {
-                                StickerImage(sticker: st, size: 74).frame(maxWidth: .infinity)
+                VStack(spacing: 0) {
+                    header(pack)
+                    ScrollView {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                            ForEach(pack.pack.stickers) { st in
+                                Button {
+                                    Haptics.impact(.light)
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { preview = st }
+                                } label: {
+                                    StickerImage(sticker: st, size: 74).frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(.horizontal, 12).padding(.top, 6)
+                        .padding(.bottom, 90)       // под плавающую кнопку
                     }
-                    .padding(.horizontal, 12)
                 }
-                Button { toggle() } label: {
-                    Group {
-                        if busy { ProgressView().tint(.white) }
-                        else {
-                            Text(pack.installed ? s.t("Убрать набор", "Remove pack") : s.t("Добавить набор", "Add pack"))
-                                .font(.system(size: 16, weight: .semibold))
-                        }
-                    }
-                    .foregroundStyle(pack.installed ? theme.danger : Color.white)
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    .background(pack.installed ? AnyShapeStyle(theme.danger.opacity(0.12)) : AnyShapeStyle(theme.accent), in: Capsule())
+                // красивая плавающая кнопка снизу: «Добавить N стикеров» / «Убрать набор»
+                VStack {
+                    Spacer()
+                    addButton(pack)
                 }
-                .buttonStyle(PressStyle()).disabled(busy)
-                .padding(.horizontal, 16).padding(.bottom, 12)
-                .animation(.easeOut(duration: 0.2), value: pack.installed)
             } else if failed {
                 Text(s.t("Не удалось загрузить набор", "Couldn't load the pack"))
                     .font(.system(size: 15)).foregroundStyle(theme.textSecondary).frame(maxHeight: .infinity)
             } else {
                 ProgressView().frame(maxHeight: .infinity)
             }
+
+            if let st = preview {
+                stickerPreview(st)
+            }
         }
         .task {
             do { pack = try await repo.stickerPack(id: packID) } catch { failed = true }
         }
+        .sheet(isPresented: $showCreator) {
+            StickerCreatorSheet(onChanged: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationBackground(theme.sheet)
+        }
     }
+
+    // MARK: Шапка
+
+    private func header(_ pack: CustomStickerPack) -> some View {
+        ZStack {
+            Text(pack.pack.title).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.accentColor)
+                .lineLimit(1).padding(.horizontal, 64)
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(width: 34, height: 34).background(theme.surface, in: Circle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                if pack.mine {
+                    Menu {
+                        Button { showCreator = true } label: { Label(s.t("Изменить набор", "Edit pack"), systemImage: "pencil") }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(width: 34, height: 34).background(theme.surface, in: Circle())
+                    }
+                } else {
+                    Color.clear.frame(width: 34, height: 34)
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 8)
+    }
+
+    /// «Добавить N стикеров» с правильным склонением
+    private func addTitle(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "стикеров" : (m10 == 1 ? "стикер" : (m10 >= 2 && m10 <= 4 ? "стикера" : "стикеров"))
+            return "Добавить \(n) \(word)"
+        }
+        return "Add \(n) sticker\(n == 1 ? "" : "s")"
+    }
+
+    private func addButton(_ pack: CustomStickerPack) -> some View {
+        let n = pack.pack.stickers.count
+        return Button { toggle() } label: {
+            Group {
+                if busy { ProgressView().tint(.white) }
+                else if pack.installed {
+                    Text(s.t("Убрать набор", "Remove pack")).font(.system(size: 17, weight: .semibold))
+                } else {
+                    Text(addTitle(n)).font(.system(size: 17, weight: .semibold))
+                }
+            }
+            .foregroundStyle(pack.installed ? theme.danger : Color.white)
+            .frame(maxWidth: .infinity).frame(height: 52)
+            .background(pack.installed ? AnyShapeStyle(theme.danger.opacity(0.14)) : AnyShapeStyle(theme.accent),
+                        in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        }
+        .buttonStyle(PressStyle()).disabled(busy)
+        .padding(.horizontal, 16).padding(.bottom, 14)
+        .animation(.easeOut(duration: 0.2), value: pack.installed)
+    }
+
+    // MARK: Предпросмотр стикера с меню (как в Telegram)
+
+    private func stickerPreview(_ st: Sticker) -> some View {
+        let fav = FavoriteStickers.contains(st)
+        return ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+                .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { preview = nil } }
+            VStack(spacing: 22) {
+                StickerImage(sticker: st, size: 200)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                VStack(spacing: 0) {
+                    if onSend != nil {
+                        menuRow("arrow.up", s.t("Отправить стикер", "Send sticker")) {
+                            onSend?(st); dismiss()
+                        }
+                        menuDivider
+                    }
+                    menuRow(fav ? "bookmark.slash" : "bookmark",
+                            fav ? s.t("Убрать из избранных", "Remove from favorites") : s.t("Добавить в избранные", "Add to favorites")) {
+                        FavoriteStickers.toggle(st); Haptics.impact(.light)
+                        withAnimation(.easeOut(duration: 0.15)) { preview = nil }
+                    }
+                    if pack?.mine == true {
+                        menuDivider
+                        menuRow("pencil", s.t("Изменить стикер", "Edit sticker")) {
+                            preview = nil; showCreator = true
+                        }
+                    }
+                }
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frame(maxWidth: 300)
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+
+    private func menuRow(_ icon: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: { Haptics.select(); action() }) {
+            HStack(spacing: 16) {
+                Image(systemName: icon).font(.system(size: 18)).frame(width: 24)
+                Text(title).font(.system(size: 17))
+                Spacer()
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 18).frame(height: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var menuDivider: some View { Divider().opacity(0.5).padding(.leading, 56) }
 
     private func toggle() {
         guard let current = pack else { return }
