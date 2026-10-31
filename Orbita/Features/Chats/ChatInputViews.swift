@@ -33,6 +33,8 @@ struct ChatInputBar: View {
     @State private var slideY: CGFloat = 0
     @State private var locked = false
     @State private var zoomBase: CGFloat = 1          // приближение кружка на момент начала жеста
+    @State private var holdStarted: Date?               // когда зажали кнопку записи — чтобы отличить «слишком коротко» от сбоя
+    @State private var cameraLive = false               // камера кружка уже показывает картинку (заглушка гаснет)
     @State private var trashing = false
     @State private var notice: String?
     @State private var lastEditID: String?
@@ -683,6 +685,22 @@ struct ChatInputBar: View {
         .frame(height: 40)
     }
 
+    /// Заглушка в круге, пока камера не дала картинку: размытый кадр последнего кружка (или мягкий градиент)
+    private var circlePlaceholder: some View {
+        ZStack {
+            if let image = CircleRecorder.lastFrame {
+                Image(uiImage: image).resizable().scaledToFill()
+                    .blur(radius: 18).scaleEffect(1.15)
+            } else {
+                LinearGradient(colors: [theme.accentColor.opacity(0.55), .black], startPoint: .top, endPoint: .bottom)
+            }
+            Color.black.opacity(0.18)
+        }
+        .opacity(cameraLive ? 0 : 1)
+        .animation(.easeOut(duration: 0.35), value: cameraLive)
+        .allowsHitTesting(false)
+    }
+
     /// Живое «кружок»-превью ближе к центру экрана; всё за ним размыто
     @ViewBuilder
     private var circleOverlay: some View {
@@ -692,6 +710,7 @@ struct ChatInputBar: View {
             ZStack {
                 CameraPreview(session: circle.session, mirrored: circle.isFront)   // фронталка — зеркало, как и в записи
                     .frame(width: side, height: side)
+                    .overlay { circlePlaceholder }          // пока камера включается — размытый кадр прошлого кружка
                     .clipShape(Circle())
                     .overlay {
                         // кольцо-таймер: заполняется за 60 секунд и «дышит» — запись на замке выглядит живой
@@ -739,6 +758,11 @@ struct ChatInputBar: View {
             // центр круга — на ~44% высоты экрана, независимо от высоты поля ввода
             .offset(y: screenH * 0.44 - side / 2 - (barTop > 0 ? barTop : screenH - 90))
             .transition(.scale(scale: 0.6).combined(with: .opacity))
+            .onChange(of: circle.ready) { _, ready in
+                // камера запустилась — первые кадры приходят через мгновение, тогда и убираем заглушку
+                if ready { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { cameraLive = true } }
+                else { cameraLive = false }
+            }
         }
     }
 
@@ -753,25 +777,30 @@ struct ChatInputBar: View {
         Haptics.impact(.medium)
         if emojiOpen { emojiOpen = false; controller.resetInputPanel() }
         controller.unfocus()
+        holdStarted = Date()
         if cameraMode {
+            // кружок появляется сразу — с размытым кадром прошлого кружка, пока камера включается параллельно
+            cameraLive = circle.ready
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { active = .circle }
             Task {
                 let ok = await circle.prepare()
                 guard ok else {
                     holding = false
+                    withAnimation(.easeOut(duration: 0.2)) { active = .none }
                     flash(circle.failure == "denied" ? s.cameraDenied
                           : s.t("Не удалось включить камеру", "Couldn't start the camera"))
                     return
                 }
-                guard holding || locked else { circle.shutdown(); flash(s.t("Удерживайте кнопку для записи", "Hold the button to record")); return }
+                // отпустили, пока камера включалась — «слишком короткая запись» уже показали в finishRecording
+                guard active == .circle, holding || locked else { circle.shutdown(); return }
                 circle.setZoom(1)                      // каждый кружок начинаем без приближения
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { active = .circle }
                 circle.startRecording()
             }
         } else {
             Task {
                 let ok = await voice.start()
                 guard ok else { holding = false; flash(s.micDenied); return }
-                guard holding || locked else { voice.cancel(); return }
+                guard holding || locked else { voice.cancel(); flash(s.tooShort); return }
                 active = .voice
             }
         }
@@ -809,17 +838,17 @@ struct ChatInputBar: View {
                 flash(s.tooShort)
             }
         case .circle:
+            let held = holdStarted.map { Date().timeIntervalSince($0) } ?? 0
             Task {
                 let file = await circle.stopRecording()
                 circle.shutdown()
                 guard let file else {
                     if !cancelled {
-                        if circle.lastErrorCode == -11805 {
-                            // нет данных: либо запись была слишком короткой, либо камера/микрофон заняты
-                            flash(s.tooShort + " (-11805)")
+                        // коротко нажали (или «нет данных» -11805) — это не сбой, а слишком короткая запись
+                        if held < 1.5 || circle.lastErrorCode == -11805 {
+                            flash(s.tooShort)
                         } else {
-                            let code = circle.lastErrorCode.map { " (\($0))" } ?? ""
-                            flash(s.t("Видео не записалось, попробуйте ещё раз", "Recording failed, try again") + code)
+                            flash(s.t("Видео не записалось, попробуйте ещё раз", "Recording failed, try again"))
                         }
                     }
                     return
@@ -832,6 +861,7 @@ struct ChatInputBar: View {
                     return
                 }
                 Haptics.notify(.success)
+                CircleRecorder.rememberFrame(info.data)         // в следующий раз — размытым, пока камера включается
                 model.sendCircle(url: file, thumb: info.data, duration: info.duration)
                 onSent()
             }

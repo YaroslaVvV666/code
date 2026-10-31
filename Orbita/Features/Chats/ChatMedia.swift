@@ -292,6 +292,17 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private var finishing: CheckedContinuation<URL?, Never>?
     nonisolated static let maxDuration: TimeInterval = 60
 
+    /// Кадр последнего записанного кружка: размытым показываем в круге, пока камера включается (вместо пустоты)
+    nonisolated static let lastFrameURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("last-circle.jpg")
+    static var lastFrame: UIImage? = UIImage(contentsOfFile: CircleRecorder.lastFrameURL.path)
+    static func rememberFrame(_ jpeg: Data) {
+        guard !jpeg.isEmpty, let image = UIImage(data: jpeg) else { return }
+        lastFrame = image
+        let url = lastFrameURL
+        Task.detached(priority: .utility) { try? jpeg.write(to: url, options: .atomic) }
+    }
+
     /// Разрешения и подготовка фронтальной камеры
     func prepare() async -> Bool {
         failure = nil
