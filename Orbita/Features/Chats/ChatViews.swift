@@ -773,7 +773,10 @@ struct ChatScreen: View {
     @StateObject private var model: ChatModel
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.theme) private var theme
+    @Environment(\.theme) private var baseTheme
+    @ObservedObject private var appearance = ChatAppearanceStore.shared
+    /// Тема этого чата: свой цвет моих сообщений, если выбран в «Обоях и цвете»
+    private var theme: Theme { appearance.theme(baseTheme, for: route.peer.id) }
     @Environment(\.lang) private var lang
     @Environment(\.scenePhase) private var scenePhase
 
@@ -843,12 +846,13 @@ struct ChatScreen: View {
 
     var body: some View {
         chatSheets(chatLifecycle(chatChrome(chatMain)))
+            .environment(\.theme, theme)
     }
 
     /// Сама переписка: список, шапка, поле ввода, меню сообщения
     private var chatMain: some View {
         ZStack {
-            SpaceBackground(isDark: theme.dark, showStars: false).ignoresSafeArea()
+            ChatWallpaperView(chatID: route.peer.id)
             ActionScrollLock(state: actionState) { messagesList }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 6) {

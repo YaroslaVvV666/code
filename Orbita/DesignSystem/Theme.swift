@@ -6,6 +6,8 @@ import SwiftUI
 struct Theme {
     let dark: Bool
     var accentIndex: Int = 0
+    /// Свой цвет акцента (оформление отдельного чата: цвет моих сообщений); nil — из палитры по accentIndex
+    var customAccent: ThemeRGB? = nil
 
     static let accents: [(r: Double, g: Double, b: Double)] = [
         (0.30, 0.46, 0.92),     // синий
@@ -22,7 +24,8 @@ struct Theme {
     }
 
     private var base: (r: Double, g: Double, b: Double) {
-        Self.accents[min(max(accentIndex, 0), Self.accents.count - 1)]
+        if let c = customAccent { return (c.r, c.g, c.b) }
+        return Self.accents[min(max(accentIndex, 0), Self.accents.count - 1)]
     }
 
     private func shade(_ delta: Double) -> Color {
@@ -65,6 +68,24 @@ struct Theme {
     var danger: Color { Color(red: 0.90, green: 0.36, blue: 0.38) }
     var like: Color { Color(red: 0.92, green: 0.30, blue: 0.40) }
     var glow: Double { dark ? 0.28 : 0.22 }
+}
+
+/// Цвет в долях 0…1 (хранится в настройках чата)
+struct ThemeRGB: Codable, Equatable, Hashable {
+    var r: Double
+    var g: Double
+    var b: Double
+    var color: Color { Color(red: r, green: g, blue: b) }
+}
+
+extension Theme {
+    /// Та же тема, но с другим акцентом
+    func withAccent(_ rgb: ThemeRGB?) -> Theme {
+        guard let rgb else { return self }
+        var t = self
+        t.customAccent = rgb
+        return t
+    }
 }
 
 private struct ThemeKey: EnvironmentKey { static let defaultValue = Theme(dark: true) }

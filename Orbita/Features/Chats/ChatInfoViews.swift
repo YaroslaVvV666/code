@@ -48,6 +48,7 @@ struct ChatInfoView: View {
     @State private var notice: String?
     @State private var showTTLPicker = false            // «Другое…» — выбор 1–30 дней
     @State private var ttlDays = 1
+    @State private var showAppearance = false           // «Обои и цвет» этого чата
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
     // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
@@ -96,6 +97,7 @@ struct ChatInfoView: View {
                     headerBlock
                     actionRow
                     dmRows
+                    appearanceRow
                     infoCard
                     if !isGroup { CommonChatsCard(userID: model.peer.id) }
                     if isGroup, let group, group.isAdmin { adminCard(group) }
@@ -444,6 +446,35 @@ struct ChatInfoView: View {
                 }
             }
             .padding(.horizontal, 16)
+        }
+    }
+
+    /// «Обои и цвет» — свой фон и цвет моих сообщений в этом чате (только у меня)
+    private var appearanceRow: some View {
+        Button { showAppearance = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "paintbrush.fill").font(.system(size: 17)).frame(width: 24)
+                Text(s.t("Обои и цвет", "Wallpaper & colour")).font(.system(size: 17))
+                Spacer()
+                ZStack {
+                    ChatWallpaperView(chatID: model.peer.id)
+                    Circle().fill(theme.accent).frame(width: 12, height: 12)
+                }
+                .frame(width: 26, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+            }
+            .foregroundStyle(theme.accentColor)
+            .padding(.horizontal, 16).frame(height: 52)
+            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .sheet(isPresented: $showAppearance) {
+            ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
         }
     }
 

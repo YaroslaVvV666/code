@@ -9,7 +9,9 @@ struct ChatPreviewBody: View {
     var maxHeight: CGFloat? = nil
     var onThread: ((ChatThread) -> Void)? = nil
 
-    @Environment(\.theme) private var theme
+    @Environment(\.theme) private var baseTheme
+    @ObservedObject private var appearance = ChatAppearanceStore.shared
+    private var theme: Theme { appearance.theme(baseTheme, for: peer.id) }
     @Environment(\.lang) private var lang
     @State private var messages: [ChatMessage] = []
     @State private var firstUnread: String?
@@ -45,6 +47,11 @@ struct ChatPreviewBody: View {
             .frame(maxHeight: maxHeight)
             .onChange(of: messages.count) { _, _ in jump(proxy) }
         }
+        .background {
+            // свои обои чата — и в предпросмотре
+            if appearance.appearance(peer.id).wallpaper != "default" { ChatWallpaperView(chatID: peer.id) }
+        }
+        .environment(\.theme, theme)
         .environmentObject(previewPlayer)
         .task(id: peer.id) {
             let thread = try? await repo.thread(peerID: peer.id, limit: limit, peek: true)
