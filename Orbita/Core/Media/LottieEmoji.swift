@@ -366,15 +366,19 @@ actor LottieEmojiStore {
         let pixels = await MainActor.run { Int((EmojiFrames.pointSize * UIScreen.main.scale).rounded(.up)) }
         var keep: Set<URL> = []
         var toRender: [(emoji: String, source: Data)] = []
+        // Снимок покоя строится на ГЛАВНОМ потоке (LottieAnimationView + layer.render) — это дорого.
+        // Заранее готовим только «ходовые» реакции (их видно первыми), по одному, уступая кадр между каждым,
+        // чтобы на первом запуске интерфейс не замирал. Остальные снимки строятся лениво при первом показе эмодзи.
+        let eager = Set(AnimatedEmoji.popular)
         for emoji in AnimatedEmoji.all {
             guard let source = await data(for: emoji) else { continue }
             keep.insert(EmojiFrames.url(emoji, source: source, pixels: pixels))
             if !EmojiFrames.shared.load(emoji, source: source, pixels: pixels) { toRender.append((emoji: emoji, source: source)) }
-            if let anim = await animation(for: emoji) {
-                await MainActor.run {
-                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: true)       // уже есть — вернётся сразу
-                    _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: false)
-                }
+            if eager.contains(emoji), let anim = await animation(for: emoji) {
+                await MainActor.run { _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: true) }
+                await Task.yield()
+                await MainActor.run { _ = LottieSnapshots.shared.prepare(emoji, anim, atEnd: false) }
+                await Task.yield()
             }
             await Task.yield()
         }
