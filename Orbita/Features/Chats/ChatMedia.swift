@@ -406,10 +406,28 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         }
     }
 
-    /// Переключает фронтальную и основную камеру (можно и во время записи)
+    /// Куски записи: при смене камеры во время записи текущий кусок закрывается, камера меняется и запись
+    /// продолжается новым куском; в конце куски склеиваются в один кружок (см. merge). Раньше смена камеры
+    /// убирала видеовход посреди записи — AVFoundation закрывала файл, и кружок обрывался на переключении.
+    private var segments: [URL] = []
+    private var flipping = false
+    private var flipTarget = true
+
+    /// Переключает фронтальную и основную камеру (можно и во время записи — кружок не обрывается)
     func flipCamera() {
-        let session = session, output = output
         let wantFront = !isFront
+        guard !flipping else { return }
+        if startRequested, output.isRecording {
+            flipping = true
+            flipTarget = wantFront
+            output.stopRecording()            // кусок закроется → в didFinish переключим камеру и продолжим
+            return
+        }
+        applyFlip(front: wantFront) {}
+    }
+
+    private func applyFlip(front wantFront: Bool, then done: @escaping @MainActor () -> Void) {
+        let session = session, output = output
         queue.async { [weak self] in
             session.beginConfiguration()
             if let old = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: { $0.device.hasMediaType(.video) }) {
@@ -435,13 +453,105 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                 device.unlockForConfiguration()
             }
             session.commitConfiguration()
-            Task { @MainActor in self?.isFront = wantFront; self?.zoom = 1 }
+            Task { @MainActor in
+                self?.isFront = wantFront; self?.zoom = 1
+                done()
+            }
         }
+    }
+
+    /// После смены камеры — следующий кусок записи (или сборка, если за это время нажали «стоп»)
+    private func continueAfterFlip() {
+        guard startRequested else { return }
+        if finishing != nil || stopWhenStarted {
+            stopWhenStarted = false
+            finalize(segments)
+            segments = []
+            return
+        }
+        let remaining = Self.maxDuration - (startedAt.map { Date().timeIntervalSince($0) } ?? 0)
+        guard remaining > 0.7 else { finalize(segments); segments = []; return }
+        output.maxRecordedDuration = CMTime(seconds: remaining, preferredTimescale: 600)
+        applyMirror()
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+        output.startRecording(to: file, recordingDelegate: self)
+    }
+
+    /// Готовый результат: один кусок — как есть, несколько — склеиваем
+    private func finalize(_ parts: [URL]) {
+        if parts.count <= 1 { complete(parts.first); return }
+        Task { [weak self] in
+            let merged = await CircleRecorder.merge(parts)
+            self?.complete(merged)
+        }
+    }
+
+    private func complete(_ url: URL?) {
+        isRecording = false
+        gestures.active = false
+        startRequested = false
+        stopWhenStarted = false
+        if let finishing {
+            finishing.resume(returning: url)
+            self.finishing = nil
+        } else if let url {
+            autoFinished = url
+        }
+    }
+
+    /// Склейка кусков в один ролик. У кусков с разных камер разные размер и поворот, поэтому каждый
+    /// вписывается в общий кадр своей трансформацией (по размеру первого куска).
+    nonisolated static func merge(_ parts: [URL]) async -> URL? {
+        let comp = AVMutableComposition()
+        guard let vTrack = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return parts.first }
+        let aTrack = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: vTrack)
+        var render = CGSize.zero
+        var cursor = CMTime.zero
+        for url in parts {
+            let asset = AVURLAsset(url: url)
+            guard let src = try? await asset.loadTracks(withMediaType: .video).first,
+                  let duration = try? await asset.load(.duration), duration.seconds > 0.05,
+                  let natural = try? await src.load(.naturalSize),
+                  let t = try? await src.load(.preferredTransform) else { continue }
+            let range = CMTimeRange(start: .zero, duration: duration)
+            do { try vTrack.insertTimeRange(range, of: src, at: cursor) } catch { continue }
+            if let a = try? await asset.loadTracks(withMediaType: .audio).first {
+                try? aTrack?.insertTimeRange(range, of: a, at: cursor)
+            }
+            let rect = CGRect(origin: .zero, size: natural).applying(t)
+            let oriented = CGSize(width: abs(rect.width), height: abs(rect.height))
+            if render == .zero { render = oriented }
+            let k = max(render.width / max(oriented.width, 1), render.height / max(oriented.height, 1))
+            let fit = t.concatenating(CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+                .concatenating(CGAffineTransform(scaleX: k, y: k))
+                .concatenating(CGAffineTransform(translationX: (render.width - oriented.width * k) / 2,
+                                                 y: (render.height - oriented.height * k) / 2))
+            layer.setTransform(fit, at: cursor)
+            cursor = CMTimeAdd(cursor, duration)
+        }
+        guard cursor.seconds > 0.1, render.width > 1, render.height > 1 else { return parts.first }
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: cursor)
+        instruction.layerInstructions = [layer]
+        let video = AVMutableVideoComposition()
+        video.renderSize = CGSize(width: (render.width / 2).rounded(.down) * 2, height: (render.height / 2).rounded(.down) * 2)
+        video.frameDuration = CMTime(value: 1, timescale: 30)
+        video.instructions = [instruction]
+        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else { return parts.first }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
+        export.outputURL = out
+        export.outputFileType = .mov
+        export.videoComposition = video
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in export.exportAsynchronously { c.resume() } }
+        guard export.status == .completed else { return parts.first }
+        for p in parts { try? FileManager.default.removeItem(at: p) }
+        return out
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         Task { @MainActor in
-            self.startedAt = Date()
+            if self.startedAt == nil { self.startedAt = Date() }     // часы — от первого куска (смена камеры не сбрасывает)
             if self.stopWhenStarted { self.stopWhenStarted = false; self.scheduleStop() }
         }
     }
@@ -509,6 +619,9 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         guard ready, !output.isRecording, !startRequested else { return }
         attempt = 0
         autoFinished = nil
+        segments = []
+        flipping = false
+        output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
         startRequested = true
         stopWhenStarted = false
         startedAt = nil
@@ -536,6 +649,9 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     }
 
     func shutdown() {
+        for p in segments { try? FileManager.default.removeItem(at: p) }
+        segments = []
+        flipping = false
         if output.isRecording { output.stopRecording() }
         startedAt = nil
         let session = session
@@ -568,24 +684,24 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         let usable = error == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) == true || size > 4096
         let code = nsError?.code
         Task { @MainActor in
+            if self.flipping {
+                // кусок закрыт ради смены камеры: сохраняем его, меняем камеру и пишем дальше
+                self.flipping = false
+                if usable { self.segments.append(outputFileURL) }
+                self.applyFlip(front: self.flipTarget) { [weak self] in self?.continueAfterFlip() }
+                return
+            }
             // запись оборвалась сразу после старта, а человек ещё держит кнопку — тихо пробуем снова:
             // сначала с обновлённым звуком, затем без микрофона (лучше видео без звука, чем ничего)
-            if !usable, self.finishing == nil, self.startRequested, self.attempt < 2,
+            if !usable, self.segments.isEmpty, self.finishing == nil, self.startRequested, self.attempt < 2,
                Date().timeIntervalSince(self.requestedAt ?? Date()) < 3 {
                 self.retryRecording()
                 return
             }
-            self.lastErrorCode = usable ? nil : code
-            self.isRecording = false
-            self.gestures.active = false
-            self.startRequested = false
-            self.stopWhenStarted = false
-            if let finishing = self.finishing {
-                finishing.resume(returning: usable ? outputFileURL : nil)
-                self.finishing = nil
-            } else if usable {
-                self.autoFinished = outputFileURL
-            }
+            let parts = self.segments + (usable ? [outputFileURL] : [])
+            self.segments = []
+            self.lastErrorCode = parts.isEmpty ? code : nil
+            self.finalize(parts)
         }
     }
 
