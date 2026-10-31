@@ -1738,6 +1738,7 @@ struct StickerPackSheet: View {
 
     @State private var preview: Sticker?            // нажали на стикер — показать крупно с меню
     @State private var showCreator = false
+    @State private var editSticker: Sticker?        // «Изменить стикер» — полноэкранный редактор
 
     var body: some View {
         ZStack {
@@ -1783,6 +1784,13 @@ struct StickerPackSheet: View {
             StickerCreatorSheet(onChanged: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } })
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
+        }
+        .fullScreenCover(item: $editSticker) { st in
+            StickerEditorView(sticker: st, packID: packID, repo: repo,
+                              packs: pack.map { [$0.pack] } ?? [],
+                              onSaved: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } },
+                              onClose: { editSticker = nil })
+                .environment(\.theme, theme).environment(\.lang, lang)
         }
     }
 
@@ -1867,10 +1875,10 @@ struct StickerPackSheet: View {
                         FavoriteStickers.toggle(st); Haptics.impact(.light)
                         withAnimation(.easeOut(duration: 0.15)) { preview = nil }
                     }
-                    if pack?.mine == true {
+                    if pack?.mine == true, !st.animated {
                         menuDivider
                         menuRow("pencil", s.t("Изменить стикер", "Edit sticker")) {
-                            preview = nil; showCreator = true
+                            preview = nil; editSticker = st
                         }
                     }
                 }
