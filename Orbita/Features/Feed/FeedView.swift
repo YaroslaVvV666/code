@@ -525,7 +525,7 @@ struct PostCard: View {
             }
 
             if !post.media.isEmpty {
-                SensitiveGate(sensitive: post.sensitive) {
+                SensitiveGate(sensitive: post.sensitive, id: post.id) {
                     MediaGrid(media: post.media, autoplay: autoplay) { viewer = ViewerRoute(index: $0) }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))

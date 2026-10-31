@@ -1012,7 +1012,7 @@ struct ReelPage: View {
 
     @ViewBuilder
     private var videoLayer: some View {
-        SensitiveGate(sensitive: post.sensitive) {
+        SensitiveGate(sensitive: post.sensitive, id: post.id) {
             ZStack {
                 if let v = video {
                     if !ready {
