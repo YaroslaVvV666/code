@@ -245,7 +245,7 @@ struct ReplyRef: Equatable {
 
 /// Вложение сообщения: фото, видео, кружок, голосовое, файл или стикер
 struct ChatAttachment: Identifiable, Equatable {
-    enum Kind: String { case photo, video, circle, voice, file, sticker, audio }
+    enum Kind: String { case photo, video, circle, voice, file, sticker, audio, location }
 
     let kind: Kind
     var mediaID: String? = nil
@@ -263,6 +263,7 @@ struct ChatAttachment: Identifiable, Equatable {
     var localPreview: Data? = nil           // миниатюра, пока вложение загружается
     var stickerPack: String? = nil          // свой стикер: из какого набора (нажатие — «Добавить набор»)
     var gif = false                         // видео без звука, отправленное как GIF: крутится по кругу
+    var geo: GeoPoint? = nil                // геопозиция: точка или трансляция
 
     var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? name ?? "local") }
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
@@ -368,6 +369,7 @@ struct ChatMessage: Identifiable, Equatable {
         case .sticker: return "Стикер"
         case .file: return first.name ?? "Файл"
         case .audio: return first.title ?? first.name ?? "Музыка"
+        case .location: return first.geo?.isLive == true ? "📍 Трансляция геопозиции" : "📍 " + (first.geo?.title ?? "Геопозиция")
         }
     }
 }
@@ -419,6 +421,22 @@ struct StickerPack: Identifiable, Equatable {
 }
 
 /// Что загрузить на сервер перед отправкой
+/// Геопозиция во вложении. Для трансляции — последняя присланная точка и до какого времени идёт
+struct GeoPoint: Equatable {
+    var lat: Double
+    var lon: Double
+    var accuracy: Double? = nil
+    var heading: Double? = nil
+    var title: String? = nil
+    var liveUntil: Date? = nil
+    var updatedAt: Date? = nil
+    var stopped = false
+
+    var isLive: Bool { liveUntil != nil }
+    /// Трансляция идёт прямо сейчас
+    func active(at now: Date = Date()) -> Bool { !stopped && (liveUntil.map { $0 > now } ?? false) }
+}
+
 enum OutgoingMedia {
     case prepared(PreparedMedia)                                  // фото или видео
     case circle(url: URL, thumb: Data, duration: Double)
@@ -426,6 +444,8 @@ enum OutgoingMedia {
     case file(url: URL, name: String, mime: String)
     case audio(url: URL, name: String, title: String, artist: String, duration: Double, cover: Data?)
     case sticker(String)
+    /// live — 0 (просто точка) или длительность трансляции в секундах (900 / 3600 / 28800)
+    case location(GeoPoint, live: Int)
 }
 
 /// Загруженное вложение, готовое к отправке
@@ -439,9 +459,19 @@ struct OutgoingAttachment {
     var artist: String? = nil
     var thumb: String? = nil
     var gif = false
+    var geo: GeoPoint? = nil
+    var live = 0
 
     var json: [String: Any] {
         var d: [String: Any] = ["type": type]
+        if let geo {
+            d["lat"] = geo.lat
+            d["lon"] = geo.lon
+            if let a = geo.accuracy { d["acc"] = a }
+            if let h = geo.heading { d["heading"] = h }
+            if let t = geo.title { d["title"] = t }
+            if live > 0 { d["live"] = live }
+        }
         if let mediaID { d["media_id"] = mediaID }
         if let name { d["name"] = name }
         if let sticker { d["sticker"] = sticker }
@@ -477,6 +507,9 @@ protocol MessengerRepository: Sendable {
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
               replyTo: String?, silent: Bool) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
+    /// Трансляция геопозиции: новая точка / остановить
+    func updateLiveLocation(messageID: String, point: GeoPoint) async throws
+    func stopLiveLocation(messageID: String) async throws
     func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage
     func delete(messageID: String, forEveryone: Bool) async throws
     func typing(peerID: String, action: String) async
@@ -619,13 +652,27 @@ private struct AttachmentDTO: Decodable {
     let artist: String?
     let pack: String?
     let gif: Bool?
+    let lat: Double?
+    let lon: Double?
+    let acc: Double?
+    let heading: Double?
+    let liveUntil: Double?
+    let updatedAt: Double?
+    let stopped: Bool?
 
     var model: ChatAttachment? {
         guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
+        var geo: GeoPoint?
+        if kind == .location {
+            guard let lat, let lon else { return nil }
+            geo = GeoPoint(lat: lat, lon: lon, accuracy: acc, heading: heading, title: title,
+                           liveUntil: liveUntil.map { Date(timeIntervalSince1970: $0) },
+                           updatedAt: updatedAt.map { Date(timeIntervalSince1970: $0) }, stopped: stopped ?? false)
+        }
         return ChatAttachment(kind: kind, mediaID: mediaId, thumbID: thumb, width: width ?? 0, height: height ?? 0,
                               duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
-                              waveform: waveform ?? [], sticker: sticker, title: title, artist: artist,
-                              stickerPack: pack, gif: gif ?? false)
+                              waveform: waveform ?? [], sticker: sticker, title: kind == .location ? nil : title, artist: artist,
+                              stickerPack: pack, gif: gif ?? false, geo: geo)
     }
 }
 
@@ -1080,7 +1127,21 @@ struct RemoteMessengerRepository: MessengerRepository {
 
         case .sticker(let id):
             return OutgoingAttachment(type: "sticker", sticker: id)
+
+        case .location(let geo, let live):
+            return OutgoingAttachment(type: "location", geo: geo, live: live)
         }
+    }
+
+    func updateLiveLocation(messageID: String, point: GeoPoint) async throws {
+        var body: [String: Any] = ["lat": point.lat, "lon": point.lon]
+        if let a = point.accuracy { body["acc"] = a }
+        if let h = point.heading { body["heading"] = h }
+        _ = try await api.request("PUT", "/v1/live-location/\(messageID)", body: ServerAPI.json(body))
+    }
+
+    func stopLiveLocation(messageID: String) async throws {
+        _ = try await api.request("POST", "/v1/live-location/\(messageID)/stop")
     }
 
     func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage {

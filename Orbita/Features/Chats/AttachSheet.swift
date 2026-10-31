@@ -10,6 +10,7 @@ struct AttachSheet: View {
     var onAssets: ([PHAsset]) -> Void
     var onFiles: () -> Void
     var onPoll: () -> Void
+    var onLocation: () -> Void = {}
     var onPhoto: (Data) -> Void = { _ in }
     var onVideo: (URL) -> Void = { _ in }
     var onSystemPicker: () -> Void
@@ -179,6 +180,7 @@ struct AttachSheet: View {
             HStack(spacing: 0) {
                 tab("photo.on.rectangle.fill", s.t("Галерея", "Gallery"), on: true) { }
                 tab("doc.fill", s.attachFile, on: false) { dismiss(); onFiles() }
+                tab("location.fill", s.t("Геопозиция", "Location"), on: false) { dismiss(); onLocation() }
                 if canPoll { tab("chart.bar.fill", s.t("Опрос", "Poll"), on: false) { dismiss(); onPoll() } }
             }
             .padding(6)

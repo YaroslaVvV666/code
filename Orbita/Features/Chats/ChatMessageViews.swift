@@ -615,7 +615,7 @@ struct MessageRow: View {
             }
 
             ForEach(message.attachments.filter { $0.kind == .voice || $0.kind == .file || $0.kind == .circle
-                                                  || $0.kind == .sticker || $0.kind == .audio }) { a in
+                                                  || $0.kind == .sticker || $0.kind == .audio || $0.kind == .location }) { a in
                 Group {
                     switch a.kind {
                     case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
@@ -627,6 +627,11 @@ struct MessageRow: View {
                             FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onOpenFile(a) } }
                         }
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
+                    case .location:
+                        if let geo = a.geo {
+                            LocationBlock(geo: geo, messageID: message.id, mine: mine, pending: message.isPending)
+                                .allowsHitTesting(!blocked)
+                        }
                     default: StickerImage(sticker: a.asSticker, size: 120)
                     }
                 }

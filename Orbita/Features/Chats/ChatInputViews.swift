@@ -26,6 +26,7 @@ struct ChatInputBar: View {
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var showAttach = false
+    @State private var showLocation = false             // «Геопозиция» из скрепки: точка или трансляция
     @State private var emojiOpen = false
     @State private var holding = false
     @State private var active: Active = .none
@@ -152,11 +153,18 @@ struct ChatInputBar: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
         }
+        .sheet(isPresented: $showLocation) {
+            LocationShareSheet { point, live in model.sendLocation(point, live: live) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
         .sheet(isPresented: $showAttach) {
             AttachSheet(canPoll: !model.peer.isChannel || model.group?.isAdmin == true,
                         onAssets: { addAssets($0) },
                         onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
                         onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
+                        onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
                         onPhoto: { addPhoto($0) },
                         onVideo: { addVideoFile($0) },
                         onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true } })
@@ -282,6 +290,7 @@ struct ChatInputBar: View {
         case .sticker: return s.stickerLabel
         case .file: return a.name ?? s.fileLabel
         case .audio: return a.displayTitle
+        case .location: return a.geo?.isLive == true ? s.t("📍 Трансляция геопозиции", "📍 Live location") : s.t("📍 Геопозиция", "📍 Location")
         }
     }
 

@@ -67,6 +67,7 @@ final class AppSession: ObservableObject {
         let ex = extras
         BookmarkStore.onChange = { id, saved in Task { await ex.setSaved(id: id, saved: saved) } }
         reportListening()
+        LiveLocationManager.shared.attach(repo: messengerRepo, userID: serverID)    // продолжить трансляции геопозиции после перезапуска
     }
 
     /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает

@@ -862,6 +862,7 @@ struct ChatScreen: View {
                         requestsBar
                         scheduledBar
                         pinnedBar
+                        LiveLocationBar(chatID: route.peer.id)
                         digestBar
                         NowPlayingBar { showPlayer = true }
                         VoiceNowBar()

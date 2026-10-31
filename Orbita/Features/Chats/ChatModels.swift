@@ -509,7 +509,10 @@ final class ChatModel: ObservableObject {
         do {
             var uploaded: [OutgoingAttachment] = []
             for m in item.media {
-                if case .sticker = m {} else { ping(Self.action(for: m)) }
+                switch m {
+                case .sticker, .location: break
+                default: ping(Self.action(for: m))
+                }
                 uploaded.append(try await repo.upload(m))
             }
             var sent = try await repo.send(peerID: peerID, text: item.text, entities: item.entities,
@@ -554,7 +557,7 @@ final class ChatModel: ObservableObject {
         case .circle: return "video"
         case .voice: return "voice"
         case .file, .audio: return "file"
-        case .sticker: return "typing"
+        case .sticker, .location: return "typing"
         }
     }
 
@@ -564,6 +567,21 @@ final class ChatModel: ObservableObject {
                           placeholders: [ChatAttachment(kind: .sticker, mediaID: sticker.mediaID,
                                                         mime: sticker.animated ? "video/mp4" : nil, sticker: sticker.id,
                                                         stickerPack: sticker.packID)])
+        }
+    }
+
+    /// Геопозиция: точка (live = 0) или трансляция на live секунд. Трансляцию после отправки ведёт LiveLocationManager
+    func sendLocation(_ point: GeoPoint, live: Int) {
+        Task {
+            var shown = point
+            if live > 0 { shown.liveUntil = Date().addingTimeInterval(TimeInterval(live)) }
+            let before = Set(messages.map(\.id))
+            let ok = await deliver(text: "", entities: [], media: [.location(point, live: live)],
+                                   placeholders: [ChatAttachment(kind: .location, geo: shown)])
+            guard ok, live > 0,
+                  let sent = messages.last(where: { $0.mine && !before.contains($0.id) && $0.attachments.contains { $0.kind == .location } }),
+                  let until = sent.attachments.first(where: { $0.kind == .location })?.geo?.liveUntil else { return }
+            LiveLocationManager.shared.start(messageID: sent.id, chatID: peerID, until: until, repo: repo)
         }
     }
 

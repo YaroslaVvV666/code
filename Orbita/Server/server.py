@@ -4622,6 +4622,42 @@ def get_sticker(req, me, pack, name):
 ATT_KINDS = {"photo": "image", "video": "video", "circle": "video", "voice": "audio", "audio": "audio", "file": "file"}
 
 
+LIVE_PERIODS = {900, 3600, 8 * 3600}          # трансляция геопозиции: 15 минут, час, 8 часов
+
+
+def clean_coords(a):
+    try:
+        lat, lon = float(a.get("lat")), float(a.get("lon"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    out = {"lat": round(lat, 6), "lon": round(lon, 6)}
+    for key, hi in (("acc", 5000), ("heading", 360)):
+        v = a.get(key)
+        if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0:
+            out[key] = round(min(float(v), hi), 1)
+    return out
+
+
+def clean_location(a):
+    """Геопозиция: точка (и место) или трансляция на 15 мин / 1 ч / 8 ч"""
+    item = clean_coords(a)
+    if not item:
+        return None
+    item["type"] = "location"
+    title = clean_line(a.get("title"), 120)
+    if title:
+        item["title"] = title
+    try:
+        live = int(a.get("live") or 0)
+    except (TypeError, ValueError):
+        live = 0
+    if live in LIVE_PERIODS:
+        item["live_until"] = round(time.time() + live, 1)
+    return item
+
+
 def clean_attachments(raw, uid):
     """Вложения сообщения. Размеры и тип берём из записи о файле на сервере, а не от клиента."""
     out = []
@@ -4639,6 +4675,11 @@ def clean_attachments(raw, uid):
                 item = user_sticker_attachment(sid[2:])
                 if item:
                     out.append(item)
+            continue
+        if t == "location":
+            item = clean_location(a)
+            if item:
+                out.append(item)
             continue
         kind = ATT_KINDS.get(t)
         if not kind:
@@ -4666,6 +4707,95 @@ def clean_attachments(raw, uid):
     return out
 
 
+DB.execute("CREATE TABLE IF NOT EXISTS live_locations(message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+           "chat TEXT NOT NULL, pos_enc BLOB NOT NULL, updated_at REAL NOT NULL, live_until REAL NOT NULL, "
+           "stopped INTEGER NOT NULL DEFAULT 0)")
+LIVE_COL = "live_locations.pos"
+
+
+def with_live(atts, mid):
+    """Подставляет в трансляцию геопозиции последнюю присланную точку (и признак остановки)"""
+    if not any(a.get("type") == "location" and a.get("live_until") for a in atts):
+        return atts
+    r = q1("SELECT * FROM live_locations WHERE message_id = ?", (mid,))
+    if not r:
+        return atts
+    out = []
+    for a in atts:
+        if a.get("type") == "location" and a.get("live_until"):
+            a = dict(a)
+            try:
+                pos = json.loads(dec(r["owner"], "messages", LIVE_COL, mid, r["pos_enc"]) or "{}")
+            except ValueError:
+                pos = {}
+            for k in ("lat", "lon", "acc", "heading"):
+                if k in pos:
+                    a[k] = pos[k]
+            a["updated_at"] = r["updated_at"]
+            if r["stopped"]:
+                a["stopped"] = True
+                a["live_until"] = min(a["live_until"], r["live_until"])
+        out.append(a)
+    return out
+
+
+def live_target(mid, uid):
+    """Своё сообщение с трансляцией: (вложение, чат, кого будить)"""
+    m = q1("SELECT * FROM messages WHERE id = ? AND sender = ?", (mid, uid))
+    if m:
+        chat, wake = m["recipient"], [(m["recipient"], "dm")]
+    else:
+        m = q1("SELECT * FROM group_messages WHERE id = ? AND sender = ?", (mid, uid))
+        if not m:
+            raise ApiError(404, "not_found")
+        chat = m["group_id"]
+        wake = [(r["user_id"], "group") for r in q("SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?",
+                                                     (chat, uid))]
+    att = next((a for a in attachments_of(m) if a.get("type") == "location" and a.get("live_until")), None)
+    if not att:
+        raise ApiError(404, "not_found")
+    return att, chat, wake
+
+
+@route("PUT", r"/v1/live-location/([A-Za-z0-9_\-]+)")
+def live_location_update(req, me, mid):
+    """Новая точка трансляции (телефон присылает раз в ~10 секунд, пока трансляция идёт)"""
+    uid = me["id"]
+    rate_limit("live:" + uid, 600, 600)
+    pos = clean_coords(req.body_json())
+    if not pos:
+        raise ApiError(400, "bad_request")
+    att, chat, wake = live_target(mid, uid)
+    now = time.time()
+    r = q1("SELECT stopped, live_until FROM live_locations WHERE message_id = ?", (mid,))
+    if (r and r["stopped"]) or now > att["live_until"]:
+        raise ApiError(410, "live_ended")
+    blob = enc(uid, "messages", LIVE_COL, mid, json.dumps(pos))
+    run("INSERT INTO live_locations(message_id, owner, chat, pos_enc, updated_at, live_until, stopped) VALUES (?,?,?,?,?,?,0) "
+        "ON CONFLICT(message_id) DO UPDATE SET pos_enc = excluded.pos_enc, updated_at = excluded.updated_at",
+        (mid, uid, chat, blob, now, att["live_until"]))
+    for who, topic in wake:
+        SHARED.events_publish(who, topic)
+    req.send_json(200, {"ok": True, "live_until": att["live_until"]})
+
+
+@route("POST", r"/v1/live-location/([A-Za-z0-9_\-]+)/stop")
+def live_location_stop(req, me, mid):
+    uid = me["id"]
+    att, chat, wake = live_target(mid, uid)
+    now = time.time()
+    r = q1("SELECT 1 FROM live_locations WHERE message_id = ?", (mid,))
+    if r:
+        run("UPDATE live_locations SET stopped = 1, live_until = ? WHERE message_id = ?", (min(now, att["live_until"]), mid))
+    else:
+        pos = {k: att[k] for k in ("lat", "lon", "acc", "heading") if k in att}
+        run("INSERT INTO live_locations(message_id, owner, chat, pos_enc, updated_at, live_until, stopped) VALUES (?,?,?,?,?,?,1)",
+            (mid, uid, chat, enc(uid, "messages", LIVE_COL, mid, json.dumps(pos)), now, min(now, att["live_until"])))
+    for who, topic in wake:
+        SHARED.events_publish(who, topic)
+    req.send_json(200, {"ok": True})
+
+
 def attachments_of(m):
     raw = dec(m["sender"], "messages", COL["msg_attach"], m["id"], m["attachments_enc"]) if m["attachments_enc"] else None
     try:
@@ -4688,6 +4818,8 @@ def attachment_label(att):
         return att.get("title") or att.get("name") or "Музыка"
     if t == "sticker":
         return "%s Стикер" % (att.get("emoji") or STICKER_IDS.get(att.get("sticker"), ""))
+    if t == "location":
+        return "📍 Трансляция геопозиции" if att.get("live_until") else "📍 " + (att.get("title") or "Геопозиция")
     return att.get("name") or "Файл"
 
 
@@ -4781,7 +4913,7 @@ def message_json(m, me_id):
         "text": dec(m["sender"], "messages", COL["msg_text"], mid, m["text_enc"]) or "",
         "entities": json.loads(dec(m["sender"], "messages", COL["msg_entities"], mid, m["entities_enc"]) or "[]"),
         "created_at": m["created_at"], "edited_at": m["edited_at"],
-        "read": m["read_at"] is not None, "reply": reply, "attachments": attachments_of(m),
+        "read": m["read_at"] is not None, "reply": reply, "attachments": with_live(attachments_of(m), m["id"]),
         "reactions": reactions_of(mid, me_id),
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
@@ -4937,8 +5069,11 @@ def forward_messages(req, me, peer):
         entities = [] if m["kind"] == "poll" else json.loads(
             dec(m["sender"], "messages", COL["msg_entities"], m["id"], m["entities_enc"]) or "[]")
         atts = []
-        for a in attachments_of(m):
+        for a in with_live(attachments_of(m), m["id"]):
             a = dict(a)
+            if a.get("type") == "location":
+                for k in ("live_until", "updated_at", "stopped"):
+                    a.pop(k, None)
             if a.get("media_id"):
                 nid = clone_media(a["media_id"], uid)
                 if not nid:
@@ -5563,6 +5698,7 @@ def purge_dm(m):
     for t in ("reactions", "message_notes", "poll_votes", "poll_options", "polls"):
         run("DELETE FROM %s WHERE message_id = ?" % t, (mid,))
     run("DELETE FROM pins WHERE message_id = ?", (mid,))
+    run("DELETE FROM live_locations WHERE message_id = ?", (mid,))
     retained_delete_dm(mid)
 
 
@@ -6788,7 +6924,7 @@ def gmsg_json(m, me_id, channel=None):
         "text": dec(m["sender"], "messages", COL["msg_text"], mid, m["text_enc"]) or "",
         "entities": json.loads(dec(m["sender"], "messages", COL["msg_entities"], mid, m["entities_enc"]) or "[]"),
         "created_at": m["created_at"], "edited_at": m["edited_at"], "read": read,
-        "reply": reply, "attachments": attachments_of(m), "sender": user_brief(m["sender"], me_id),
+        "reply": reply, "attachments": with_live(attachments_of(m), m["id"]), "sender": user_brief(m["sender"], me_id),
         "reactions": reactions_of(mid, me_id), **note_field(mid, me_id),
     }
     if m["fwd_enc"]:
@@ -6990,6 +7126,7 @@ def group_delete(req, me, mid):
     if req.query().get("all") == "1" and (m["sender"] == uid or is_admin(mem)):
         drop_message_media(m)
         run("DELETE FROM group_messages WHERE id = ?", (mid,))
+        run("DELETE FROM live_locations WHERE message_id = ?", (mid,))
     else:
         run("INSERT OR IGNORE INTO group_hidden(message_id, user_id) VALUES (?,?)", (mid, uid))
     req.send_json(200, {"ok": True})
@@ -7440,11 +7577,13 @@ def moderate_member(req, me, gid, uid):
         if m:
             drop_message_media(m)
             run("DELETE FROM group_messages WHERE id = ?", (mid,))
+            run("DELETE FROM live_locations WHERE message_id = ?", (mid,))
             removed += 1
     if d.get("delete_all"):
         for m in q("SELECT * FROM group_messages WHERE group_id = ? AND sender = ? AND (kind IS NULL OR kind = 'poll')", (gid, uid)):
             drop_message_media(m)
             run("DELETE FROM group_messages WHERE id = ?", (m["id"],))
+            run("DELETE FROM live_locations WHERE message_id = ?", (m["id"],))
             removed += 1
     if d.get("ban"):
         run("INSERT OR IGNORE INTO group_bans(group_id, user_id) VALUES (?,?)", (gid, uid))
