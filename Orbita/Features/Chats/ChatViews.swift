@@ -831,6 +831,8 @@ struct ChatScreen: View {
     @State private var storyRoute: ChatStoryRoute?
     @State private var commentsRoute: CommentsRoute?
     @State private var storyNotice: String?
+    @State private var digestDismissed = false          // «Кратко» закрыли или уже открывали
+    @State private var showDigest = false
     @ObservedObject private var voicePlayer = VoicePlayer.shared
     @ObservedObject private var circleFocus = CircleFocus.shared
 
@@ -860,6 +862,7 @@ struct ChatScreen: View {
                         requestsBar
                         scheduledBar
                         pinnedBar
+                        digestBar
                         NowPlayingBar { showPlayer = true }
                         VoiceNowBar()
                     }
@@ -1475,6 +1478,39 @@ struct ChatScreen: View {
             }
             .buttonStyle(.plain)
             .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    // MARK: «Кратко» — пересказ пропущенного
+
+    /// Сколько входящих накопилось с первого непрочитанного (если оно за пределами загруженного — «99+»)
+    private var unreadAtEntry: Int {
+        guard let fu = model.firstUnreadID else { return 0 }
+        guard let i = model.messages.firstIndex(where: { $0.id == fu }) else { return model.messages.count >= model.historyLimit ? 100 : 0 }
+        return model.messages[i...].lazy.filter { !$0.mine }.count
+    }
+
+    @ViewBuilder
+    private var digestBar: some View {
+        if !digestDismissed, !searching, !selecting, model.firstUnreadID != nil, !model.isPreview, unreadAtEntry >= 10 {
+            UnreadDigestPill(count: unreadAtEntry, onOpen: {
+                showDigest = true
+                Haptics.impact(.light)
+            }, onClose: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { digestDismissed = true }
+            })
+            .sheet(isPresented: $showDigest, onDismiss: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { digestDismissed = true }
+            }) {
+                if let fu = model.firstUnreadID {
+                    UnreadDigestSheet(peerID: model.peerID, fromID: fu, repo: session.messengerRepo) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { scrollTarget = fu }
+                    }
+                    .environment(\.theme, theme).environment(\.lang, lang)
+                    .presentationDetents([.medium, .large])
+                    .presentationBackground(theme.sheet)
+                }
+            }
         }
     }
 

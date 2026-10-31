@@ -454,6 +454,14 @@ struct OutgoingAttachment {
     }
 }
 
+/// Пересказ пропущенного: текст пунктами, написан ли ИИ, сколько сообщений охвачено
+struct UnreadDigest: Decodable, Equatable {
+    let summary: String
+    let ai: Bool
+    let count: Int
+    let truncated: Bool?
+}
+
 protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
     func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread
@@ -464,6 +472,8 @@ protocol MessengerRepository: Sendable {
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
     func setNote(messageID: String, text: String) async throws -> ChatMessage
     func setChatTTL(peerID: String, seconds: Int) async throws -> Int
+    /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
+    func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
               replyTo: String?, silent: Bool) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
@@ -1003,6 +1013,11 @@ struct RemoteMessengerRepository: MessengerRepository {
                                          body: ServerAPI.json(["ttl": seconds]))
         struct R: Decodable { let ttl: Int }
         return (try? decodeAPI(R.self, from: data))?.ttl ?? seconds
+    }
+
+    func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest {
+        let data = try await api.request("GET", "/v1/chats/\(peerID)/summary", query: ["from": messageID])
+        return try decodeAPI(UnreadDigest.self, from: data)
     }
 
     static func entityJSON(_ entities: [TextEntity]) -> [[String: Any]] {

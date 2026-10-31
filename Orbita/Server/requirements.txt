@@ -1,2 +1,3 @@
 cryptography>=42
 httpx[http2]>=0.27
+anthropic>=2.0          # необязательно: «Кратко» (пересказ непрочитанного) через Claude, нужен ANTHROPIC_API_KEY
