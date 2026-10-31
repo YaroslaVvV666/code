@@ -2,31 +2,23 @@
  {
   "id": "cosmos",
   "title": "Космос",
-  "icon": "planet",
+  "icon": "star",
   "stickers": [
    {
-    "id": "planet",
-    "emoji": "🪐"
+    "id": "star",
+    "emoji": "⭐"
    },
    {
     "id": "rocket",
     "emoji": "🚀"
    },
    {
-    "id": "astro",
-    "emoji": "👨‍🚀"
-   },
-   {
-    "id": "star",
-    "emoji": "⭐"
-   },
-   {
     "id": "moon",
     "emoji": "🌙"
    },
    {
-    "id": "ufo",
-    "emoji": "🛸"
+    "id": "astro",
+    "emoji": "👨‍🚀"
    },
    {
     "id": "comet",
@@ -35,6 +27,10 @@
    {
     "id": "earth",
     "emoji": "🌍"
+   },
+   {
+    "id": "ufo",
+    "emoji": "🛸"
    }
   ]
  },
