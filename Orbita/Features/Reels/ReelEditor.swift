@@ -267,6 +267,10 @@ struct ReelEditorView: View {
         }
         .preferredColorScheme(.dark)
         .task { await model.start() }
+        .onChange(of: model.ready) { _, ready in
+            // видео длиннее минуты — сразу открываем выбор момента (обрезку), чтобы было видно, что оставить
+            if ready, tool == nil, model.kind == .video, model.baseDuration > ReelEditModel.maxSeconds { tool = .trim }
+        }
         .onDisappear { model.pause() }
         .task(id: model.baseURL) { await loadThumbs() }
         .onChange(of: stickerPick) { _, items in
@@ -733,7 +737,8 @@ struct ReelEditorView: View {
             }
             .font(.system(size: 13)).foregroundStyle(.white.opacity(0.65))
             if model.baseDuration > ReelEditModel.maxSeconds {
-                Text(s.t("Шортс — не длиннее 3 минут", "A short can't be longer than 3 minutes"))
+                Text(s.t("Видео длиннее минуты — выберите нужный момент (до 1:00)",
+                         "Video is longer than a minute — pick the part to keep (up to 1:00)"))
                     .font(.system(size: 12)).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
         }

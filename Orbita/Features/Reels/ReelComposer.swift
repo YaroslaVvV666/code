@@ -2,7 +2,7 @@ import SwiftUI
 import PhotosUI
 import AVFoundation
 
-/// Публикация шортса — отдельно от обычных постов: одно вертикальное видео (до 3 минут) и подпись
+/// Публикация шортса — отдельно от обычных постов: одно вертикальное видео (момент до 1 минуты) и подпись
 struct ReelComposerView: View {
     var onPosted: () async -> Void
 
@@ -217,7 +217,7 @@ struct ReelComposerView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "video.badge.plus").font(.system(size: 38, weight: .light)).foregroundStyle(theme.accentColor)
                         Text(s.t("Выбрать видео или фото", "Choose video or photos")).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
-                        Text(s.t("Видео до 3 минут или несколько фото", "Video up to 3 min, or several photos")).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                        Text(s.t("Видео (момент до 1 минуты) или несколько фото", "Video (pick up to 1 min) or several photos")).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
                     }
                 }
             }

@@ -8,7 +8,7 @@ import Combine
 final class ReelEditModel: ObservableObject {
     enum Kind { case video, photos }
 
-    static let maxSeconds: Double = 180
+    static let maxSeconds: Double = 60        // шортс — не длиннее минуты; длиннее — выбираешь нужный момент
 
     let kind: Kind
     private(set) var sourceVideo: URL?
