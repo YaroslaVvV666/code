@@ -46,6 +46,8 @@ struct ChatInfoView: View {
     @State private var frames = FrameBoxes()
     @State private var previewFile: PreviewFile?
     @State private var notice: String?
+    @State private var showTTLPicker = false            // «Другое…» — выбор 1–30 дней
+    @State private var ttlDays = 1
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
     // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
@@ -445,19 +447,26 @@ struct ChatInfoView: View {
         }
     }
 
-    /// Варианты таймера исчезающих сообщений (секунды) и подписи
-    private static let ttlOptions: [Int] = [0, 5, 60, 3600, 86400, 7 * 86400, 30 * 86400]
+    /// Быстрые варианты таймера исчезающих сообщений (секунды). «Другое…» — отдельно, выбор 1–30 дней.
+    private static let ttlOptions: [Int] = [0, 86400, 7 * 86400, 30 * 86400]
+
+    /// «N дней» с правильным склонением
+    private func daysLabel(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "дней" : (m10 == 1 ? "день" : (m10 >= 2 && m10 <= 4 ? "дня" : "дней"))
+            return "\(n) \(word)"
+        }
+        return "\(n) day\(n == 1 ? "" : "s")"
+    }
 
     private func ttlLabel(_ sec: Int) -> String {
         switch sec {
         case 0: return s.t("Выключено", "Off")
-        case 5: return s.t("5 секунд", "5 seconds")
-        case 60: return s.t("1 минута", "1 minute")
-        case 3600: return s.t("1 час", "1 hour")
-        case 86400: return s.t("24 часа", "24 hours")
-        case 7 * 86400: return s.t("7 дней", "7 days")
-        case 30 * 86400: return s.t("30 дней", "30 days")
-        default: return "\(sec)"
+        case 86400: return s.t("1 день", "1 day")
+        case 7 * 86400: return s.t("1 неделя", "1 week")
+        case 30 * 86400: return s.t("1 месяц", "1 month")
+        default: return daysLabel(max(1, sec / 86400))
         }
     }
 
@@ -469,6 +478,15 @@ struct ChatInfoView: View {
                 } label: {
                     if model.ttl == sec { Label(ttlLabel(sec), systemImage: "checkmark") } else { Text(ttlLabel(sec)) }
                 }
+            }
+            Divider()
+            Button {
+                ttlDays = Self.ttlOptions.contains(model.ttl) || model.ttl == 0 ? 1 : max(1, min(30, model.ttl / 86400))
+                showTTLPicker = true
+            } label: {
+                // галочка, если выбран нестандартный срок (кастомные дни)
+                let custom = model.ttl > 0 && !Self.ttlOptions.contains(model.ttl)
+                if custom { Label(s.t("Другое…", "Other…"), systemImage: "checkmark") } else { Text(s.t("Другое…", "Other…")) }
             }
         } label: {
             HStack(spacing: 12) {
@@ -482,6 +500,35 @@ struct ChatInfoView: View {
             .padding(.horizontal, 16).frame(height: 52)
             .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
         }
+        .sheet(isPresented: $showTTLPicker) { ttlDaysPicker }
+    }
+
+    /// Выбор произвольного срока: 1–30 дней
+    private var ttlDaysPicker: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("", selection: $ttlDays) {
+                    ForEach(1...30, id: \.self) { d in Text(daysLabel(d)).tag(d) }
+                }
+                .pickerStyle(.wheel)
+                .frame(maxHeight: .infinity)
+                Button {
+                    Task { await model.setTTL(ttlDays * 86400) }
+                    showTTLPicker = false
+                } label: {
+                    Text(s.t("Готово", "Done")).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 52)
+                        .background(theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain).padding(16)
+            }
+            .navigationTitle(s.t("Исчезающие сообщения", "Disappearing messages"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(s.t("Отмена", "Cancel")) { showTTLPicker = false } } }
+        }
+        .environment(\.theme, theme).environment(\.lang, lang)
+        .presentationDetents([.height(360)])
+        .presentationBackground(theme.sheet)
     }
 
     private func dmRow(_ icon: String, _ title: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
