@@ -10,6 +10,7 @@ struct RootView: View {
     @StateObject private var flow = AuthFlow()
     @StateObject private var router = LinkRouter()
     @ObservedObject private var appLock = AppLock.shared
+    @ObservedObject private var soundHint = SoundHint.shared
     @Environment(\.scenePhase) private var scenePhase
 
     private var lang: AppLanguage { AppLanguage(rawValue: langRaw) ?? .ru }
@@ -48,7 +49,16 @@ struct RootView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .onTapGesture { flow.inbox = nil }
             }
+
+            if soundHint.shown {
+                SoundHintBanner()
+                    .padding(.top, 54)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .onTapGesture { soundHint.dismiss() }
+                    .zIndex(50)
+            }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: soundHint.shown)
         .overlay {
             if appLock.locked && appLock.enabled {
                 AppLockView(lock: appLock).transition(.opacity)

@@ -1262,6 +1262,7 @@ final class CirclePlayback: ObservableObject {
             player.rate = rate
             isPlaying = true
             started = true
+            SoundHint.shared.checkOnPlay()                           // нулевая громкость — подскажем прибавить
         }
     }
 

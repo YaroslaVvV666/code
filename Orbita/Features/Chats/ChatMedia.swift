@@ -202,7 +202,7 @@ final class VoicePlayer: ObservableObject {
 
     func toggle(id: String, mediaID: String, duration: Double) {
         if currentID == id, let player {
-            if isPlaying { player.pause(); isPlaying = false } else { player.rate = rate; isPlaying = true }
+            if isPlaying { player.pause(); isPlaying = false } else { player.rate = rate; isPlaying = true; Task { @MainActor in SoundHint.shared.checkOnPlay() } }
             return
         }
         stop()
@@ -235,6 +235,7 @@ final class VoicePlayer: ObservableObject {
         }
         p.rate = rate
         isPlaying = true
+        Task { @MainActor in SoundHint.shared.checkOnPlay() }       // нулевая громкость — подскажем прибавить
     }
 
     /// Скорость 1× → 1.5× → 2× (как в Telegram)
