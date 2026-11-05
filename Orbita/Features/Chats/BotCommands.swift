@@ -9,6 +9,25 @@ struct BotCommand: Equatable, Hashable, Decodable {
     let description: String
 
     var slash: String { "/" + command }
+
+    /// Команды бота @stickers — на случай, если сервер ещё старый и сам их не прислал
+    static let stickerBotDefaults: [BotCommand] = [
+        BotCommand(command: "start", description: "Главное меню"),
+        BotCommand(command: "newpack", description: "Создать новый набор"),
+        BotCommand(command: "addsticker", description: "Добавить стикер в набор"),
+        BotCommand(command: "delsticker", description: "Удалить стикер из набора"),
+        BotCommand(command: "mypacks", description: "Мои наборы"),
+        BotCommand(command: "delpack", description: "Удалить набор"),
+        BotCommand(command: "done", description: "Закончить набор"),
+        BotCommand(command: "cancel", description: "Отменить действие"),
+        BotCommand(command: "help", description: "Помощь"),
+    ]
+
+    /// Команды для переписки: что прислал сервер, а для @stickers — хотя бы встроенный список
+    static func resolve(_ fromServer: [BotCommand], peerID: String) -> [BotCommand] {
+        if !fromServer.isEmpty { return fromServer }
+        return peerID.lowercased() == StickerBot.id.lowercased() ? stickerBotDefaults : []
+    }
 }
 
 // MARK: Окружение: нажимаемые /команды в тексте сообщений

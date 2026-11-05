@@ -292,9 +292,11 @@ final class ChatModel: ObservableObject {
             pinned = t.pinned
             isPreview = t.isPreview
             firstUnreadID = t.firstUnread
-            botCommands = t.botCommands
+            botCommands = BotCommand.resolve(t.botCommands, peerID: peer.id)
             loaded = true
         }
+        // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
+        if botCommands.isEmpty { botCommands = BotCommand.resolve([], peerID: peer.id) }
     }
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
@@ -336,7 +338,8 @@ final class ChatModel: ObservableObject {
             if thread.pinned != pinned { pinned = thread.pinned }
             if isPreview != thread.isPreview { isPreview = thread.isPreview }
             if ttl != thread.ttl { ttl = thread.ttl }
-            if botCommands != thread.botCommands { botCommands = thread.botCommands }
+            let cmds = BotCommand.resolve(thread.botCommands, peerID: peerID)
+            if botCommands != cmds { botCommands = cmds }
             if !loaded { firstUnreadID = thread.firstUnread }
             if !loaded { loaded = true }
             refreshedOnce = true
