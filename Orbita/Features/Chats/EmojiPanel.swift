@@ -211,6 +211,7 @@ struct EmojiStickerPanel: View {
     @State private var recent = EmojiData.recent
     @State private var favs: [Sticker] = FavoriteStickers.all
     private let favID = "__fav__"
+    @State private var peek: Sticker?           // зажали стикер — крупный предпросмотр с действиями
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -225,6 +226,49 @@ struct EmojiStickerPanel: View {
         }
         .frame(height: 300)
         .background(theme.sheet)
+        .overlay { if let st = peek { peekView(st) } }
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: peek)
+    }
+
+    /// Предпросмотр по долгому нажатию (как в Telegram): крупно, «Отправить» и «В избранное»
+    private func peekView(_ st: Sticker) -> some View {
+        let fav = favs.contains { $0.id == st.id }
+        return ZStack {
+            Rectangle().fill(.ultraThinMaterial)
+                .contentShape(Rectangle())
+                .onTapGesture { peek = nil }
+            VStack(spacing: 14) {
+                StickerImage(sticker: st, size: 170)
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+                HStack(spacing: 10) {
+                    Button {
+                        Haptics.impact(.light)
+                        peek = nil
+                        onSticker(st)
+                    } label: {
+                        Label(s.t("Отправить", "Send"), systemImage: "arrow.up")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 18).frame(height: 40)
+                            .background(theme.accent, in: Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                    Button {
+                        Haptics.select()
+                        FavoriteStickers.toggle(st)
+                        favs = FavoriteStickers.all
+                        peek = nil
+                    } label: {
+                        Label(fav ? s.t("Из избранных", "Unfavorite") : s.t("В избранные", "Favorite"),
+                              systemImage: fav ? "star.slash" : "star")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            .padding(.horizontal, 16).frame(height: 40)
+                            .background(theme.surface, in: Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+        }
+        .transition(.opacity)
     }
 
     // MARK: Эмодзи
@@ -282,12 +326,18 @@ struct EmojiStickerPanel: View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
             ForEach(stickers) { sticker in
                 Button {
+                    guard peek == nil else { return }            // отпустили палец после предпросмотра — не отправляем
                     Haptics.impact(.light)
                     onSticker(sticker)
                 } label: {
                     StickerImage(sticker: sticker, size: 74).frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())                       // нажатие — лёгкое «вдавливание», как у кнопок
+                // зажали — крупный предпросмотр (отправить / в избранное)
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.35).onEnded { _ in
+                    Haptics.impact(.medium)
+                    peek = sticker
+                })
             }
         }
         .padding(.horizontal, 10)

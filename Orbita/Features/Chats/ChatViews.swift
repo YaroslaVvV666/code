@@ -855,7 +855,12 @@ struct ChatScreen: View {
     private var chatMain: some View {
         ZStack {
             ChatWallpaperView(chatID: route.peer.id)
-            ActionScrollLock(state: actionState) { messagesList }
+            ActionScrollLock(state: actionState) {
+                messagesList
+                    // переписка с ботом: /команды в тексте подсвечены, нажатие отправляет команду
+                    .environment(\.botCommandLinks, model.isBot)
+                    .environment(\.onBotCommand, model.isBot ? { [model] cmd in model.sendCommand(cmd) } : nil)
+            }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 6) {
                         if searching { searchBar } else { header }

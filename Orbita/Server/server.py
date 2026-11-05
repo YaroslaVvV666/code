@@ -4332,6 +4332,15 @@ def user_pack_json(p, viewer):
             "installed": q1("SELECT 1 FROM sticker_installs WHERE user_id = ? AND pack_id = ?", (viewer, p["id"])) is not None}
 
 
+@route("GET", r"/v1/stickers/packs/([a-z0-9_]+)")
+def builtin_sticker_pack(req, me, pid):
+    """Встроенный набор (cosmos, mood): есть у всех, убрать нельзя"""
+    pack = next((p for p in STICKER_PACKS if p["id"] == pid), None)
+    if not pack:
+        raise ApiError(404, "not_found")
+    req.send_json(200, {**pack, "mine": False, "installed": True, "builtin": True})
+
+
 @route("GET", r"/v1/stickers/packs/u:([a-f0-9]+)")
 def sticker_pack(req, me, pid):
     p = q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,))
@@ -4432,6 +4441,21 @@ def ensure_sticker_bot():
 
 BOT_STATE = {}          # кто что сейчас делает с ботом: {"step": ..., "pack": id, "media": id, "choices": [...]}
 
+# Команды ботов (как в Telegram): список показывается в меню «/» слева от скрепки, команды в тексте нажимаются
+BOT_COMMANDS = {
+    STICKER_BOT_ID: [
+        {"command": "start", "description": "Главное меню"},
+        {"command": "newpack", "description": "Создать новый набор"},
+        {"command": "addsticker", "description": "Добавить стикер в набор"},
+        {"command": "delsticker", "description": "Удалить стикер из набора"},
+        {"command": "mypacks", "description": "Мои наборы"},
+        {"command": "delpack", "description": "Удалить набор"},
+        {"command": "done", "description": "Закончить набор"},
+        {"command": "cancel", "description": "Отменить действие"},
+        {"command": "help", "description": "Помощь"},
+    ],
+}
+
 BOT_HELP = ("Привет! Я помогу сделать свои стикеры — обычные и анимированные.\n\n"
             "/newpack — создать новый набор\n"
             "/addsticker — добавить стикеры в набор\n"
@@ -4439,8 +4463,16 @@ BOT_HELP = ("Привет! Я помогу сделать свои стикер�
             "/mypacks — мои наборы\n"
             "/delpack — удалить набор\n"
             "/cancel — отменить\n\n"
+            "Все команды — в меню «/» слева от скрепки. "
             "Стикер — это картинка (лучше PNG с прозрачным фоном — пришлите его как файл, чтобы фон не пропал) "
             "или короткое видео до %d секунд: оно станет анимированным стикером, без звука." % MAX_ANIMATED_SECONDS)
+
+
+@route("GET", r"/v1/bots/([A-Za-z0-9_\-]+)/commands")
+def bot_commands(req, me, bot_id):
+    if bot_id not in BOT_COMMANDS:
+        raise ApiError(404, "not_found")
+    req.send_json(200, {"commands": BOT_COMMANDS[bot_id]})
 
 
 def bot_say(uid, text, attachments=None):
@@ -5468,6 +5500,7 @@ def chat_messages(req, me, peer):
                         "typing": typing_action(peer, uid),
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
                         "ttl": dm_ttl(dm_key(uid, peer)),
+                        **({"bot_commands": BOT_COMMANDS[peer]} if peer in BOT_COMMANDS else {}),
                         "can_write": not either_blocked(uid, peer)})
 
 

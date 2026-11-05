@@ -260,6 +260,9 @@ final class ChatModel: ObservableObject {
     @Published private(set) var pinned: [ChatMessage] = []
     @Published private(set) var isPreview = false
     @Published private(set) var ttl = 0            // таймер исчезающих сообщений (секунды), 0 — выкл
+    /// Переписка с ботом: его команды (меню «/» слева от скрепки, нажимаемые /команды в тексте)
+    @Published private(set) var botCommands: [BotCommand] = []
+    var isBot: Bool { !botCommands.isEmpty }
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
@@ -289,6 +292,7 @@ final class ChatModel: ObservableObject {
             pinned = t.pinned
             isPreview = t.isPreview
             firstUnreadID = t.firstUnread
+            botCommands = t.botCommands
             loaded = true
         }
     }
@@ -332,6 +336,7 @@ final class ChatModel: ObservableObject {
             if thread.pinned != pinned { pinned = thread.pinned }
             if isPreview != thread.isPreview { isPreview = thread.isPreview }
             if ttl != thread.ttl { ttl = thread.ttl }
+            if botCommands != thread.botCommands { botCommands = thread.botCommands }
             if !loaded { firstUnreadID = thread.firstUnread }
             if !loaded { loaded = true }
             refreshedOnce = true
@@ -570,6 +575,11 @@ final class ChatModel: ObservableObject {
                                                         mime: sticker.animated ? "video/mp4" : nil, sticker: sticker.id,
                                                         stickerPack: sticker.packID)])
         }
+    }
+
+    /// Отправить боту команду («/newpack»): из меню «/» или нажатием на команду в тексте
+    func sendCommand(_ command: String) {
+        Task { _ = await deliver(text: command, entities: []) }
     }
 
     /// Геопозиция: точка (live = 0) или трансляция на live секунд. Трансляцию после отправки ведёт LiveLocationManager

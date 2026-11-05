@@ -286,6 +286,8 @@ struct RichInlineText: View {
     var filler = ""                        // невидимые пробелы под время сообщения
     /// Выделять номера телефонов, карт, криптоадреса, @юзернеймы и ссылки (нажатие — карточка с подробностями)
     var detect = false
+    /// Переписка с ботом: /команды подсвечиваются и нажимаются
+    @Environment(\.botCommandLinks) private var commandLinks
 
     var body: some View {
         let segments = RichTextCodec.segments(text: text, entities: entities)
@@ -295,7 +297,8 @@ struct RichInlineText: View {
                 let isLast = item.offset == segments.count - 1
                 let base = RichTextCodec.attributed(text: segment.text + (isLast ? filler : ""), entities: segment.entities,
                                                     size: size, color: UIColor(color), linkColor: UIColor(linkColor))
-                let ns = detect ? ChatEntityDetector.annotate(base) : base
+                let detected = detect ? ChatEntityDetector.annotate(base) : base
+                let ns = commandLinks ? BotCommandLinks.annotate(detected, linkColor: UIColor(linkColor)) : detected
                 let attributed = (try? AttributedString(ns, including: \.uiKit)) ?? AttributedString(segment.text)
                 let label = Text(attributed).tint(linkColor).fixedSize(horizontal: false, vertical: true)
                 if segment.isQuote {

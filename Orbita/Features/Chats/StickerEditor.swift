@@ -69,6 +69,8 @@ struct StickerEditorView: View {
     @State private var selected: UUID?
     @State private var editingText: ReelText?
     @State private var stageSize: CGSize = .zero
+    @State private var dragging = false              // тащат текст/наклейку — внизу видна корзина
+    @State private var overTrash = false
 
     // настройки
     @State private var brightness: Double = 0       // -0.4…0.4
@@ -88,16 +90,14 @@ struct StickerEditorView: View {
             }
         }
         .task { await loadBase() }
-        .sheet(item: $editingText) { item in
-            StickerTextEditor(item: item) { updated in
-                if let i = texts.firstIndex(where: { $0.id == updated.id }) {
-                    if updated.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { texts.remove(at: i) }
-                    else { texts[i] = updated }
-                }
-                editingText = nil
+        // ввод текста — прямо поверх стикера (как в шортсах): стикер виден под затемнением
+        .overlay {
+            if editingText != nil {
+                ReelTextEditor(item: Binding(get: { editingText ?? ReelText(text: "") }, set: { editingText = $0 })) { commitText() }
+                    .transition(.opacity)
             }
-            .presentationBackground(.black)
         }
+        .animation(.easeOut(duration: 0.2), value: editingText == nil)
         .overlay(alignment: .top) {
             if let note {
                 Text(note).font(.system(size: 14, weight: .medium)).foregroundStyle(.white)
@@ -131,46 +131,101 @@ struct StickerEditorView: View {
     private var stage: some View {
         GeometryReader { geo in
             let side = min(geo.size.width, geo.size.height)
+            let size = CGSize(width: side, height: side)
             ZStack {
-                if let base {
-                    Image(uiImage: base).resizable().scaledToFill()
-                        .frame(width: side, height: side).clipped()
-                        .brightness(brightness).contrast(contrast).saturation(saturation)
-                } else {
-                    ProgressView().tint(.white)
+                Group {
+                    if let base {
+                        Image(uiImage: base).resizable().scaledToFill()
+                            .frame(width: side, height: side).clipped()
+                            .brightness(brightness).contrast(contrast).saturation(saturation)
+                    } else {
+                        ProgressView().tint(.white)
+                    }
                 }
-                // наклейки и текст
-                ForEach(stickers) { st in
-                    ReelStickerView(item: st, unit: side)
-                        .rotationEffect(.radians(st.rotation))
-                        .position(x: st.cx * side, y: st.cy * side)
-                        .overlay(selectionRing(selected == st.id, side: side * 0.42 * st.scale))
-                        .gesture(overlayDrag(id: st.id, side: side, isText: false))
-                        .onTapGesture { selected = st.id }
+                .frame(width: side, height: side)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { selected = nil } }
+
+                // наклейки и текст: тащить пальцем, щипком — размер, двумя пальцами — наклон (как в шортсах)
+                ForEach($stickers) { $st in
+                    ReelDraggable(cx: $st.cx, cy: $st.cy, scale: $st.scale, rotation: $st.rotation, size: size,
+                                  onTap: { select(st.id) },
+                                  onDragging: { cy in dragMoved(st.id, cy) },
+                                  onEnd: { cy in dragEnded(st.id, cy) }) {
+                        ReelStickerView(item: st, unit: side).overlay { outline(selected == st.id) }
+                    }
                 }
-                ForEach(texts) { t in
-                    ReelTextView(item: t, unit: side)
-                        .rotationEffect(.radians(t.rotation))
-                        .position(x: t.cx * side, y: t.cy * side)
-                        .gesture(overlayDrag(id: t.id, side: side, isText: true))
-                        .onTapGesture { editingText = t }
+                ForEach($texts) { $t in
+                    if editingText?.id != t.id {
+                        ReelDraggable(cx: $t.cx, cy: $t.cy, scale: $t.scale, rotation: $t.rotation, size: size,
+                                      onTap: { if selected == t.id { editingText = t } else { select(t.id) } },
+                                      onDragging: { cy in dragMoved(t.id, cy) },
+                                      onEnd: { cy in dragEnded(t.id, cy) }) {
+                            ReelTextView(item: t, unit: side).overlay { outline(selected == t.id) }
+                        }
+                    }
                 }
                 // рисование — поверх, ловит касания только во вкладке «Рисунок»
                 DrawingCanvas(controller: draw, active: tool == .draw)
                     .frame(width: side, height: side)
                     .allowsHitTesting(tool == .draw)
+
+                // корзина: перетащите сюда текст или наклейку, чтобы удалить
+                if dragging {
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: overTrash ? 22 : 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: overTrash ? 58 : 48, height: overTrash ? 58 : 48)
+                        .background(overTrash ? Color.red : Color.black.opacity(0.5), in: Circle())
+                        .position(x: side / 2, y: side - 40)
+                        .allowsHitTesting(false)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: overTrash)
+                }
             }
             .frame(width: side, height: side)
+            .coordinateSpace(name: "reelStage")
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear { stageSize = CGSize(width: side, height: side) }
+            .animation(.easeOut(duration: 0.15), value: dragging)
+            .onAppear { stageSize = size }
             .onChange(of: side) { _, v in stageSize = CGSize(width: v, height: v) }
         }
     }
 
-    private func selectionRing(_ on: Bool, side: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 10).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-            .foregroundStyle(.white.opacity(on ? 0.9 : 0)).frame(width: side + 14, height: side + 14)
+    private func outline(_ on: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+            .foregroundStyle(.white)
+            .padding(-6)
+            .opacity(on ? 0.95 : 0)
+            .allowsHitTesting(false)
+    }
+
+    private func select(_ id: UUID) {
+        if selected != id { Haptics.select() }
+        withAnimation(.easeOut(duration: 0.15)) { selected = id }
+    }
+
+    private func dragMoved(_ id: UUID, _ cy: Double) {
+        if !dragging { dragging = true }
+        let over = cy > 0.86
+        if over != overTrash { overTrash = over; if over { Haptics.impact(.light) } }
+        if selected != id { selected = id }
+    }
+
+    private func dragEnded(_ id: UUID, _ cy: Double) {
+        dragging = false
+        overTrash = false
+        if cy > 0.86 { removeItem(id); Haptics.impact(.medium) }
+    }
+
+    private func removeItem(_ id: UUID) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            texts.removeAll { $0.id == id }
+            stickers.removeAll { $0.id == id }
+            if selected == id { selected = nil }
+        }
     }
 
     // MARK: Низ — инструменты
@@ -220,6 +275,7 @@ struct StickerEditorView: View {
         Button {
             Haptics.select()
             withAnimation(.easeOut(duration: 0.15)) { tool = t; selected = nil }
+            if t == .text && texts.isEmpty { addText() }          // сразу — ввод текста поверх стикера
         } label: {
             glyph()
                 .foregroundStyle(tool == t ? Color.white : Color.white.opacity(0.45))
@@ -233,7 +289,57 @@ struct StickerEditorView: View {
         .accessibilityLabel(title)
     }
 
-    @ViewBuilder private var toolPanel: some View {
+    private var toolPanel: some View {
+        VStack(spacing: 10) {
+            if let id = selected, tool != .draw, texts.contains(where: { $0.id == id }) || stickers.contains(where: { $0.id == id }) {
+                selectionControls(id)
+            }
+            toolOptions
+        }
+        .animation(.easeOut(duration: 0.18), value: selected)
+    }
+
+    /// Выбран текст или наклейка: размер, наклон, изменить текст, удалить
+    private func selectionControls(_ id: UUID) -> some View {
+        let isText = texts.contains { $0.id == id }
+        return HStack(spacing: 10) {
+            controlButton("minus.magnifyingglass") { adjust(id, scale: -0.12) }
+            controlButton("plus.magnifyingglass") { adjust(id, scale: 0.12) }
+            controlButton("rotate.left") { adjust(id, rotation: -.pi / 12) }
+            controlButton("rotate.right") { adjust(id, rotation: .pi / 12) }
+            if isText, let t = texts.first(where: { $0.id == id }) {
+                controlButton("character.cursor.ibeam") { editingText = t }
+            }
+            controlButton("trash", tint: .red) { removeItem(id); Haptics.impact(.medium) }
+        }
+        .padding(.horizontal, 16)
+        .transition(.opacity)
+    }
+
+    private func controlButton(_ icon: String, tint: Color = .white, _ action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.select()
+            action()
+        } label: {
+            Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(tint)
+                .frame(width: 46, height: 40).background(.white.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func adjust(_ id: UUID, scale: Double = 0, rotation: Double = 0) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+            if let i = texts.firstIndex(where: { $0.id == id }) {
+                texts[i].scale = min(4, max(0.3, texts[i].scale + scale))
+                texts[i].rotation += rotation
+            } else if let i = stickers.firstIndex(where: { $0.id == id }) {
+                stickers[i].scale = min(4, max(0.3, stickers[i].scale + scale))
+                stickers[i].rotation += rotation
+            }
+        }
+    }
+
+    @ViewBuilder private var toolOptions: some View {
         switch tool {
         case .draw:     drawPanel
         case .text:     addRow(s.t("Добавить текст", "Add text"), "textformat") { addText() }
@@ -323,43 +429,34 @@ struct StickerEditorView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: Жесты наклеек/текста
-
-    private func overlayDrag(id: UUID, side: CGFloat, isText: Bool) -> some Gesture {
-        DragGesture(minimumDistance: 1)
-            .onChanged { v in
-                selected = id
-                let dx = v.translation.width / side, dy = v.translation.height / side
-                move(id: id, isText: isText, dx: dx, dy: dy)
-            }
-            .onEnded { _ in dragStart[id] = nil }
-    }
-
-    @State private var dragStart: [UUID: (Double, Double)] = [:]
-    private func move(id: UUID, isText: Bool, dx: Double, dy: Double) {
-        if isText, let i = texts.firstIndex(where: { $0.id == id }) {
-            let start = dragStart[id] ?? (texts[i].cx, texts[i].cy)
-            dragStart[id] = start
-            texts[i].cx = min(1, max(0, start.0 + dx)); texts[i].cy = min(1, max(0, start.1 + dy))
-        } else if let i = stickers.firstIndex(where: { $0.id == id }) {
-            let start = dragStart[id] ?? (stickers[i].cx, stickers[i].cy)
-            dragStart[id] = start
-            stickers[i].cx = min(1, max(0, start.0 + dx)); stickers[i].cy = min(1, max(0, start.1 + dy))
-        }
-    }
-
     // MARK: Действия
 
     private func addText() {
-        let t = ReelText(text: "")
-        editingText = t
+        var t = ReelText(text: "")
+        t.cy = 0.5
         texts.append(t)
+        selected = t.id
+        editingText = t
+    }
+
+    /// Готово в редакторе текста: пустой текст убираем, иначе он остаётся на стикере выбранным
+    private func commitText() {
+        guard let e = editingText else { return }
+        let trimmed = e.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let i = texts.firstIndex(where: { $0.id == e.id }) {
+            if trimmed.isEmpty { texts.remove(at: i); if selected == e.id { selected = nil } }
+            else { var v = e; v.text = trimmed; texts[i] = v; selected = e.id }
+        }
+        editingText = nil
     }
 
     private func addSticker(_ st: Sticker) {
         Task {
             guard let img = await stickerUIImage(st) else { return }
-            stickers.append(ReelSticker(image: img))
+            let item = ReelSticker(image: img)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { stickers.append(item) }
+            selected = item.id
+            Haptics.impact(.light)
         }
     }
 
@@ -380,8 +477,7 @@ struct StickerEditorView: View {
     private func save() {
         guard let base, !saving else { return }
         saving = true
-        // сбрасываем «накопитель» перетаскивания
-        dragStart = [:]
+        selected = nil
         Task {
             let out = CGSize(width: 512, height: 512)
             let flat = render(base: base, out: out)
@@ -437,52 +533,6 @@ struct StickerEditorView: View {
         let ctx = CIContext()
         guard let out = f.outputImage, let cg = ctx.createCGImage(out, from: ci.extent) else { return image }
         return UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
-    }
-}
-
-// MARK: - Ввод текста
-
-private struct StickerTextEditor: View {
-    @State var item: ReelText
-    var onDone: (ReelText) -> Void
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.9).ignoresSafeArea().onTapGesture { onDone(item) }
-            VStack(spacing: 18) {
-                HStack {
-                    Spacer()
-                    Button { onDone(item) } label: {
-                        Text("Готово").font(.system(size: 16, weight: .semibold)).foregroundStyle(.black)
-                            .padding(.horizontal, 18).frame(height: 40).background(.white, in: Capsule())
-                    }
-                }
-                .padding(.horizontal, 16).padding(.top, 16)
-                Spacer()
-                TextField("", text: $item.text, axis: .vertical)
-                    .focused($focused)
-                    .font(.system(size: 34, weight: .bold, design: ReelPalette.design(item.font)))
-                    .multilineTextAlignment(.center).tint(.white)
-                    .foregroundStyle(ReelPalette.color(item.color))
-                    .padding(.horizontal, 24).lineLimit(1...6)
-                Spacer()
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(0..<ReelPalette.colors.count, id: \.self) { i in
-                            Button { item.color = i } label: {
-                                Circle().fill(ReelPalette.colors[i]).frame(width: 30, height: 30)
-                                    .overlay(Circle().stroke(.white, lineWidth: item.color == i ? 3 : 1).opacity(item.color == i ? 1 : 0.4))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                }
-                .padding(.bottom, 12)
-            }
-        }
-        .onAppear { focused = true }
     }
 }
 

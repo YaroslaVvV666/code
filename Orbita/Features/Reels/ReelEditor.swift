@@ -25,7 +25,7 @@ struct ReelPlayerLayer: UIViewRepresentable {
 }
 
 /// Элемент, который можно таскать, масштабировать и вращать двумя пальцами
-private struct ReelDraggable<Content: View>: View {
+struct ReelDraggable<Content: View>: View {
     @Binding var cx: Double
     @Binding var cy: Double
     @Binding var scale: Double
@@ -145,7 +145,7 @@ private struct ReelTrimBar: View {
 }
 
 /// Ввод текста поверх видео: цвет, стиль и шрифт
-private struct ReelTextEditor: View {
+struct ReelTextEditor: View {
     @Binding var item: ReelText
     var onDone: () -> Void
     @Environment(\.lang) private var lang

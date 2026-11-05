@@ -238,7 +238,9 @@ struct MessageRow: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @Environment(\.openURL) private var parentOpenURL
+    @Environment(\.onBotCommand) private var onBotCommand
     @State private var dragX: CGFloat = 0
+    @State private var stickerPop = false        // нажали на стикер — он «пружинит»
     @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
 
     private var s: Strings { Strings(lang: lang) }
@@ -335,6 +337,11 @@ struct MessageRow: View {
         // ссылки в тексте: пока открыто меню реакций (зажали сообщение), отпускание пальца на ссылке её не открывает
         .environment(\.openURL, OpenURLAction { url in
             if blocked { return .handled }
+            // нажали на /команду в переписке с ботом — отправляем её (как в Telegram)
+            if let cmd = BotCommandLinks.command(from: url) {
+                if let onBotCommand { Haptics.impact(.light); onBotCommand(cmd) }
+                return .handled
+            }
             if let entity = ChatEntity(url: url) {
                 if let onOpenEntity { Haptics.impact(.light); onOpenEntity(entity) }
                 return .handled
@@ -460,14 +467,21 @@ struct MessageRow: View {
         if let sticker = stickerOnly {
             ZStack(alignment: .bottomTrailing) {
                 StickerImage(sticker: sticker.asSticker, size: 168)
+                    .scaleEffect(stickerPop ? 1.12 : 1)
                 MessageMeta(message: message, color: .white, onMedia: true).padding(6)
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                // свой стикер — показать набор и дать добавить его себе
-                guard interactive, !blocked, let pack = sticker.stickerPack else { return }
+                // нажали — стикер пружинит, затем открывается его набор (свой, чужой или встроенный)
+                guard interactive, !blocked else { return }
                 Haptics.impact(.light)
-                onOpenStickerPack?(pack)
+                withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { stickerPop = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.55)) { stickerPop = false }
+                }
+                let builtin = sticker.sticker.flatMap { id in id.hasPrefix("u:") ? nil : id.split(separator: "/").first.map(String.init) }
+                guard let pack = sticker.stickerPack ?? builtin else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { onOpenStickerPack?(pack) }
             }
         } else if let circle = circleOnly {
             CircleVideoBubble(attachment: circle, message: message)
@@ -1778,6 +1792,8 @@ struct StickerPackSheet: View {
     @State private var busy = false
 
     private var s: Strings { Strings(lang: lang) }
+    /// Встроенный набор (есть у всех, убрать нельзя)
+    private var builtin: Bool { !packID.hasPrefix("u:") }
 
     @State private var preview: Sticker?            // нажали на стикер — показать крупно с меню
     @State private var showCreator = false
@@ -1804,10 +1820,12 @@ struct StickerPackSheet: View {
                         .padding(.bottom, 90)       // под плавающую кнопку
                     }
                 }
-                // красивая плавающая кнопка снизу: «Добавить N стикеров» / «Убрать набор»
-                VStack {
-                    Spacer()
-                    addButton(pack)
+                // красивая плавающая кнопка снизу: «Добавить N стикеров» / «Убрать набор» (у встроенных наборов её нет)
+                if !builtin {
+                    VStack {
+                        Spacer()
+                        addButton(pack)
+                    }
                 }
             } else if failed {
                 Text(s.t("Не удалось загрузить набор", "Couldn't load the pack"))
@@ -1841,8 +1859,13 @@ struct StickerPackSheet: View {
 
     private func header(_ pack: CustomStickerPack) -> some View {
         ZStack {
-            Text(pack.pack.title).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.accentColor)
-                .lineLimit(1).padding(.horizontal, 64)
+            VStack(spacing: 2) {
+                Text(pack.pack.title).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.accentColor)
+                    .lineLimit(1)
+                Text(countTitle(pack.pack.stickers.count) + (builtin ? s.t(" · встроенный", " · built-in") : ""))
+                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, 64)
             HStack {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
@@ -1863,6 +1886,16 @@ struct StickerPackSheet: View {
             }
         }
         .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 8)
+    }
+
+    /// «N стикеров» с правильным склонением
+    private func countTitle(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "стикеров" : (m10 == 1 ? "стикер" : (m10 >= 2 && m10 <= 4 ? "стикера" : "стикеров"))
+            return "\(n) \(word)"
+        }
+        return "\(n) sticker\(n == 1 ? "" : "s")"
     }
 
     /// «Добавить N стикеров» с правильным склонением

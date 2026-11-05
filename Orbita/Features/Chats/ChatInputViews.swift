@@ -27,6 +27,7 @@ struct ChatInputBar: View {
     @State private var showFileImporter = false
     @State private var showAttach = false
     @State private var showLocation = false             // «Геопозиция» из скрепки: точка или трансляция
+    @State private var showCommands = false             // переписка с ботом: открыт список команд (меню «/»)
     @State private var emojiOpen = false
     @State private var holding = false
     @State private var active: Active = .none
@@ -69,6 +70,10 @@ struct ChatInputBar: View {
             banner
             tray
                 .animation(.spring(response: 0.3, dampingFraction: 0.82), value: stickerSuggestions()?.map(\.id))
+            if model.isBot, model.canWrite, let list = visibleCommands {
+                BotCommandsPanel(commands: list) { pickCommand($0) }
+                    .padding(.bottom, 4)
+            }
             if model.isPreview {
                 joinBar
             } else if model.canWrite {
@@ -382,6 +387,14 @@ struct ChatInputBar: View {
 
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            // бот: слева от скрепки — меню команд «/» (как в Telegram)
+            if model.isBot && !recording {
+                BotMenuButton(open: showCommands) {
+                    Haptics.impact(.light)
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { showCommands.toggle() }
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
             if !recording {
                 if trashing {
                     // отмена записи: на месте скрепки (в её же пузыре) мусорка, а скрепка возвращается после анимации
@@ -408,10 +421,40 @@ struct ChatInputBar: View {
         .padding(.top, 8)
         .padding(.bottom, kbVisible ? 22 : 12)      // зазор от клавиатуры — поле не «налезает» на неё
         .animation(.easeOut(duration: 0.2), value: kbVisible)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in kbVisible = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            kbVisible = true
+            if showCommands { withAnimation(.easeOut(duration: 0.2)) { showCommands = false } }     // начали печатать — меню команд закрывается
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in kbVisible = false }
         .animation(.easeOut(duration: 0.18), value: recording)
         .animation(.easeOut(duration: 0.2), value: trashing)
+    }
+
+    // MARK: Команды бота
+
+    /// Набрали «/…» в переписке с ботом — подходящие команды
+    private var typedCommandQuery: String? {
+        guard model.isBot, controller.length > 0, controller.length <= 33 else { return nil }
+        let text = controller.plainText
+        guard text.hasPrefix("/"), !text.contains(where: { $0.isWhitespace }) else { return nil }
+        return String(text.dropFirst()).lowercased()
+    }
+
+    /// Что показать в списке: всё меню (нажали «/») или подходящие под набранное
+    private var visibleCommands: [BotCommand]? {
+        if let q = typedCommandQuery {
+            let list = model.botCommands.filter { q.isEmpty || $0.command.lowercased().hasPrefix(q) }
+            return list.isEmpty ? nil : list
+        }
+        return showCommands ? model.botCommands : nil
+    }
+
+    /// Нажали на команду — сразу отправляем её боту и закрываем список
+    private func pickCommand(_ c: BotCommand) {
+        if typedCommandQuery != nil { controller.clear() }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { showCommands = false }
+        model.sendCommand(c.slash)
+        onSent()
     }
 
     private var attachButton: some View {
