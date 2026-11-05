@@ -442,7 +442,7 @@ struct MessageRow: View {
                     .padding(.horizontal, 8).frame(height: 26)
                     .background(r.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
                     .overlay(Capsule().stroke(theme.stroke, lineWidth: r.mine ? 0 : 1))
-                    .background(FrameProbe(id: message.id + "|" + r.emoji))
+                    .background(MessageFrameProbe(id: message.id + "|" + r.emoji))
                 }
                 .buttonStyle(.plain)
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in

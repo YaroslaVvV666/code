@@ -1907,7 +1907,7 @@ struct ChatScreen: View {
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
             .dustDissolve(active: model.dissolving.contains(m.id))
             .environment(\.mediaFrozen, model.freezing.contains(m.id))
-            .background(FrameProbe(id: m.id))
+            .background(MessageFrameProbe(id: m.id))
         }
         .overlay {
             if selecting && m.system == nil {

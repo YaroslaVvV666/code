@@ -59,7 +59,7 @@ final class MessageFrameProbes {
 }
 
 /// Невидимый зонд в фоне строки / чипа реакции
-struct FrameProbe: UIViewRepresentable {
+struct MessageFrameProbe: UIViewRepresentable {
     let id: String
 
     final class ProbeView: UIView {
