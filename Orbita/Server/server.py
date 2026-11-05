@@ -317,6 +317,8 @@ ensure_column("group_messages", "fwd_enc", "fwd_enc BLOB")
 ensure_column("messages", "expires_at", "expires_at REAL")                           # исчезающие сообщения: когда удалить
 # Таймер исчезающих сообщений на чат (личные): ttl в секундах, 0/нет записи — выключено
 DB.execute("CREATE TABLE IF NOT EXISTS chat_ttl(chat_key TEXT PRIMARY KEY, ttl INTEGER NOT NULL, set_by TEXT, set_at REAL NOT NULL)")
+# «Запретить копирование» в личной переписке: сообщения этого чата нельзя пересылать и копировать (как в Telegram)
+DB.execute("CREATE TABLE IF NOT EXISTS chat_protect(chat_key TEXT PRIMARY KEY, set_by TEXT, set_at REAL NOT NULL)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_msg_expires ON messages(expires_at)")
 DB.executescript("""CREATE TABLE IF NOT EXISTS polls(
   message_id TEXT PRIMARY KEY, creator TEXT NOT NULL, multiple INTEGER NOT NULL DEFAULT 0,
@@ -5088,6 +5090,8 @@ def forward_messages(req, me, peer):
         m, grp, _ = find_message(mid, uid)
         if grp and (group_row(m["group_id"]) or {"no_forward": 0})["no_forward"]:
             raise ApiError(403, "no_forward")
+        if not grp and dm_protected(dm_key(m["sender"], m["recipient"])):
+            raise ApiError(403, "no_forward")
         if m["kind"] in SYS_LABELS:
             continue
         items.append(m)
@@ -5301,6 +5305,10 @@ def dm_key(a, b):
 DISAPPEAR_TTLS = {0, 5, 60, 3600} | {d * 86400 for d in range(1, 31)}
 
 
+def dm_protected(key):
+    return q1("SELECT 1 FROM chat_protect WHERE chat_key = ?", (key,)) is not None
+
+
 def dm_ttl(key):
     """Таймер исчезающих сообщений для чата (секунды) или 0, если выключен"""
     r = q1("SELECT ttl FROM chat_ttl WHERE chat_key = ?", (key,))
@@ -5501,6 +5509,7 @@ def chat_messages(req, me, peer):
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
                         "ttl": dm_ttl(dm_key(uid, peer)),
                         **({"bot_commands": BOT_COMMANDS[peer]} if peer in BOT_COMMANDS else {}),
+                        "protected": dm_protected(dm_key(uid, peer)),
                         "can_write": not either_blocked(uid, peer)})
 
 
@@ -5666,6 +5675,24 @@ def set_chat_ttl(req, me, peer):
         SHARED.ver_bump("uver:" + peer)
         SHARED.events_publish(peer, "dm")
     req.send_json(200, {"ttl": ttl})
+
+
+@route("PUT", r"/v1/chats/([A-Za-z0-9_\-]+)/protect")
+def set_chat_protect(req, me, peer):
+    """Запретить копирование и пересылку в личной переписке (включить может любой из двоих)"""
+    uid = me["id"]
+    if is_group(peer) or not q1("SELECT 1 FROM users WHERE id = ?", (peer,)):
+        raise ApiError(400, "bad_value")
+    on = bool(req.body_json().get("on"))
+    key = dm_key(uid, peer)
+    if on:
+        run("INSERT OR REPLACE INTO chat_protect(chat_key, set_by, set_at) VALUES (?,?,?)", (key, uid, time.time()))
+    else:
+        run("DELETE FROM chat_protect WHERE chat_key = ?", (key,))
+    if peer != uid:
+        SHARED.ver_bump("uver:" + peer)
+        SHARED.events_publish(peer, "dm")
+    req.send_json(200, {"protected": on})
 
 
 def record_dm_mention(peer, sender, mid, text, now):

@@ -49,6 +49,7 @@ struct ChatInfoView: View {
     @State private var showTTLPicker = false            // «Другое…» — выбор 1–30 дней
     @State private var ttlDays = 1
     @State private var showAppearance = false           // «Обои и цвет» этого чата
+    @State private var confirmDeleteChat = false        // «Ещё» → «Удалить переписку»
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
     // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
@@ -96,9 +97,10 @@ struct ChatInfoView: View {
                 VStack(spacing: 14) {
                     headerBlock
                     actionRow
-                    dmRows
-                    appearanceRow
+                    if !isGroup { profileButton }            // главная кнопка — профиль со стеной и постами
+                    if isGroup { appearanceRow }
                     infoCard
+                    dmRows
                     if !isGroup { CommonChatsCard(userID: model.peer.id) }
                     if isGroup, let group, group.isAdmin { adminCard(group) }
                     // в канале подписчики — в отдельном списке, как в Telegram; в группе участники видны сразу
@@ -135,10 +137,9 @@ struct ChatInfoView: View {
         .animation(.spring(response: 0.55, dampingFraction: 0.86), value: avatarRoute?.id)
         .edgeSwipeBack { if avatarRoute == nil { dismiss() } }
         .preferredColorScheme(theme.dark ? .dark : .light)
-        .task {
-            history = await model.loadFullHistory()
-            await loadProfile()
-        }
+        // профиль (юзернейм, день рождения, описание) — сразу; вся история для вкладок медиа — параллельно, не задерживая шапку
+        .task { await loadProfile() }
+        .task { history = await model.loadFullHistory() }
         .overlay(alignment: .bottom) {
             if let notice {
                 ToastView(text: notice).padding(.bottom, 30)
@@ -418,16 +419,96 @@ struct ChatInfoView: View {
             } else {
                 tile("phone.fill", s.t("Звонок", "Call")) { callPeer(video: false) }
                 tile("video.fill", s.t("Видео", "Video")) { callPeer(video: true) }
-                tile("person.crop.circle", s.t("Профиль", "Profile")) { showProfile = true }
                 let dmMuted = { _ = prefs.muteTick; return prefs.isDMMuted(model.peer.id) }()
                 tile(dmMuted ? "bell.slash.fill" : "bell.fill",
                      dmMuted ? s.t("Без звука", "Muted") : s.t("Звук", "Sound")) {
                     prefs.setDMMuted(model.peer.id, !prefs.isDMMuted(model.peer.id))
                     Haptics.impact(.light)
                 }
+                dmMoreMenu
             }
         }
         .padding(.horizontal, 16)
+        .sheet(isPresented: $showTTLPicker) { ttlDaysPicker }
+        .sheet(isPresented: $showAppearance) {
+            ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
+        .confirmationDialog(s.t("Удалить переписку?", "Delete chat?"), isPresented: $confirmDeleteChat, titleVisibility: .visible) {
+            Button(s.t("Удалить переписку", "Delete chat"), role: .destructive) { deleteChat() }
+            Button(s.cancel, role: .cancel) {}
+        } message: {
+            Text(s.t("Все сообщения с \(model.peer.name) пропадут у вас. Это нельзя отменить.",
+                     "All messages with \(model.peer.name) will be removed for you. This can't be undone."))
+        }
+    }
+
+    /// «Ещё»: обои и цвет, исчезающие сообщения, запрет копирования, удалить переписку
+    private var dmMoreMenu: some View {
+        Menu {
+            Button { showAppearance = true } label: {
+                Label(s.t("Обои и цвет", "Wallpaper & colour"), systemImage: "paintbrush.fill")
+            }
+            Menu {
+                ForEach(Self.ttlOptions, id: \.self) { sec in
+                    Button { Task { await model.setTTL(sec) } } label: {
+                        if model.ttl == sec { Label(ttlLabel(sec), systemImage: "checkmark") } else { Text(ttlLabel(sec)) }
+                    }
+                }
+                Divider()
+                Button {
+                    ttlDays = Self.ttlOptions.contains(model.ttl) || model.ttl == 0 ? 1 : max(1, min(30, model.ttl / 86400))
+                    showTTLPicker = true
+                } label: {
+                    let custom = model.ttl > 0 && !Self.ttlOptions.contains(model.ttl)
+                    if custom { Label(s.t("Другое…", "Other…"), systemImage: "checkmark") } else { Text(s.t("Другое…", "Other…")) }
+                }
+            } label: {
+                Label(s.t("Исчезающие сообщения", "Disappearing messages") + (model.ttl > 0 ? " · " + ttlLabel(model.ttl) : ""),
+                      systemImage: "timer")
+            }
+            Toggle(isOn: Binding(get: { model.isProtected }, set: { on in Task { await model.setProtected(on) } })) {
+                Label(s.t("Запретить копирование", "Restrict copying"), systemImage: "lock.fill")
+            }
+            Divider()
+            Button(role: .destructive) { confirmDeleteChat = true } label: {
+                Label(s.t("Удалить переписку", "Delete chat"), systemImage: "trash")
+            }
+        } label: {
+            tileLabel("ellipsis", s.t("Ещё", "More"))
+        }
+        .simultaneousGesture(TapGesture().onEnded { Haptics.impact(.light) })
+    }
+
+    /// Главная кнопка: профиль человека со стеной, постами и т.д.
+    private var profileButton: some View {
+        Button {
+            Haptics.impact(.light)
+            showProfile = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.fill").font(.system(size: 20, weight: .semibold))
+                Text(s.t("Профиль", "Profile")).font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 14, weight: .bold)).opacity(0.8)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18).frame(height: 54)
+            .background(theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: theme.accentColor.opacity(0.35), radius: 10, y: 4)
+        }
+        .buttonStyle(PressStyle())
+        .padding(.horizontal, 16)
+    }
+
+    private func deleteChat() {
+        Haptics.notify(.warning)
+        Task {
+            await session.chats.clear(model.peer.id)
+            onLeftGroup()                 // закрываем и информацию, и саму переписку
+        }
     }
 
     /// «В контакты» и «Заблокировать» — отдельными строками под кнопками
@@ -439,7 +520,6 @@ struct ChatInfoView: View {
                       model.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
                     showContact = true
                 }
-                ttlMenu
                 dmRow(profile?.blockedByMe == true ? "hand.raised.slash" : "hand.raised.fill",
                       profile?.blockedByMe == true ? s.unblockUser : s.blockUser, danger: profile?.blockedByMe != true) {
                     if profile?.blockedByMe == true { setBlocked(false) } else { confirmBlock = true }
@@ -470,12 +550,7 @@ struct ChatInfoView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
-        .sheet(isPresented: $showAppearance) {
-            ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
-                .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationDetents([.large])
-                .presentationBackground(theme.sheet)
-        }
+        // шторка «Обои и цвет» висит на ряду кнопок (он есть и у групп, и у личных чатов)
     }
 
     /// Быстрые варианты таймера исчезающих сообщений (секунды). «Другое…» — отдельно, выбор 1–30 дней.
@@ -499,39 +574,6 @@ struct ChatInfoView: View {
         case 30 * 86400: return s.t("1 месяц", "1 month")
         default: return daysLabel(max(1, sec / 86400))
         }
-    }
-
-    private var ttlMenu: some View {
-        Menu {
-            ForEach(Self.ttlOptions, id: \.self) { sec in
-                Button {
-                    Task { await model.setTTL(sec) }
-                } label: {
-                    if model.ttl == sec { Label(ttlLabel(sec), systemImage: "checkmark") } else { Text(ttlLabel(sec)) }
-                }
-            }
-            Divider()
-            Button {
-                ttlDays = Self.ttlOptions.contains(model.ttl) || model.ttl == 0 ? 1 : max(1, min(30, model.ttl / 86400))
-                showTTLPicker = true
-            } label: {
-                // галочка, если выбран нестандартный срок (кастомные дни)
-                let custom = model.ttl > 0 && !Self.ttlOptions.contains(model.ttl)
-                if custom { Label(s.t("Другое…", "Other…"), systemImage: "checkmark") } else { Text(s.t("Другое…", "Other…")) }
-            }
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "timer").font(.system(size: 17)).frame(width: 24)
-                Text(s.t("Исчезающие сообщения", "Disappearing messages")).font(.system(size: 17))
-                Spacer()
-                Text(model.ttl == 0 ? s.t("Выкл", "Off") : ttlLabel(model.ttl))
-                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
-            }
-            .foregroundStyle(theme.accentColor)
-            .padding(.horizontal, 16).frame(height: 52)
-            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
-        }
-        .sheet(isPresented: $showTTLPicker) { ttlDaysPicker }
     }
 
     /// Выбор произвольного срока: 1–30 дней
@@ -657,11 +699,18 @@ struct ChatInfoView: View {
                 rows.append(ProfileInfoRow(label: s.t("Медленный режим", "Slow mode"), value: s.slowLabel(g.slow)))
             }
         } else if let p = profile {
-            if let phone = p.phone, !phone.isEmpty { rows.append(ProfileInfoRow(label: s.phoneLabel, value: phone, accent: true, kind: .phone)) }
+            // как просили: сначала юзернейм, затем день рождения, затем описание
             if let u = p.username, !u.isEmpty { rows.append(ProfileInfoRow(label: s.t("Имя пользователя", "Username"), value: "@" + u, accent: true,
                                            kind: .username(link: DeepLink.profileLink(username: u, userID: p.id)))) }
             if let b = s.birthdayText(p.birthday), !b.isEmpty { rows.append(ProfileInfoRow(label: s.birthday, value: b)) }
             if !p.bio.isEmpty { rows.append(ProfileInfoRow(label: s.bioLabel, value: p.bio)) }
+            if let phone = p.phone, !phone.isEmpty { rows.append(ProfileInfoRow(label: s.phoneLabel, value: phone, accent: true, kind: .phone)) }
+            if model.isProtected {
+                rows.append(ProfileInfoRow(label: s.t("Защита", "Protection"), value: s.t("Копирование и пересылка запрещены", "Copying and forwarding are restricted")))
+            }
+            if model.ttl > 0 {
+                rows.append(ProfileInfoRow(label: s.t("Исчезающие сообщения", "Disappearing messages"), value: ttlLabel(model.ttl)))
+            }
         }
         return rows
     }

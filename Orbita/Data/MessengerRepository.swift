@@ -503,6 +503,8 @@ protocol MessengerRepository: Sendable {
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
     func setNote(messageID: String, text: String) async throws -> ChatMessage
     func setChatTTL(peerID: String, seconds: Int) async throws -> Int
+    /// Личная переписка: запретить копирование и пересылку (включить/выключить)
+    func setChatProtected(peerID: String, on: Bool) async throws -> Bool
     /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
     func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
@@ -971,6 +973,7 @@ private struct ThreadDTO: Decodable {
     let firstUnread: String?
     let ttl: Int?
     let botCommands: [BotCommand]?
+    let `protected`: Bool?                  // личная переписка: запрещено копирование и пересылка
 }
 
 private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
@@ -1050,7 +1053,8 @@ struct RemoteMessengerRepository: MessengerRepository {
         let dto = try decodeAPI(ThreadDTO.self, from: data)
         let peer = ChatPeer(id: dto.peer.id, name: dto.peer.name, username: dto.peer.username, avatarID: dto.peer.avatar,
                             isGroup: dto.peer.group ?? false, kind: dto.peer.kind, memberCount: dto.peer.members ?? 0,
-                            type: dto.peer.type, handle: dto.peer.handle, noForward: dto.peer.noForward ?? false)
+                            type: dto.peer.type, handle: dto.peer.handle,
+                            noForward: (dto.peer.noForward ?? false) || (dto.protected ?? false))
         let real = [dto.peer.firstName, dto.peer.lastName].compactMap { $0 }.joined(separator: " ")
         return ChatThread(messages: dto.messages.map(\.model), peer: peer,
                           lastSeen: dto.peer.lastSeen.map { Date(timeIntervalSince1970: $0) },
@@ -1058,6 +1062,12 @@ struct RemoteMessengerRepository: MessengerRepository {
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
                           isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? [])
+    }
+
+    func setChatProtected(peerID: String, on: Bool) async throws -> Bool {
+        let data = try await api.request("PUT", "/v1/chats/\(peerID)/protect", body: ServerAPI.json(["on": on]))
+        struct R: Decodable { let `protected`: Bool }
+        return (try? decodeAPI(R.self, from: data))?.protected ?? on
     }
 
     func setChatTTL(peerID: String, seconds: Int) async throws -> Int {

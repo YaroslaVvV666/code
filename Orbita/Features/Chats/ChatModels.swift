@@ -354,6 +354,18 @@ final class ChatModel: ObservableObject {
         await refresh()
     }
 
+    /// Личная переписка: копирование и пересылка запрещены
+    var isProtected: Bool { !peer.isGroup && peer.noForward }
+
+    /// Запретить / разрешить копирование и пересылку (личная переписка)
+    func setProtected(_ on: Bool) async {
+        do {
+            _ = try await repo.setChatProtected(peerID: peerID, on: on)
+            Haptics.notify(.success)
+            await refresh()
+        } catch let e as APIError { error = e } catch {}
+    }
+
     /// Таймер исчезающих сообщений для этого чата (секунды; 0 — выключить)
     func setTTL(_ seconds: Int) async {
         let before = ttl
