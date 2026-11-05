@@ -194,24 +194,43 @@ struct StickerEditorView: View {
         .padding(.bottom, 10)
     }
 
+    /// Панель инструментов — значки, как в Telegram: рисунок, текст, стикер, настройка света
     private var segmented: some View {
-        HStack(spacing: 2) {
-            seg(.draw, s.t("Рисунок", "Draw"))
-            seg(.stickers, s.t("Стикеры", "Stickers"))
-            seg(.text, s.t("Текст", "Text"))
-            seg(.adjust, s.t("Свет", "Adjust"))
+        HStack(spacing: 0) {
+            seg(.draw, s.t("Рисунок", "Draw")) {
+                Image(systemName: "pencil.tip.crop.circle").font(.system(size: 27, weight: .regular))
+            }
+            seg(.text, s.t("Текст", "Text")) {
+                ToolPlusGlyph { Image(systemName: "character.textbox").font(.system(size: 23, weight: .regular)) }
+            }
+            seg(.stickers, s.t("Стикеры", "Stickers")) {
+                ToolPlusGlyph { Image(systemName: "face.smiling").font(.system(size: 23, weight: .regular)) }
+            }
+            seg(.adjust, s.t("Свет", "Adjust")) {
+                AdjustGlyph()
+            }
         }
-        .padding(3).background(.white.opacity(0.1), in: Capsule())
+        .padding(.horizontal, 6)
+        .frame(height: 56)
+        .background(Color(white: 0.11), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
     }
 
-    private func seg(_ t: Tool, _ title: String) -> some View {
-        Button { tool = t; selected = nil } label: {
-            Text(title).font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(tool == t ? .black : .white)
-                .padding(.horizontal, 12).frame(height: 32)
-                .background(tool == t ? AnyShapeStyle(.white) : AnyShapeStyle(.clear), in: Capsule())
+    private func seg<G: View>(_ t: Tool, _ title: String, @ViewBuilder _ glyph: () -> G) -> some View {
+        Button {
+            Haptics.select()
+            withAnimation(.easeOut(duration: 0.15)) { tool = t; selected = nil }
+        } label: {
+            glyph()
+                .foregroundStyle(tool == t ? Color.white : Color.white.opacity(0.45))
+                .frame(width: 52, height: 44)
+                .background {
+                    if tool == t { Capsule().fill(.white.opacity(0.12)) }
+                }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 
     @ViewBuilder private var toolPanel: some View {
@@ -464,5 +483,41 @@ private struct StickerTextEditor: View {
             }
         }
         .onAppear { focused = true }
+    }
+}
+
+/// Значок с маленьким «+» снизу слева (добавить текст / добавить стикер)
+private struct ToolPlusGlyph<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(.leading, 7).padding(.bottom, 6)
+            .overlay(alignment: .bottomLeading) {
+                Image(systemName: "plus").font(.system(size: 12, weight: .bold))
+            }
+    }
+}
+
+/// Значок «настройки»: два ползунка
+private struct AdjustGlyph: View {
+    var body: some View {
+        VStack(spacing: 7) {
+            line(knob: 0.32)
+            line(knob: 0.7)
+        }
+        .frame(width: 30, height: 24)
+    }
+
+    private func line(knob: CGFloat) -> some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().frame(height: 2.2).frame(maxHeight: .infinity)
+                Circle().fill(Color(white: 0.11)).frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(lineWidth: 2.2))
+                    .offset(x: g.size.width * knob - 4.5)
+            }
+        }
+        .frame(height: 9)
     }
 }
