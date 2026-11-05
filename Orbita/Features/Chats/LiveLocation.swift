@@ -294,7 +294,11 @@ struct LocationShareSheet: View {
             if Task.isCancelled { return }
             let marks = try? await CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: c.latitude, longitude: c.longitude))
             if Task.isCancelled { return }
-            placeName = marks?.first.map(Self.describe)
+            if let place = marks?.first {
+                placeName = Self.describe(place)
+            } else {
+                placeName = nil
+            }
         }
     }
 

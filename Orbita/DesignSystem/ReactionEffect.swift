@@ -95,6 +95,7 @@ struct FrameProbe: UIViewRepresentable {
 /// Доступ к рамкам «по ключу» — как раньше словарь, но считается в момент обращения
 @MainActor
 final class MessageFrameStore {
+    @MainActor
     struct Lookup {
         subscript(_ id: String) -> CGRect? { MessageFrameProbes.shared.frame(id) }
     }
