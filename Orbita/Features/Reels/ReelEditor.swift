@@ -249,7 +249,10 @@ struct ReelEditorView: View {
             .animation(.spring(response: 0.34, dampingFraction: 0.86), value: tool)
 
             if editing != nil {
-                ReelTextEditor(item: Binding(get: { editing ?? ReelText(text: "") }, set: { editing = $0 })) { commitText() }
+                // запись принимаем, только пока окно открыто и только для того же текста: при закрытии поле ввода ещё раз
+                // «сохраняет» значение, и раньше это создавало новый пустой текст — окно ввода открывалось снова и снова
+                ReelTextEditor(item: Binding(get: { editing ?? ReelText(text: "") },
+                                             set: { v in if editing?.id == v.id { editing = v } })) { commitText() }
                     .transition(.opacity)
                     .zIndex(2)
             }

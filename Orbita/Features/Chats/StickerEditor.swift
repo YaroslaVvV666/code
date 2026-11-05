@@ -93,7 +93,10 @@ struct StickerEditorView: View {
         // ввод текста — прямо поверх стикера (как в шортсах): стикер виден под затемнением
         .overlay {
             if editingText != nil {
-                ReelTextEditor(item: Binding(get: { editingText ?? ReelText(text: "") }, set: { editingText = $0 })) { commitText() }
+                // запись принимаем, только пока окно открыто и только для того же текста: при закрытии поле ввода ещё раз
+                // «сохраняет» значение, и раньше это создавало новый пустой текст — окно ввода открывалось снова и снова
+                ReelTextEditor(item: Binding(get: { editingText ?? ReelText(text: "") },
+                                             set: { v in if editingText?.id == v.id { editingText = v } })) { commitText() }
                     .transition(.opacity)
             }
         }
