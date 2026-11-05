@@ -917,29 +917,14 @@ struct UserPageView: View {
                         tile(icon: "video.fill", title: s.t("Видео", "Video")) { call(profile, video: true) }
                         moreMenu(profile)
                     }
-                    // «Подписаться» и «В контакты» — одной строкой, двумя кнопками
-                    HStack(spacing: 8) {
-                        halfButton(icon: profile.following ? "person.fill.checkmark" : "person.fill.badge.plus",
-                                   title: profile.following ? s.t("Вы подписаны", "Following") : s.t("Подписаться", "Follow"),
-                                   filled: !profile.following) {
-                            Haptics.impact(.light)
-                            Task { await model.toggleFollow() }
-                        }
-                        halfButton(icon: profile.isContact ? "person.crop.circle.badge.checkmark" : "person.badge.plus",
-                                   title: profile.isContact ? s.t("В контактах", "Contact") : s.t("В контакты", "Add contact"),
-                                   filled: false) {
-                            showContact = true
-                        }
+                    // «Подписаться»; «Добавить в контакты» и «Заблокировать» — в карточке с данными ниже
+                    halfButton(icon: profile.following ? "person.fill.checkmark" : "person.fill.badge.plus",
+                               title: profile.following ? s.t("Вы подписаны", "Following") : s.t("Подписаться", "Follow"),
+                               filled: !profile.following) {
+                        Haptics.impact(.light)
+                        Task { await model.toggleFollow() }
                     }
-                } else {
-                    rowButton(icon: profile.isContact ? "person.fill.checkmark" : "person.badge.plus",
-                              title: profile.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
-                        showContact = true
-                    }
-                    .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
                 }
-                rowButton(icon: "hand.raised.fill", title: s.blockUser, danger: true) { confirmBlock = true }
-                    .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
             }
             .padding(.horizontal, 16)
             .onAppear { muted = UserDefaults.standard.bool(forKey: "dm_muted_" + profile.id) }
@@ -1066,17 +1051,27 @@ struct UserPageView: View {
 
     @ViewBuilder
     private func info(_ profile: UserProfile) -> some View {
+        // одним блоком: номер (если не скрыт — всегда первым), имя пользователя, описание, день рождения
         let rows: [ProfileInfoRow] = [
             ProfileInfoRow(label: s.phoneLabel, value: profile.phone ?? "", accent: true, kind: .phone),
             ProfileInfoRow(label: s.t("Имя пользователя", "Username"),
                            value: profile.username.map { "@" + $0 } ?? "", accent: true,
                            kind: .username(link: DeepLink.profileLink(username: profile.username, userID: profile.id))),
-            ProfileInfoRow(label: s.birthday, value: s.birthdayText(profile.birthday) ?? ""),
             ProfileInfoRow(label: s.bioLabel, value: profile.bio),
+            ProfileInfoRow(label: s.birthday, value: s.birthdayText(profile.birthday) ?? ""),
         ].filter { !$0.value.isEmpty }
+        // и в той же карточке — «Добавить в контакты» и «Заблокировать»
+        var actions: [ProfileInfoAction] = []
+        if !model.isMe {
+            actions.append(ProfileInfoAction(title: profile.isContact ? s.t("Изменить контакт", "Edit contact")
+                                                                      : s.t("Добавить в контакты", "Add to contacts")) { showContact = true })
+            if !profile.blockedByMe {
+                actions.append(ProfileInfoAction(title: s.blockUser, danger: true) { confirmBlock = true })
+            }
+        }
 
-        if !rows.isEmpty {
-            ProfileInfoCard(rows: rows).padding(.horizontal, 16)
+        if !rows.isEmpty || !actions.isEmpty {
+            ProfileInfoCard(rows: rows, actions: actions).padding(.horizontal, 16)
         }
     }
 

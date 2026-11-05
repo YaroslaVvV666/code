@@ -102,12 +102,25 @@ struct ProfileInfoRow: Identifiable {
     var kind: Kind = .text
 }
 
+/// Действие строкой в той же карточке: «Добавить в контакты», «Заблокировать»
+struct ProfileInfoAction: Identifiable {
+    var id: String { title }
+    let title: String
+    var danger = false
+    let action: () -> Void
+}
+
+/// Карточка профиля одним блоком (как в Telegram): номер, имя пользователя, описание, день рождения,
+/// а под ними — действия; всё разделено тонкими линиями
 struct ProfileInfoCard: View {
     let rows: [ProfileInfoRow]
+    var actions: [ProfileInfoAction] = []
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var copied: String?
+    @State private var qrLink: QRLink?
 
+    private struct QRLink: Identifiable { let id: String }
     private var s: Strings { Strings(lang: lang) }
 
     var body: some View {
@@ -116,15 +129,31 @@ struct ProfileInfoCard: View {
                 rowView(row)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 11)
+                    .padding(.vertical, 12)
                     .overlay(alignment: .bottom) {
-                        if index < rows.count - 1 {
-                            Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 16)
-                        }
+                        if index < rows.count - 1 || !actions.isEmpty { divider }
                     }
+            }
+            ForEach(Array(actions.enumerated()), id: \.element.id) { index, item in
+                Button {
+                    Haptics.select()
+                    item.action()
+                } label: {
+                    Text(item.title)
+                        .font(.system(size: 17))
+                        .foregroundStyle(item.danger ? theme.danger : theme.accentColor)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16).frame(minHeight: 52)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .bottom) {
+                    if index < actions.count - 1 { divider }
+                }
             }
         }
         .card(theme, radius: 18)
+        .sheet(item: $qrLink) { link in ProfileQRSheet(link: link.id).environment(\.theme, theme) }
         .overlay(alignment: .bottom) {
             if let copied {
                 Text(copied)
@@ -139,19 +168,24 @@ struct ProfileInfoCard: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: copied)
     }
 
+    private var divider: some View {
+        Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 16)
+    }
+
     @ViewBuilder
     private func rowView(_ row: ProfileInfoRow) -> some View {
+        // подпись сверху, значение крупно под ней
         let content = VStack(alignment: .leading, spacing: 3) {
+            Text(row.label.lowercased())
+                .font(.system(size: 15))
+                .foregroundStyle(theme.text)
             Group {
                 if row.kind == .text { LinkText(text: row.value, tint: theme.accentColor) } else { Text(row.value) }
             }
-                .font(.system(size: 17))
+                .font(.system(size: 18))
                 .foregroundStyle(row.accent ? theme.accentColor : theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .multilineTextAlignment(.leading)
-            Text(row.label.lowercased())
-                .font(.system(size: 13))
-                .foregroundStyle(theme.textTertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -160,6 +194,7 @@ struct ProfileInfoCard: View {
         case .text:
             content.textSelection(.enabled)
         case .username(let link):
+            HStack(alignment: .center, spacing: 10) {
             Menu {
                 Button { copy(row.value, toast: s.t("Имя пользователя скопировано", "Username copied")) } label: {
                     Label(s.t("Скопировать имя пользователя", "Copy username"), systemImage: "doc.on.doc")
@@ -174,6 +209,18 @@ struct ProfileInfoCard: View {
                 }
             } label: { content }
             .buttonStyle(.plain)
+                // QR-код профиля — справа, как в Telegram
+                if let link {
+                    Button {
+                        Haptics.impact(.light)
+                        qrLink = QRLink(id: link)
+                    } label: {
+                        Image(systemName: "qrcode").font(.system(size: 24)).foregroundStyle(theme.accentColor)
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
         case .phone:
             Menu {
                 Button { copy(row.value, toast: s.t("Номер скопирован", "Number copied")) } label: {

@@ -100,7 +100,6 @@ struct ChatInfoView: View {
                     if !isGroup { profileButton }            // главная кнопка — профиль со стеной и постами
                     if isGroup { appearanceRow }
                     infoCard
-                    dmRows
                     if !isGroup { CommonChatsCard(userID: model.peer.id) }
                     if isGroup, let group, group.isAdmin { adminCard(group) }
                     // в канале подписчики — в отдельном списке, как в Telegram; в группе участники видны сразу
@@ -512,22 +511,16 @@ struct ChatInfoView: View {
         }
     }
 
-    /// «В контакты» и «Заблокировать» — отдельными строками под кнопками
-    @ViewBuilder
-    private var dmRows: some View {
-        if !isGroup {
-            VStack(spacing: 10) {
-                dmRow(model.isContact ? "person.fill.checkmark" : "person.badge.plus",
-                      model.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
-                    showContact = true
-                }
-                dmRow(profile?.blockedByMe == true ? "hand.raised.slash" : "hand.raised.fill",
-                      profile?.blockedByMe == true ? s.unblockUser : s.blockUser, danger: profile?.blockedByMe != true) {
-                    if profile?.blockedByMe == true { setBlocked(false) } else { confirmBlock = true }
-                }
-            }
-            .padding(.horizontal, 16)
+    /// «Добавить в контакты» и «Заблокировать» — строками в карточке с данными человека
+    private var dmActions: [ProfileInfoAction] {
+        var out = [ProfileInfoAction(title: model.isContact ? s.t("Изменить контакт", "Edit contact")
+                                                            : s.t("Добавить в контакты", "Add to contacts")) { showContact = true }]
+        if profile?.blockedByMe == true {
+            out.append(ProfileInfoAction(title: s.unblockUser) { setBlocked(false) })
+        } else {
+            out.append(ProfileInfoAction(title: s.blockUser, danger: true) { confirmBlock = true })
         }
+        return out
     }
 
     /// «Обои и цвет» — свой фон и цвет моих сообщений в этом чате (только у меня)
@@ -678,8 +671,8 @@ struct ChatInfoView: View {
         if isGroup {
             groupAboutCard
         } else {
-            let rows = infoRows
-            if !rows.isEmpty { ProfileInfoCard(rows: rows).padding(.horizontal, 16) }
+            // одной карточкой: данные человека, а под ними «Добавить в контакты» и «Заблокировать»
+            ProfileInfoCard(rows: infoRows, actions: dmActions).padding(.horizontal, 16)
         }
     }
 
@@ -700,12 +693,12 @@ struct ChatInfoView: View {
                 rows.append(ProfileInfoRow(label: s.t("Медленный режим", "Slow mode"), value: s.slowLabel(g.slow)))
             }
         } else if let p = profile {
-            // как просили: сначала юзернейм, затем день рождения, затем описание
+            // номер (если человек его не скрывает) — всегда первым, затем имя пользователя, описание, день рождения
+            if let phone = p.phone, !phone.isEmpty { rows.append(ProfileInfoRow(label: s.phoneLabel, value: phone, accent: true, kind: .phone)) }
             if let u = p.username, !u.isEmpty { rows.append(ProfileInfoRow(label: s.t("Имя пользователя", "Username"), value: "@" + u, accent: true,
                                            kind: .username(link: DeepLink.profileLink(username: u, userID: p.id)))) }
-            if let b = s.birthdayText(p.birthday), !b.isEmpty { rows.append(ProfileInfoRow(label: s.birthday, value: b)) }
             if !p.bio.isEmpty { rows.append(ProfileInfoRow(label: s.bioLabel, value: p.bio)) }
-            if let phone = p.phone, !phone.isEmpty { rows.append(ProfileInfoRow(label: s.phoneLabel, value: phone, accent: true, kind: .phone)) }
+            if let b = s.birthdayText(p.birthday), !b.isEmpty { rows.append(ProfileInfoRow(label: s.birthday, value: b)) }
             if model.isProtected {
                 rows.append(ProfileInfoRow(label: s.t("Защита", "Protection"), value: s.t("Копирование и пересылка запрещены", "Copying and forwarding are restricted")))
             }
