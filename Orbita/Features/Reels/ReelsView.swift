@@ -168,6 +168,7 @@ final class ReelsModel: ObservableObject {
 // MARK: - Экран «Шортс»
 
 struct ReelsView: View {
+    @Environment(\.tabBarHeight) private var tabBarHeight
     var onOpenAuthor: (Author) -> Void
     var suspended = false          // поверх открыт профиль — звук и видео стоят
     /// Режим «один звук»: показываем заданный список, начиная с startID, и кнопку «назад» вместо вкладок
@@ -608,11 +609,14 @@ struct ReelsView: View {
         }
     }
 
-    /// Сколько снизу занимает плавающая панель вкладок: подпись и полоса прогресса стоят над ней
+    /// Сколько снизу занимает плавающая панель вкладок: подпись и полоса прогресса стоят над ней.
+    /// Берём НАСТОЯЩУЮ высоту панели (измеряется в MainTabView), а не угаданную: раньше полоса течения видео
+    /// уходила под панель. Страница отводит снизу bottomClear + safeBottom − 10, а сама полоса стоит в 6,5 pt
+    /// над этим местом — итого линия ~14 pt над верхним краем панели.
     private var bottomClear: CGFloat {
         let bottom = (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.keyWindow?.safeAreaInsets.bottom) ?? 34
-        // кнопки/подпись/полоса прижаты к низу: полоса течения видео почти прилегает к панели вкладок (как в TikTok)
-        return fixed != nil ? bottom + 20 : bottom + 40          // в режиме «один звук» нижней панели нет
+        if fixed != nil { return bottom + 20 }                   // в режиме «один звук» нижней панели нет
+        return tabBarHeight + 18
     }
 
     private var topInset: CGFloat {

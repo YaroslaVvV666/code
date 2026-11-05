@@ -20,6 +20,16 @@ struct TabBarHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
+/// Настоящая (измеренная) высота нижней панели вкладок — экраны на весь экран (шортсы) ставят свои элементы над ней
+private struct TabBarHeightEnvKey: EnvironmentKey { static let defaultValue: CGFloat = 70 }
+
+extension EnvironmentValues {
+    var tabBarHeight: CGFloat {
+        get { self[TabBarHeightEnvKey.self] }
+        set { self[TabBarHeightEnvKey.self] = newValue }
+    }
+}
+
 struct AuthorRoute: Identifiable {
     let id: String
 }
@@ -100,6 +110,7 @@ struct MainTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.34, dampingFraction: 0.92), value: tab)
+        .environment(\.tabBarHeight, barHeight)
         .environmentObject(session)
         // Панель всегда лежит поверх; обычным экранам оставляем под неё место, а «Шортс» идёт на весь экран под панелью
         .safeAreaInset(edge: .bottom, spacing: 0) {
