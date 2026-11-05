@@ -28,53 +28,80 @@ final class VoiceRecorder: NSObject, ObservableObject {
         }
     }
 
-    func start() async -> Bool {
-        guard await Self.requestPermission() else { return false }
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
-            AudioSessionGate.willActivate()
-            try session.setActive(true)
-            let file = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
-            let settings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: 44100,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 48000,
-                AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
-            ]
-            let recorder = try AVAudioRecorder(url: file, settings: settings)
-            recorder.isMeteringEnabled = true
-            guard recorder.record() else { return false }
-            self.recorder = recorder
-            url = file
-            samples = []
-            recent = []
-            startedAt = Date()
-            isRecording = true
-            tick = 0
-            // Снимаем громкость 30 раз в секунду — как раз частота перерисовки диаграммы, поэтому она идёт почти в реальном времени.
-            // Главное: таймер в режиме .common, иначе пока палец держит кнопку записи (трекинг касания) он замирает и волна «залипает».
-            let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, let r = self.recorder else { return }
-                    r.updateMeters()
-                    let power = r.averagePower(forChannel: 0)                   // дБ: -160...0
-                    let linear = pow(10, power / 20)
-                    self.level = min(1, sqrt(linear) * 1.5)
-                    self.recent.append(self.level)
-                    if self.recent.count > 90 { self.recent.removeFirst(self.recent.count - 90) }
-                    self.tick += 1
-                    if self.tick % 3 == 0 { self.samples.append(self.level) }       // ~10 отсчётов в секунду в сохранённую волну
-                    if r.currentTime >= Self.maxDuration { self.timer?.invalidate() }
-                }
-            }
-            RunLoop.main.add(t, forMode: .common)
-            timer = t
-            return true
-        } catch {
-            return false
+    nonisolated private static let settings: [String: Any] = [
+        AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+        AVSampleRateKey: 44100,
+        AVNumberOfChannelsKey: 1,
+        AVEncoderBitRateKey: 48000,
+        AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+    ]
+
+    /// Один раз за запуск: подгружаем кодек и класс рекордера в фоне — первое голосовое стартует без холодной заминки
+    private static var warmed = false
+    static func prewarm() {
+        guard !warmed else { return }
+        warmed = true
+        Task.detached(priority: .utility) {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-warm.m4a")
+            _ = try? AVAudioRecorder(url: url, settings: VoiceRecorder.settings)
+            try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    private struct RecorderBox: @unchecked Sendable { let recorder: AVAudioRecorder }
+
+    func start() async -> Bool {
+        // доступ уже есть — не ходим в систему
+        if AVAudioApplication.shared.recordPermission != .granted {
+            guard await Self.requestPermission() else { return false }
+        }
+        AudioSessionGate.willActivate()
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
+        // Категория, активация сессии и запуск рекордера — в фоне, на очереди аудиосессии.
+        // На главном потоке это стоило 50–300 мс и дёргало анимацию кнопки в момент нажатия
+        let box: RecorderBox? = await AudioSessionGate.perform {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                if session.category != .playAndRecord || session.mode != .default
+                    || !session.categoryOptions.contains(.defaultToSpeaker) {
+                    try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+                }
+                try session.setActive(true)
+                let r = try AVAudioRecorder(url: file, settings: VoiceRecorder.settings)
+                r.isMeteringEnabled = true
+                guard r.prepareToRecord(), r.record() else { return nil }
+                return RecorderBox(recorder: r)
+            } catch {
+                return nil
+            }
+        }
+        guard let recorder = box?.recorder else { return false }
+        self.recorder = recorder
+        url = file
+        samples = []
+        recent = []
+        startedAt = Date()
+        isRecording = true
+        tick = 0
+        // Снимаем громкость 30 раз в секунду — как раз частота перерисовки диаграммы, поэтому она идёт почти в реальном времени.
+        // Главное: таймер в режиме .common, иначе пока палец держит кнопку записи (трекинг касания) он замирает и волна «залипает».
+        let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let r = self.recorder else { return }
+                r.updateMeters()
+                let power = r.averagePower(forChannel: 0)                   // дБ: -160...0
+                let linear = pow(10, power / 20)
+                self.level = min(1, sqrt(linear) * 1.5)
+                self.recent.append(self.level)
+                if self.recent.count > 90 { self.recent.removeFirst(self.recent.count - 90) }
+                self.tick += 1
+                if self.tick % 3 == 0 { self.samples.append(self.level) }       // ~10 отсчётов в секунду в сохранённую волну
+                if r.currentTime >= Self.maxDuration { self.timer?.invalidate() }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        return true
     }
 
     /// Останавливает запись. Слишком короткая (< 1 с) отбрасывается.
@@ -133,13 +160,29 @@ struct ChatMediaNext {
     let messageID: String
 }
 
+/// Часы воспроизведения: на них подписаны только те вью, которым нужен бегущий прогресс
+@MainActor
+final class PlaybackClock: ObservableObject {
+    @Published private(set) var value: Double = 0
+    /// Для пузырей, которые сейчас не играют: никогда не меняется — подписка на него бесплатна
+    static let idle = PlaybackClock()
+
+    func set(_ v: Double) {
+        // не публикуем микроскопические изменения — меньше лишних кадров
+        if abs(v - value) >= 0.002 || v == 0 || v == 1 { value = v }
+    }
+}
+
 @MainActor
 final class VoicePlayer: ObservableObject {
     static let shared = VoicePlayer()
 
     @Published private(set) var currentID: String?
     @Published private(set) var isPlaying = false
-    @Published private(set) var progress: Double = 0
+    /// Прогресс — в отдельном объекте: 20 обновлений в секунду перерисовывают только полоску текущего голосового,
+    /// а не весь экран переписки и не каждый пузырь (раньше всё это пересобиралось на каждом тике)
+    let clock = PlaybackClock()
+    var progress: Double { clock.value }
     @Published private(set) var rate: Float = {
         let v = UserDefaults.standard.double(forKey: "voice_rate")
         return v == 1.5 || v == 2 ? Float(v) : 1
@@ -195,7 +238,7 @@ final class VoicePlayer: ObservableObject {
     func pause() { player?.pause(); isPlaying = false }
     func seek(toFraction f: Double) {
         let s = max(0, min(1, f)) * total
-        progress = max(0, min(1, f))
+        clock.set(max(0, min(1, f)))
         player?.seek(to: CMTime(seconds: s, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
     var duration: Double { total }
@@ -218,15 +261,15 @@ final class VoicePlayer: ObservableObject {
         player = p
         currentID = id
         total = max(duration, 0.1)
-        progress = 0
+        clock.set(0)
         if let saved = positions[id] {                          // продолжаем с места, где остановились
-            progress = saved
+            clock.set(saved)
             p.seek(to: CMTime(seconds: saved * total, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
         observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
-                self.progress = min(1, time.seconds / self.total)
+                self.clock.set(min(1, time.seconds / self.total))
             }
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
@@ -257,7 +300,7 @@ final class VoicePlayer: ObservableObject {
         player = nil
         currentID = nil
         isPlaying = false
-        progress = 0
+        clock.set(0)
     }
 }
 
@@ -265,6 +308,10 @@ final class VoicePlayer: ObservableObject {
 
 @MainActor
 final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVCapturePhotoCaptureDelegate {
+    /// Один рекордер на все переписки: камера, микрофон и выходы настраиваются один раз за запуск приложения,
+    /// а не в каждом открытом чате заново (это и давало долгую первую запись кружка в каждом чате)
+    static let chat = CircleRecorder()
+
     let session = AVCaptureSession()
     @Published private(set) var isRecording = false
     @Published private(set) var ready = false
@@ -304,43 +351,88 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         Task.detached(priority: .utility) { try? jpeg.write(to: url, options: .atomic) }
     }
 
+    /// Доступ уже выдан — отвечаем сразу, без похода в систему
+    private static func access(_ type: AVMediaType) async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: type) {
+        case .authorized: return true
+        case .notDetermined: return await AVCaptureDevice.requestAccess(for: type)
+        default: return false
+        }
+    }
+
+    /// Собрать камеру заранее (без запуска): при первом зажатии останется только включить сессию.
+    /// Зовётся, когда открывается переписка в режиме кружков или переключаемся на кружки
+    func preconfigure() {
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        let parts = graph
+        queue.async { _ = Self.configureGraph(parts) }
+    }
+
+    /// Всё, что нужно очереди камеры (без обращения к главному потоку)
+    private struct Graph: @unchecked Sendable {
+        let session: AVCaptureSession
+        let output: AVCaptureMovieFileOutput
+        let photo: AVCapturePhotoOutput
+        let data: AVCaptureVideoDataOutput
+        let gestures: HandGestureDetector
+        let gestureQueue: DispatchQueue
+    }
+    private var graph: Graph {
+        Graph(session: session, output: output, photo: photoCapture, data: dataOutput, gestures: gestures, gestureQueue: gestureQueue)
+    }
+
+    /// Настройка входов/выходов — один раз. Только на очереди камеры
+    nonisolated private static func configureGraph(_ g: Graph) -> Bool {
+        let session = g.session
+        guard session.inputs.isEmpty else { return true }
+        session.beginConfiguration()
+        session.automaticallyConfiguresApplicationAudioSession = false      // звук настраиваем сами (см. activateRecordingAudio)
+        // 720p: кружок на экране ~720 px — 1080p лишь дольше стартует, сильнее греет и весит больше
+        session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .high
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+                ?? AVCaptureDevice.default(for: .video),
+              let cameraInput = try? AVCaptureDeviceInput(device: camera), session.canAddInput(cameraInput) else {
+            session.commitConfiguration()
+            return false
+        }
+        session.addInput(cameraInput)
+        if let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
+           session.canAddInput(micInput) {
+            session.addInput(micInput)
+        }
+        if session.canAddOutput(g.output) { session.addOutput(g.output) }
+        if session.canAddOutput(g.photo) { session.addOutput(g.photo) }   // режим «Фото» в шортсах
+        g.output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
+        // параллельный выход кадров для распознавания жестов (Vision): маленькие кадры в родном формате камеры —
+        // без перевода в BGRA и без полноразмерных буферов 30 раз в секунду
+        g.data.alwaysDiscardsLateVideoFrames = true
+        g.data.deliversPreviewSizedOutputBuffers = true
+        g.data.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+        g.data.setSampleBufferDelegate(g.gestures, queue: g.gestureQueue)
+        if session.canAddOutput(g.data) { session.addOutput(g.data) }
+        session.commitConfiguration()
+        return true
+    }
+
     /// Разрешения и подготовка фронтальной камеры
     func prepare() async -> Bool {
         failure = nil
-        let video = await AVCaptureDevice.requestAccess(for: .video)
-        let audio = await AVCaptureDevice.requestAccess(for: .audio)
+        let video = await Self.access(.video)
+        let audio = await Self.access(.audio)
         guard video, audio else { failure = "denied"; return false }
-        configureAudio()
-        if ready, session.isRunning { return true }
-        let session = session, output = output
+        AudioSessionGate.willActivate()
+        let parts = graph
+        if ready, session.isRunning {
+            queue.async { Self.activateRecordingAudio() }
+            return true
+        }
         let ok: Bool = await withCheckedContinuation { continuation in
             queue.async {
-                // настройка делается один раз; повторный запуск лишь включает сессию заново
-                if session.inputs.isEmpty {
-                    session.beginConfiguration()
-                    session.automaticallyConfiguresApplicationAudioSession = false      // звук настраиваем сами (см. configureAudio)
-                    session.sessionPreset = .high
-                    guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-                            ?? AVCaptureDevice.default(for: .video),
-                          let cameraInput = try? AVCaptureDeviceInput(device: camera), session.canAddInput(cameraInput) else {
-                        session.commitConfiguration()
-                        continuation.resume(returning: false)
-                        return
-                    }
-                    session.addInput(cameraInput)
-                    if let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
-                       session.canAddInput(micInput) {
-                        session.addInput(micInput)
-                    }
-                    if session.canAddOutput(output) { session.addOutput(output) }
-                    if session.canAddOutput(self.photoCapture) { session.addOutput(self.photoCapture) }   // режим «Фото» в шортсах
-                    output.maxRecordedDuration = CMTime(seconds: CircleRecorder.maxDuration, preferredTimescale: 600)
-                    // параллельный выход кадров для распознавания жестов (Vision)
-                    self.dataOutput.alwaysDiscardsLateVideoFrames = true
-                    self.dataOutput.setSampleBufferDelegate(self.gestures, queue: self.gestureQueue)
-                    if session.canAddOutput(self.dataOutput) { session.addOutput(self.dataOutput) }
-                    session.commitConfiguration()
-                }
+                // звук для записи — здесь, в фоне: на главном потоке setActive подвешивал появление круга
+                Self.activateRecordingAudio()
+                guard Self.configureGraph(parts) else { continuation.resume(returning: false); return }
+                let session = parts.session, output = parts.output
                 // микрофон мог быть снят после неудачной записи — возвращаем
                 if !session.inputs.contains(where: { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.audio) == true }),
                    let mic = AVCaptureDevice.default(for: .audio), let micInput = try? AVCaptureDeviceInput(device: mic),
@@ -363,11 +455,18 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 
     /// Категория «только воспроизведение» (после голосового или музыки) оставляет микрофон без данных —
     /// из-за этого запись заканчивалась ошибкой -11805 «данные не получены». Возвращаем запись перед каждым стартом.
-    private func configureAudio() {
+    nonisolated private static func activateRecordingAudio() {
         let av = AVAudioSession.sharedInstance()
-        try? av.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetooth])
-        AudioSessionGate.willActivate()
+        // уже в нужном режиме — не трогаем: повторная установка категории стоит десятки миллисекунд
+        if av.category != .playAndRecord || av.mode != .videoRecording {
+            try? av.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetooth])
+        }
         try? av.setActive(true)
+    }
+
+    private func configureAudio() {
+        AudioSessionGate.willActivate()
+        queue.async { Self.activateRecordingAudio() }
     }
 
     /// Если система остановила сессию (звонок, другая программа) — запускаем заново
@@ -414,7 +513,8 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
             guard (try? device.lockForConfiguration()) != nil else { return }
             device.videoZoomFactor = z
             device.unlockForConfiguration()
-            Task { @MainActor in self.zoom = z }
+            // подпись «1.4×» и строка ввода перерисовываются только при заметном изменении, а не на каждом кадре щипка
+            Task { @MainActor in if abs(self.zoom - z) >= 0.03 || z == 1 || z == maxZ { self.zoom = z } }
         }
     }
 
@@ -429,6 +529,8 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     func flipCamera() {
         let wantFront = !isFront
         guard !flipping else { return }
+        // запись запрошена, но очередь камеры её ещё не начала — не перестраиваем входы посреди старта
+        if startRequested, !output.isRecording, startedAt == nil { return }
         if startRequested, output.isRecording {
             flipping = true
             flipTarget = wantFront
@@ -638,10 +740,20 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         stopWhenStarted = false
         startedAt = nil
         requestedAt = Date()
-        configureAudio()
-        applyMirror()
+        AudioSessionGate.willActivate()
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("circle-\(UUID().uuidString).mov")
-        output.startRecording(to: file, recordingDelegate: self)
+        let output = output, front = isFront
+        // звук, зеркало и сам старт записи — на очереди камеры: на главном потоке это заметно дёргало анимацию начала
+        queue.async { [weak self] in
+            guard let self else { return }
+            Self.activateRecordingAudio()
+            if let c = output.connection(with: .video) {
+                if c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
+                if c.isVideoMirroringSupported { c.automaticallyAdjustsVideoMirroring = false; c.isVideoMirrored = front }
+            }
+            guard !output.isRecording else { return }
+            output.startRecording(to: file, recordingDelegate: self)
+        }
         isRecording = true
         gestures.active = true          // эффекты по жестам ловим только во время записи
     }
@@ -866,6 +978,13 @@ enum AudioSessionGate {
         queue.async {
             guard g == current() else { return }
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+
+    /// Работа с аудиосессией в той же очереди, что и деактивация, — без гонок и без главного потока
+    static func perform<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            queue.async(qos: .userInitiated, flags: .enforceQoS) { continuation.resume(returning: work()) }
         }
     }
 }

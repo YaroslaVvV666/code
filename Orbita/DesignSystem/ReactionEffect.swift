@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Эффект реакции на весь экран: крупная анимированная эмодзи по центру,
 /// вокруг неё искры, а снизу вверх вылетает стайка таких же эмодзи (как в Telegram и Max)
@@ -10,16 +11,94 @@ struct ReactionFX: Identifiable, Equatable {
     var incoming = false
 }
 
-/// Положение сообщений на экране (экранные координаты): эффект реакции вылетает прямо из нужного сообщения
-struct MessageFrameKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
+/// Положение сообщений на экране (экранные координаты): эффект реакции вылетает прямо из нужного сообщения,
+/// меню по зажатию открывается на месте пузыря.
+///
+/// Раньше каждая видимая строка на КАЖДОМ кадре прокрутки пересчитывала свою рамку (GeometryReader + preference),
+/// и словарь всех рамок гонялся через дерево вью — заметная часть стоимости прокрутки переписки.
+/// Теперь в фоне строки лежит невидимая UIView-«зонд», а рамку у неё спрашиваем только когда она нужна
+/// (зажали сообщение, прилетела реакция, рассыпаем удалённое). Во время прокрутки — ноль работы.
+@MainActor
+final class MessageFrameProbes {
+    static let shared = MessageFrameProbes()
+    private final class Weak { weak var view: UIView?; init(_ v: UIView) { view = v } }
+    private var probes: [String: [Weak]] = [:]
+    private var adds = 0
+
+    func register(_ id: String, _ view: UIView) {
+        var list = probes[id, default: []].filter { $0.view != nil && $0.view !== view }
+        list.append(Weak(view))
+        probes[id] = list
+        adds += 1
+        if adds % 400 == 0 { compact() }
+    }
+
+    func unregister(_ id: String, _ view: UIView) {
+        guard var list = probes[id] else { return }
+        list.removeAll { $0.view == nil || $0.view === view }
+        probes[id] = list.isEmpty ? nil : list
+    }
+
+    /// Рамка в координатах окна (то же, что .global у SwiftUI). Берём последнюю видимую в окне копию
+    func frame(_ id: String) -> CGRect? {
+        guard let list = probes[id] else { return nil }
+        for w in list.reversed() {
+            guard let v = w.view, let window = v.window, !v.isHidden else { continue }
+            let r = v.convert(v.bounds, to: window)
+            if r.width > 0 || r.height > 0 { return r }
+        }
+        return nil
+    }
+
+    private func compact() {
+        probes = probes.compactMapValues { list in
+            let alive = list.filter { $0.view != nil }
+            return alive.isEmpty ? nil : alive
+        }
     }
 }
 
+/// Невидимый зонд в фоне строки / чипа реакции
+struct FrameProbe: UIViewRepresentable {
+    let id: String
+
+    final class ProbeView: UIView {
+        var probeID = ""
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            isAccessibilityElement = false
+            backgroundColor = .clear
+        }
+        required init?(coder: NSCoder) { fatalError() }
+    }
+
+    func makeUIView(context: Context) -> ProbeView {
+        let v = ProbeView()
+        v.probeID = id
+        MessageFrameProbes.shared.register(id, v)
+        return v
+    }
+
+    func updateUIView(_ v: ProbeView, context: Context) {
+        guard v.probeID != id else { return }
+        MessageFrameProbes.shared.unregister(v.probeID, v)
+        v.probeID = id
+        MessageFrameProbes.shared.register(id, v)
+    }
+
+    static func dismantleUIView(_ v: ProbeView, coordinator: ()) {
+        MessageFrameProbes.shared.unregister(v.probeID, v)
+    }
+}
+
+/// Доступ к рамкам «по ключу» — как раньше словарь, но считается в момент обращения
+@MainActor
 final class MessageFrameStore {
-    var frames: [String: CGRect] = [:]
+    struct Lookup {
+        subscript(_ id: String) -> CGRect? { MessageFrameProbes.shared.frame(id) }
+    }
+    var frames: Lookup { Lookup() }
 }
 
 struct ReactionEffectLayer: View {

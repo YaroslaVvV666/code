@@ -238,3 +238,39 @@ enum AvatarStore {
         for f in sorted.dropFirst(400) { try? FileManager.default.removeItem(at: f) }
     }
 }
+
+/// Уменьшенные превью из локальных байтов (фото во вложениях до отправки, отправляемые сообщения).
+/// Раньше `UIImage(data:)` декодировал полный JPEG прямо в body — при каждой перерисовке строки ввода
+/// (то есть на каждую набранную букву, пока прикреплено фото) и пузыря отправляемого сообщения
+enum PreviewThumbs {
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 120
+        return c
+    }()
+
+    /// Ключ по размеру и выборке байтов по всей длине: заголовки JPEG одинаковые, а вот середина — нет
+    private static func key(_ data: Data, _ maxPixel: CGFloat) -> NSString {
+        var h = Hasher()
+        h.combine(data.count)
+        h.combine(Int(maxPixel))
+        let n = data.count
+        if n > 0 {
+            data.withUnsafeBytes { raw in
+                let step = max(1, n / 64)
+                var i = 0
+                while i < n { h.combine(raw[i]); i += step }
+                h.combine(raw[n - 1])
+            }
+        }
+        return NSString(string: String(h.finalize()))
+    }
+
+    static func image(_ data: Data, maxPixel: CGFloat = 640) -> UIImage? {
+        let k = key(data, maxPixel)
+        if let img = cache.object(forKey: k) { return img }
+        guard let img = ImageCache.downsample(data, maxPixel: maxPixel) ?? UIImage(data: data) else { return nil }
+        cache.setObject(img, forKey: k)
+        return img
+    }
+}

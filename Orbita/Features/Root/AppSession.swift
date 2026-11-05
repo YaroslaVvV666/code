@@ -8,12 +8,24 @@ enum ProfileRoute: Hashable {
     case visibility(String)
 }
 
+/// Видна ли нижняя панель вкладок — на это подписана только сама панель
+@MainActor
+final class TabBarVisibility: ObservableObject {
+    static let shared = TabBarVisibility()
+    @Published var hidden = false
+}
+
 /// Всё, что живёт, пока пользователь вошёл: клиент сервера, лента, профиль
 @MainActor
 final class AppSession: ObservableObject {
     @Published var profileRoute: ProfileRoute?
-    /// Нижняя панель вкладок прячется, пока в «Шортсах» открыты комментарии
-    @Published var tabBarHidden = false
+    /// Нижняя панель вкладок прячется (комментарии в «Шортсах», прокрутка ленты вниз и т.д.).
+    /// Сам флаг живёт в отдельном маленьком объекте: на AppSession подписаны почти все экраны, и раньше каждое
+    /// скрытие/показ панели при прокрутке ленты перерисовывало ленту и посты — ровно во время прокрутки
+    var tabBarHidden: Bool {
+        get { TabBarVisibility.shared.hidden }
+        set { if TabBarVisibility.shared.hidden != newValue { TabBarVisibility.shared.hidden = newValue } }
+    }
     /// Шортс, присланный в чат: нажатие переносит во вкладку «Шортс», где этот ролик идёт первым
     @Published var reelRequest: Post?
     /// Кто сейчас держит звук выключенным (экраны съёмки и публикации). Пока множество не пустое — шортсы и плееры молчат

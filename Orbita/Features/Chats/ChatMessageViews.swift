@@ -193,6 +193,21 @@ struct MessageNoteSheet: View {
 
 // MARK: - Строка сообщения
 
+/// Сравнение строк сообщения: только данные, без замыканий. Замыкания пишут в @State/@StateObject экрана —
+/// их хранилище общее, поэтому «старые» замыкания у пропущенной строки работают с актуальным состоянием
+extension MessageRow: Equatable {
+    nonisolated static func == (a: MessageRow, b: MessageRow) -> Bool {
+        MainActor.assumeIsolated {
+            a.message == b.message && a.isFirst == b.isFirst && a.isLast == b.isLast
+                && a.showSender == b.showSender && a.noForward == b.noForward
+                && a.interactive == b.interactive && a.pinnedMark == b.pinnedMark
+                && (a.onOpenComments == nil) == (b.onOpenComments == nil)
+                && (a.onCallBack == nil) == (b.onCallBack == nil)
+                && (a.onReact == nil) == (b.onReact == nil)
+        }
+    }
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     let isFirst: Bool
@@ -427,10 +442,7 @@ struct MessageRow: View {
                     .padding(.horizontal, 8).frame(height: 26)
                     .background(r.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
                     .overlay(Capsule().stroke(theme.stroke, lineWidth: r.mine ? 0 : 1))
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: MessageFrameKey.self,
-                                               value: [message.id + "|" + r.emoji: g.frame(in: .global)])
-                    })
+                    .background(FrameProbe(id: message.id + "|" + r.emoji))
                 }
                 .buttonStyle(.plain)
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
@@ -891,7 +903,7 @@ struct MediaBlock: View {
 
     private func cell(_ a: ChatAttachment, index: Int) -> some View {
         ZStack {
-            if let data = a.localPreview, let image = UIImage(data: data) {
+            if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if let id = a.thumbID ?? a.mediaID {
                 RemoteImage(id: id)
@@ -949,7 +961,7 @@ struct MediaBlock: View {
             guard !pending else { return }
             // запоминаем, откуда «вылетает» фото, и какая картинка там сейчас видна
             var image: UIImage?
-            if let data = a.localPreview { image = UIImage(data: data) }
+            if let data = a.localPreview { image = PreviewThumbs.image(data, maxPixel: 900) }
             else if let id = a.thumbID ?? a.mediaID, let url = ServerConfig.mediaURL(id) { image = ImageCache.shared.cached(url, maxPixel: 1280) }
             HeroSource.shared.set(id: a.mediaID, rect: frames.box(index).rect, image: image)
             onOpen(index)
@@ -973,7 +985,8 @@ struct VoiceBlock: View {
     private var playerID: String { attachment.mediaID ?? attachment.id }
     private var isCurrent: Bool { player.isCurrent(playerID) }
     private var playing: Bool { isCurrent && player.isPlaying }
-    private var progress: Double { isCurrent ? player.progress : 0 }
+    /// Только у играющего голосового часы настоящие; остальные пузыри подписаны на «вечно стоящие» и не перерисовываются
+    private var clock: PlaybackClock { isCurrent ? player.clock : .idle }
 
     var body: some View {
         let tint = mine ? Color.white : theme.accentColor
@@ -1033,15 +1046,13 @@ struct VoiceBlock: View {
             .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 3) {
-                Waveform(samples: attachment.waveform, progress: progress, active: tint,
-                         inactive: tint.opacity(mine ? 0.42 : 0.28))
+                LiveWaveform(clock: clock, samples: attachment.waveform, active: tint,
+                             inactive: tint.opacity(mine ? 0.42 : 0.28))
                     .frame(maxWidth: .infinity)
                     .frame(height: 20)
                 HStack(spacing: 6) {
-                    let shown = isCurrent && progress > 0 ? attachment.duration * progress : attachment.duration
-                    Text(mmss(Int(shown.rounded(.down))))
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(mine ? Color.white.opacity(0.8) : theme.textTertiary)
+                    LiveVoiceTime(clock: clock, duration: attachment.duration,
+                                  color: mine ? Color.white.opacity(0.8) : theme.textTertiary)
                     if isCurrent {
                         // скорость прямо в пузыре: 1× → 1.5× → 2×, запоминается для всех голосовых
                         Button {
@@ -1073,6 +1084,32 @@ struct VoiceBlock: View {
                 }
             }
         }
+    }
+}
+
+/// Волна, подписанная на часы плеера: на каждом тике перерисовывается только она
+struct LiveWaveform: View {
+    @ObservedObject var clock: PlaybackClock
+    let samples: [Int]
+    let active: Color
+    let inactive: Color
+
+    var body: some View {
+        Waveform(samples: samples, progress: clock.value, active: active, inactive: inactive)
+    }
+}
+
+/// Время голосового: у играющего — сколько прошло, у остальных — длительность
+struct LiveVoiceTime: View {
+    @ObservedObject var clock: PlaybackClock
+    let duration: Double
+    let color: Color
+
+    var body: some View {
+        let shown = clock.value > 0 ? duration * clock.value : duration
+        Text(mmss(Int(shown.rounded(.down))))
+            .font(.system(size: 12).monospacedDigit())
+            .foregroundStyle(color)
     }
 }
 
@@ -1320,7 +1357,7 @@ private struct CircleVideoContent: View {
 
     var body: some View {
         ZStack {
-            if let data = attachment.localPreview, let image = UIImage(data: data) {
+            if let data = attachment.localPreview, let image = PreviewThumbs.image(data, maxPixel: 600) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if let id = attachment.thumbID {
                 RemoteImage(id: id)

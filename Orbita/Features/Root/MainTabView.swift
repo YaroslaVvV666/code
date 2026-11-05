@@ -112,10 +112,7 @@ struct MainTabView: View {
                 .background(GeometryReader { g in
                     Color.clear.preference(key: TabBarHeightKey.self, value: g.size.height)
                 })
-                .offset(y: session.tabBarHidden ? barHeight + 40 : 0)
-                .opacity(session.tabBarHidden ? 0 : 1)
-                .allowsHitTesting(!session.tabBarHidden)
-                .animation(.spring(response: 0.34, dampingFraction: 0.82), value: session.tabBarHidden)
+                .modifier(TabBarHiding(barHeight: barHeight))
         }
         .onPreferenceChange(TabBarHeightKey.self) { barHeight = $0 }
         .onChange(of: session.reelRequest?.id) { _, id in
@@ -227,6 +224,20 @@ struct MainTabView: View {
 }
 
 // MARK: - Нижняя панель
+
+/// Уезжает/возвращается панель — подписка только здесь, весь MainTabView при этом не перерисовывается
+private struct TabBarHiding: ViewModifier {
+    let barHeight: CGFloat
+    @ObservedObject private var visibility = TabBarVisibility.shared
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: visibility.hidden ? barHeight + 40 : 0)
+            .opacity(visibility.hidden ? 0 : 1)
+            .allowsHitTesting(!visibility.hidden)
+            .animation(.spring(response: 0.34, dampingFraction: 0.82), value: visibility.hidden)
+    }
+}
 
 /// Следит за счётчиком непрочитанных (вложенный ObservableObject сам MainTabView не обновляет)
 /// В какой вкладке открыта переписка (по умолчанию — «Чаты»)

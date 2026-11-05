@@ -38,9 +38,10 @@ struct FeedView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var pull: CGFloat = 0
     @State private var pullArmed = false
-    // скрытие нижней панели при прокрутке вниз (как в YouTube)
-    @State private var lastOffset: CGFloat = 0
-    @State private var offsetReady = false
+    // скрытие нижней панели при прокрутке вниз (как в YouTube). Сдвиг — в обычном объекте, а не в @State:
+    // он меняется на каждом кадре прокрутки, и @State заставлял бы всю ленту пересчитываться каждый кадр
+    @State private var scrollTrack = ScrollTrack()
+    final class ScrollTrack { var last: CGFloat = 0; var ready = false }
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -193,10 +194,11 @@ struct FeedView: View {
     /// y — сдвиг верхнего края ленты: 0 у верха, уходит в минус при прокрутке вниз.
     private func handleScroll(_ y: CGFloat) {
         guard !searching else { return }                  // в поиске панель не трогаем
-        guard offsetReady else { offsetReady = true; lastOffset = y; return }
-        let dy = y - lastOffset
+        let t = scrollTrack
+        guard t.ready else { t.ready = true; t.last = y; return }
+        let dy = y - t.last
         guard abs(dy) > 1.5 else { return }               // игнорируем микродрожание
-        lastOffset = y
+        t.last = y
         if y > -70 {                                      // у самого верха — панель всегда видна
             if session.tabBarHidden { session.tabBarHidden = false }
         } else if dy < -3 {                               // листаем вниз — прячем

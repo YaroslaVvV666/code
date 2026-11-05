@@ -949,7 +949,6 @@ struct ChatScreen: View {
                 }
             }
         }
-        .onPreferenceChange(MessageFrameKey.self) { messageFrames.frames = $0 }
         .onAppear { model.frameOf = { [messageFrames] id in messageFrames.frames[id] } }
         .modifier(TranslationSheet(text: $translateText))
         .sheet(item: $stickerPack) { route in
@@ -1560,21 +1559,29 @@ struct ChatScreen: View {
     }
 
     private func entries(_ items: [ChatMessage]) -> [Entry] {
-        let cal = Calendar.current
-        func joins(_ a: ChatMessage, _ b: ChatMessage) -> Bool {
-            a.mine == b.mine && a.sender?.id == b.sender?.id && a.system == nil && b.system == nil
-                && cal.isDate(a.createdAt, inSameDayAs: b.createdAt)
+        // Номер дня по местному времени — простой арифметикой. Calendar.isDate(inSameDayAs:) дорогой, а звался
+        // по три раза на сообщение при каждой перерисовке экрана чата
+        let tz = TimeZone.current
+        let days = items.map { m -> Int in
+            let t = m.createdAt.timeIntervalSince1970 + Double(tz.secondsFromGMT(for: m.createdAt))
+            return Int((t / 86400).rounded(.down))
+        }
+        func joins(_ i: Int, _ j: Int) -> Bool {
+            let a = items[i], b = items[j]
+            return a.mine == b.mine && a.sender?.id == b.sender?.id && a.system == nil && b.system == nil
+                && days[i] == days[j]
                 && abs(b.createdAt.timeIntervalSince(a.createdAt)) < 300
         }
-        return items.enumerated().map { i, m in
-            let prev = i > 0 ? items[i - 1] : nil
-            let next = i + 1 < items.count ? items[i + 1] : nil
-            let newDay = prev == nil || !cal.isDate(prev!.createdAt, inSameDayAs: m.createdAt)
-            return Entry(message: m,
-                         isFirst: prev == nil || !joins(prev!, m),
-                         isLast: next == nil || !joins(m, next!),
-                         dayTitle: newDay ? m.createdAt : nil)
+        var out: [Entry] = []
+        out.reserveCapacity(items.count)
+        for i in items.indices {
+            let m = items[i]
+            out.append(Entry(message: m,
+                             isFirst: i == 0 || !joins(i - 1, i),
+                             isLast: i + 1 == items.count || !joins(i, i + 1),
+                             dayTitle: (i == 0 || days[i - 1] != days[i]) ? m.createdAt : nil))
         }
+        return out
     }
 
     /// Непрочитанные входящие, где тегнули меня (@мой_ник). Удалённые сюда не попадают — их уже нет в items
@@ -1719,7 +1726,7 @@ struct ChatScreen: View {
                 if near != atBottom { atBottom = near }
             }
             .scrollDismissesKeyboard(.interactively)
-            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in userDragged = true })
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in if !userDragged { userDragged = true } })   // запись в @State — один раз, а не на каждом движении пальца
             .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { if $0.translation.height > 50 { hideKeyboard() } })
             .defaultScrollAnchor(.bottom)
             .onAppear {
@@ -1894,12 +1901,13 @@ struct ChatScreen: View {
                 onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) },
                 onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) },
                 onOpenEntity: { entitySheet = $0 })
+            // пузырь не пересчитывается, пока само сообщение то же: печатает собеседник, прочитали другое сообщение,
+            // открылась шторка — раньше от любого такого изменения заново считались ВСЕ пузыри переписки
+            .equatable()
             .allowsHitTesting(!selecting && !model.dissolving.contains(m.id))
             .dustDissolve(active: model.dissolving.contains(m.id))
             .environment(\.mediaFrozen, model.freezing.contains(m.id))
-            .background(GeometryReader { g in
-                Color.clear.preference(key: MessageFrameKey.self, value: [m.id: g.frame(in: .global)])
-            })
+            .background(FrameProbe(id: m.id))
         }
         .overlay {
             if selecting && m.system == nil {

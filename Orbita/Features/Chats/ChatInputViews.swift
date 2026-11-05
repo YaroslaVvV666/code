@@ -16,7 +16,7 @@ struct ChatInputBar: View {
 
     @StateObject private var controller = RichComposerController()
     @StateObject private var voice = VoiceRecorder()
-    @StateObject private var circle = CircleRecorder()
+    @ObservedObject private var circle = CircleRecorder.chat        // общий на все чаты: камера собирается один раз
     @State private var barTop: CGFloat = 0
 
     @AppStorage("chat.micMode") private var micModeRaw = "voice"
@@ -212,7 +212,11 @@ struct ChatInputBar: View {
         }
         .gesture(DragGesture(minimumDistance: 18).onEnded { if $0.translation.height > 30 { hideKeyboard() } })
         .task { await model.loadStickers() }
-        .onAppear { AttachCamera.shared.prewarm() }
+        .onAppear {
+            AttachCamera.shared.prewarm()
+            if cameraMode { circle.preconfigure() }                 // первое зажатие кружка — сразу, без сборки камеры
+            VoiceRecorder.prewarm()                                  // и голосовое стартует без заминки
+        }
         .onDisappear {
             voice.cancel()
             circle.shutdown()
@@ -615,6 +619,7 @@ struct ChatInputBar: View {
     private func toggleMicMode() {
         Haptics.impact(.light)
         withAnimation(.easeOut(duration: 0.15)) { micModeRaw = cameraMode ? "voice" : "camera" }
+        if cameraMode { circle.preconfigure() }
         flash(cameraMode ? s.t("Нажмите и держите — запись видео", "Hold to record video")
                          : s.t("Нажмите и держите — запись голоса", "Hold to record voice"))
     }
@@ -1118,7 +1123,7 @@ private struct DraftThumb: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
-                if let data = draft.preview, let image = UIImage(data: data) {
+                if let data = draft.preview, let image = PreviewThumbs.image(data, maxPixel: 240) {
                     Image(uiImage: image).resizable().scaledToFill()
                         .overlay {
                             if draft.isVideo {

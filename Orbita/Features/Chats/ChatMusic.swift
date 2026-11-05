@@ -448,12 +448,22 @@ struct VoiceNowBar: View {
         if includeCircle, let circle = focus.current {
             CircleNowBar(playback: circle)
         } else if voice.currentID != nil {
-            NowBarLayout(title: nil, isPlaying: voice.isPlaying, progress: voice.progress, duration: voice.duration, rate: voice.rate,
-                         onToggle: { voice.isPlaying ? voice.pause() : voice.resume() },
-                         onSeek: { voice.seek(toFraction: $0) },
-                         onRate: { voice.cycleRate() },
-                         onClose: { voice.stop() })
+            VoiceNowBarLive(voice: voice, clock: voice.clock)
         }
+    }
+}
+
+/// Сама полоска голосового: на часы подписана только она
+private struct VoiceNowBarLive: View {
+    @ObservedObject var voice: VoicePlayer
+    @ObservedObject var clock: PlaybackClock
+
+    var body: some View {
+        NowBarLayout(title: nil, isPlaying: voice.isPlaying, progress: clock.value, duration: voice.duration, rate: voice.rate,
+                     onToggle: { voice.isPlaying ? voice.pause() : voice.resume() },
+                     onSeek: { voice.seek(toFraction: $0) },
+                     onRate: { voice.cycleRate() },
+                     onClose: { voice.stop() })
     }
 }
 

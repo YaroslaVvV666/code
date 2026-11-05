@@ -126,16 +126,31 @@ struct StickerImage: View {
     }
 }
 
-/// Анимированный стикер: короткое видео без звука, крутится по кругу, пока на экране
+/// Анимированный стикер: короткое видео без звука, крутится по кругу, пока на экране.
+/// В переписке все строки построены сразу (список не ленивый) и onDisappear не приходит при прокрутке —
+/// раньше каждый анимированный стикер в истории декодировал видео без остановки. Теперь играет только видимый
 struct StickerVideo: View {
     let mediaID: String
     @StateObject private var box = LoopPlayerBox()
+    @State private var onScreen = false
 
     var body: some View {
         PlayerLayerView(player: box.player, gravity: .resizeAspect)
             .allowsHitTesting(false)
-            .onAppear { box.start(mediaID) }
-            .onDisappear { box.stop() }
+            .background(GeometryReader { g in
+                let f = g.frame(in: .global)
+                let on = f.height > 0 && f.maxY > -40 && f.minY < UIScreen.main.bounds.height + 40
+                Color.clear
+                    .onAppear { setOnScreen(on) }
+                    .onChange(of: on) { _, now in setOnScreen(now) }
+            })
+            .onDisappear { setOnScreen(false) }
+    }
+
+    private func setOnScreen(_ now: Bool) {
+        guard now != onScreen else { return }
+        onScreen = now
+        if now { box.start(mediaID) } else { box.stop() }
     }
 }
 
