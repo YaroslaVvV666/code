@@ -213,6 +213,7 @@ struct ChatInfoView: View {
         }
         .fullScreenCover(isPresented: $showProfile) {
             PublicProfileSheet(source: .id(model.peer.id))
+                .environment(\.profileChatContext, model.peer.id)     // уже в переписке с ним — кнопка «Чат» не нужна
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .presentationBackground(theme.sheet)

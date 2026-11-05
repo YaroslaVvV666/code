@@ -340,6 +340,16 @@ final class UserPageModel: ObservableObject {
 
 // MARK: - Страница пользователя (стена как во ВКонтакте / Facebook)
 
+/// Профиль открыт из переписки с этим человеком: кнопка «Чат» не нужна — достаточно вернуться назад
+private struct ProfileChatContextKey: EnvironmentKey { static let defaultValue: String? = nil }
+
+extension EnvironmentValues {
+    var profileChatContext: String? {
+        get { self[ProfileChatContextKey.self] }
+        set { self[ProfileChatContextKey.self] = newValue }
+    }
+}
+
 struct UserPageView: View {
     @StateObject private var model: UserPageModel
     @ObservedObject private var player: AudioPlayer
@@ -348,6 +358,8 @@ struct UserPageView: View {
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.pageTopInset) private var pageTop
+    @Environment(\.profileChatContext) private var chatContext
+    @State private var storyCount: Int?                // сколько историй в профиле (раздел виден, только если они есть)
     @EnvironmentObject private var flow: AuthFlow
     @State private var chatRoute: ChatRoute?
     @Environment(\.theme) private var theme
@@ -405,17 +417,77 @@ struct UserPageView: View {
             .padding(.horizontal, 16)
     }
 
+    /// Разделы «Медиа», в которых что-то есть (пустых кнопок не показываем — появятся, когда будет что показать)
+    private var availableFilters: [MediaFilter] {
+        mediaFilters.filter { f in
+            switch f {
+            case .photos:  return !(model.profile?.avatars.isEmpty ?? true)
+            case .shorts:  return !model.ownReels.isEmpty
+            case .stories: return (storyCount ?? 0) > 0
+            case .reposts: return !model.repostedReels.isEmpty
+            case .saved:   return !model.savedReels.isEmpty
+            }
+        }
+    }
+
+    /// Всё, от чего зависят разделы, уже загружено
+    private var mediaKnown: Bool { model.reelsLoaded && storyCount != nil && (!model.isMe || model.savedLoaded) }
+
+    private func preloadMedia(_ profile: UserProfile) async {
+        async let reels: Void = model.loadReels()
+        async let stories = session.extras.profileStories(userID: profile.id)
+        if model.isMe { await model.loadSaved() }
+        _ = await reels
+        storyCount = await stories.count
+    }
+
+    /// Содержимое «Медиа»: только непустые разделы; совсем пусто — «Публикаций пока нет»
+    @ViewBuilder
+    private func mediaTab(_ profile: UserProfile) -> some View {
+        let avail = availableFilters
+        if avail.isEmpty {
+            Group {
+                if mediaKnown {
+                    VStack(spacing: 10) {
+                        Image(systemName: "photo.on.rectangle.angled").font(.system(size: 30)).foregroundStyle(theme.textTertiary)
+                        Text(s.t("Публикаций пока нет", "No posts yet"))
+                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                    }
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 40)
+        } else {
+            let current = avail.contains(mediaFilter) ? mediaFilter : avail[0]
+            VStack(spacing: 12) {
+                mediaChips(avail, current: current)
+                switch current {
+                case .photos:  photoGrid(profile)
+                case .shorts:  reelGrid(model.ownReels, loaded: model.reelsLoaded,
+                                        empty: s.t("Шортсов пока нет", "No shorts yet"))
+                case .stories: StoriesGrid(userID: profile.id, name: profile.name, avatarID: profile.avatarID)
+                case .reposts: reelGrid(model.repostedReels, loaded: model.reelsLoaded,
+                                        empty: s.t("Репостов пока нет", "No reposts yet"))
+                case .saved:   reelGrid(model.savedReels, loaded: model.savedLoaded,
+                                        empty: s.t("Сохранённых шортсов нет", "No saved shorts"))
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: avail)
+        }
+    }
+
     /// Мелкие переключатели внутри «Медиа»
-    private var mediaChips: some View {
+    private func mediaChips(_ filters: [MediaFilter], current: MediaFilter) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(mediaFilters, id: \.self) { f in
+                ForEach(filters, id: \.self) { f in
                     Button { withAnimation(.easeOut(duration: 0.15)) { mediaFilter = f } } label: {
                         Text(filterTitle(f))
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(mediaFilter == f ? Color.white : theme.textSecondary)
+                            .foregroundStyle(current == f ? Color.white : theme.textSecondary)
                             .padding(.horizontal, 14).frame(height: 32)
-                            .background(mediaFilter == f ? AnyShapeStyle(theme.accentColor) : AnyShapeStyle(theme.surface), in: Capsule())
+                            .background(current == f ? AnyShapeStyle(theme.accentColor) : AnyShapeStyle(theme.surface), in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }
@@ -456,24 +528,13 @@ struct UserPageView: View {
                         tabRows
                         switch tabKinds[min(tab, tabKinds.count - 1)] {
                         case .posts:   wall(profile)
-                        case .media:
-                            VStack(spacing: 12) {
-                                mediaChips
-                                switch mediaFilter {
-                                case .photos:  photoGrid(profile)
-                                case .shorts:  reelGrid(model.ownReels, loaded: model.reelsLoaded,
-                                                        empty: s.t("Шортсов пока нет", "No shorts yet"))
-                                case .stories: StoriesGrid(userID: profile.id, name: profile.name, avatarID: profile.avatarID)
-                                case .reposts: reelGrid(model.repostedReels, loaded: model.reelsLoaded,
-                                                        empty: s.t("Репостов пока нет", "No reposts yet"))
-                                case .saved:   reelGrid(model.savedReels, loaded: model.savedLoaded,
-                                                        empty: s.t("Сохранённых шортсов нет", "No saved shorts"))
-                                }
-                            }
+                        case .media:   mediaTab(profile)
                         case .friends: FriendsTab(model: model, profile: profile) { friendSheet = $0 }
                         }
                     }
                     .padding(.top, 14)
+                    // заранее узнаём, какие разделы «Медиа» не пустые: пустых кнопок не показываем
+                    .task(id: profile.id) { await preloadMedia(profile) }
                 }
             } else if let failed = model.failed {
                 Text(s.api(failed))
@@ -845,32 +906,38 @@ struct UserPageView: View {
             VStack(spacing: 12) {
                 if !profile.blockedMe {
                     HStack(spacing: 8) {
-                        tile(icon: "bubble.left.fill", title: s.t("Чат", "Chat")) {
-                            chatRoute = ChatRoute(peer: ChatPeer(id: profile.id, name: profile.name,
-                                                                 username: profile.username, avatarID: profile.avatarID))
+                        // из переписки с этим человеком «Чат» не нужен — назад и так ведёт в чат
+                        if chatContext?.lowercased() != profile.id.lowercased() {
+                            tile(icon: "bubble.left.fill", title: s.t("Чат", "Chat")) {
+                                chatRoute = ChatRoute(peer: ChatPeer(id: profile.id, name: profile.name,
+                                                                     username: profile.username, avatarID: profile.avatarID))
+                            }
                         }
                         tile(icon: "phone.fill", title: s.t("Звонок", "Call")) { call(profile, video: false) }
                         tile(icon: "video.fill", title: s.t("Видео", "Video")) { call(profile, video: true) }
-                        tile(icon: muted ? "bell.slash.fill" : "bell.fill",
-                             title: muted ? s.t("Без звука", "Muted") : s.t("Звук", "Sound")) {
-                            muted.toggle()
-                            UserDefaults.standard.set(muted, forKey: "dm_muted_" + profile.id)
+                        moreMenu(profile)
+                    }
+                    // «Подписаться» и «В контакты» — одной строкой, двумя кнопками
+                    HStack(spacing: 8) {
+                        halfButton(icon: profile.following ? "person.fill.checkmark" : "person.fill.badge.plus",
+                                   title: profile.following ? s.t("Вы подписаны", "Following") : s.t("Подписаться", "Follow"),
+                                   filled: !profile.following) {
                             Haptics.impact(.light)
-                            soonText = muted ? s.t("Уведомления выключены", "Muted") : s.t("Уведомления включены", "Unmuted")
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { soonText = nil }
+                            Task { await model.toggleFollow() }
+                        }
+                        halfButton(icon: profile.isContact ? "person.crop.circle.badge.checkmark" : "person.badge.plus",
+                                   title: profile.isContact ? s.t("В контактах", "Contact") : s.t("В контакты", "Add contact"),
+                                   filled: false) {
+                            showContact = true
                         }
                     }
-                }
-                if !profile.blockedMe { followButton(profile) }
-                if !profile.blockedMe { friendButton(profile) }
-                // «в контакты» и «заблокировать» — каждая отдельной строкой
-                rowButton(icon: profile.isContact ? "person.fill.checkmark" : "person.badge.plus",
-                          title: profile.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
-                    showContact = true
-                }
-                .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
-                rowButton(icon: "exclamationmark.bubble.fill", title: s.t("Пожаловаться", "Report")) { showReport = true }
+                } else {
+                    rowButton(icon: profile.isContact ? "person.fill.checkmark" : "person.badge.plus",
+                              title: profile.isContact ? s.t("Изменить контакт", "Edit contact") : s.t("Добавить в контакты", "Add to contacts")) {
+                        showContact = true
+                    }
                     .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+                }
                 rowButton(icon: "hand.raised.fill", title: s.blockUser, danger: true) { confirmBlock = true }
                     .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
             }
@@ -884,25 +951,60 @@ struct UserPageView: View {
         }
     }
 
-    private func followButton(_ profile: UserProfile) -> some View {
-        rowButton(icon: profile.following ? "person.fill.checkmark" : "person.fill.badge.plus",
-                  title: profile.following ? s.t("Вы подписаны · отписаться", "Following · unfollow") : s.t("Подписаться", "Follow")) {
-            Task { await model.toggleFollow() }
+    /// «Ещё»: звук, заявка в друзья, пожаловаться
+    private func moreMenu(_ profile: UserProfile) -> some View {
+        Menu {
+            Button {
+                muted.toggle()
+                UserDefaults.standard.set(muted, forKey: "dm_muted_" + profile.id)
+                Haptics.impact(.light)
+                soonText = muted ? s.t("Уведомления выключены", "Muted") : s.t("Уведомления включены", "Unmuted")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { soonText = nil }
+            } label: {
+                Label(muted ? s.t("Включить звук", "Unmute") : s.t("Выключить звук", "Mute"),
+                      systemImage: muted ? "bell.fill" : "bell.slash.fill")
+            }
+            Button { Task { await model.toggleFriend() } } label: {
+                Label(friendAction(profile).title, systemImage: friendAction(profile).icon)
+            }
+            Divider()
+            Button(role: .destructive) { showReport = true } label: {
+                Label(s.t("Пожаловаться", "Report"), systemImage: "exclamationmark.bubble.fill")
+            }
+        } label: {
+            tileLabel(icon: "ellipsis", title: s.t("Ещё", "More"))
         }
-        .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        .simultaneousGesture(TapGesture().onEnded { Haptics.impact(.light) })
     }
 
-    private func friendButton(_ profile: UserProfile) -> some View {
-        let (icon, title): (String, String) = {
-            switch profile.friendState {
-            case "friends":  return ("person.crop.circle.badge.checkmark", s.t("У вас в друзьях · удалить", "Friends · remove"))
-            case "outgoing": return ("clock", s.t("Заявка отправлена · отменить", "Request sent · cancel"))
-            case "incoming": return ("person.crop.circle.badge.plus", s.t("Принять заявку в друзья", "Accept friend request"))
-            default:         return ("person.crop.circle.badge.plus", s.t("Добавить в друзья", "Add friend"))
+    private func friendAction(_ profile: UserProfile) -> (icon: String, title: String) {
+        switch profile.friendState {
+        case "friends":  return ("person.crop.circle.badge.minus", s.t("Удалить из друзей", "Remove friend"))
+        case "outgoing": return ("clock.arrow.circlepath", s.t("Отменить заявку в друзья", "Cancel friend request"))
+        case "incoming": return ("person.crop.circle.badge.checkmark", s.t("Принять заявку в друзья", "Accept friend request"))
+        default:         return ("person.crop.circle.badge.plus", s.t("Добавить в друзья", "Add friend"))
+        }
+    }
+
+    /// Кнопка на половину строки: «Подписаться» (выделенная) или «В контакты»
+    private func halfButton(icon: String, title: String, filled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
             }
-        }()
-        return rowButton(icon: icon, title: title) { Task { await model.toggleFriend() } }
-            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+            .foregroundStyle(filled ? Color.white : theme.accentColor)
+            .frame(maxWidth: .infinity).frame(height: 50)
+            .background {
+                if filled {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.accent)
+                } else {
+                    Color.clear.glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+                }
+            }
+        }
+        .buttonStyle(PressStyle())
+        .animation(.easeOut(duration: 0.2), value: filled)
     }
 
     private func call(_ profile: UserProfile, video: Bool) {
@@ -919,15 +1021,17 @@ struct UserPageView: View {
     }
 
     private func tile(icon: String, title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 21, weight: .regular)).foregroundStyle(theme.accentColor)
-                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accentColor).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity).frame(height: 66)
-            .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+        Button(action: action) { tileLabel(icon: icon, title: title) }
+            .buttonStyle(PressStyle())
+    }
+
+    private func tileLabel(icon: String, title: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 21, weight: .regular)).foregroundStyle(theme.accentColor)
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accentColor).lineLimit(1)
         }
-        .buttonStyle(PressStyle())
+        .frame(maxWidth: .infinity).frame(height: 66)
+        .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
     }
 
     private func rowButton(icon: String, title: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
