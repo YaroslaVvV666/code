@@ -7,6 +7,12 @@ private struct FeedPullKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// Сдвиг ленты для скрытия нижней панели при прокрутке вниз (как в YouTube)
+private struct FeedScrollKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct FeedView: View {
     @ObservedObject var vm: FeedViewModel
     let onCompose: () -> Void
@@ -32,6 +38,9 @@ struct FeedView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var pull: CGFloat = 0
     @State private var pullArmed = false
+    // скрытие нижней панели при прокрутке вниз (как в YouTube)
+    @State private var lastOffset: CGFloat = 0
+    @State private var offsetReady = false
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -95,9 +104,14 @@ struct FeedView: View {
                         }
                     }
                 }
+                // надёжный замер сдвига (фон тянется на всю высоту ленты и не выгружается, как ленивые ячейки)
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: FeedScrollKey.self, value: g.frame(in: .named("feedScroll")).minY)
+                })
             }
             .coordinateSpace(name: "feedScroll")
             .onPreferenceChange(FeedPullKey.self) { handlePull($0) }
+            .onPreferenceChange(FeedScrollKey.self) { handleScroll($0) }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
                 // потянули вниз — лента и истории обновляются
@@ -132,7 +146,8 @@ struct FeedView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { session.taste.endAll() }
         }
-        .onDisappear { session.taste.endAll() }
+        .onDisappear { session.taste.endAll(); session.tabBarHidden = false }
+        .onChange(of: searching) { _, on in if on { session.tabBarHidden = false } }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
@@ -174,6 +189,23 @@ struct FeedView: View {
     }
 
     /// Потянули ленту вниз: аватарка первого человека с историей растёт; отпустили — открываются истории (иначе обновление ленты)
+    /// Листаем вниз — нижняя панель плавно уезжает; листаем вверх или у самого верха — сразу возвращается.
+    /// y — сдвиг верхнего края ленты: 0 у верха, уходит в минус при прокрутке вниз.
+    private func handleScroll(_ y: CGFloat) {
+        guard !searching else { return }                  // в поиске панель не трогаем
+        guard offsetReady else { offsetReady = true; lastOffset = y; return }
+        let dy = y - lastOffset
+        guard abs(dy) > 1.5 else { return }               // игнорируем микродрожание
+        lastOffset = y
+        if y > -70 {                                      // у самого верха — панель всегда видна
+            if session.tabBarHidden { session.tabBarHidden = false }
+        } else if dy < -3 {                               // листаем вниз — прячем
+            if !session.tabBarHidden { session.tabBarHidden = true }
+        } else if dy > 3 {                                // листаем вверх — возвращаем сразу
+            if session.tabBarHidden { session.tabBarHidden = false }
+        }
+    }
+
     private func handlePull(_ y: CGFloat) {
         let v = max(0, y)
         if abs(v - pull) > 1 { pull = v }

@@ -115,7 +115,7 @@ struct MainTabView: View {
                 .offset(y: session.tabBarHidden ? barHeight + 40 : 0)
                 .opacity(session.tabBarHidden ? 0 : 1)
                 .allowsHitTesting(!session.tabBarHidden)
-                .animation(.easeOut(duration: 0.22), value: session.tabBarHidden)
+                .animation(.spring(response: 0.34, dampingFraction: 0.82), value: session.tabBarHidden)
         }
         .onPreferenceChange(TabBarHeightKey.self) { barHeight = $0 }
         .onChange(of: session.reelRequest?.id) { _, id in
