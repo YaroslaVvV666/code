@@ -453,7 +453,9 @@ final class ChatModel: ObservableObject {
 
     func loadStickers() async {
         guard packs.isEmpty else { return }
-        packs = (try? await repo.stickers()) ?? []
+        // сохранённые на телефоне — сразу (и без сети), свежий список с сервера — следом
+        if let saved = repo.savedStickers(), !saved.isEmpty { packs = saved }
+        if let fresh = try? await repo.stickers(), fresh != packs { packs = fresh }
     }
 
     /// Добавили или убрали набор — панель стикеров обновляется

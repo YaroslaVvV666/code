@@ -27,6 +27,8 @@ actor ServerAPI {
     }
 
     private let userID: String
+    /// Чей это клиент — для данных, которые хранятся на телефоне по аккаунту (например, стикеры)
+    nonisolated var accountID: String { userID }
     private var displayName: String
     private var token: String?
     private var tokenBase: String?

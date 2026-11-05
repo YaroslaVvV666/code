@@ -515,6 +515,8 @@ protocol MessengerRepository: Sendable {
     func typing(peerID: String, action: String) async
     func clear(peerID: String) async throws
     func stickers() async throws -> [StickerPack]
+    /// Наборы, сохранённые на телефоне (сразу, без сети); nil — ещё не сохраняли
+    func savedStickers() -> [StickerPack]?
     func stickerPack(id: String) async throws -> CustomStickerPack
     func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack
     func createStickerPack(title: String) async throws -> CustomStickerPack
@@ -563,6 +565,7 @@ protocol MessengerRepository: Sendable {
 }
 
 extension MessengerRepository {
+    func savedStickers() -> [StickerPack]? { nil }
     func searchMessages(query: String) async throws -> [MessageHit] { [] }
 
     func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
@@ -1162,25 +1165,50 @@ struct RemoteMessengerRepository: MessengerRepository {
         _ = try await api.request("DELETE", "/v1/chats/\(peerID)")
     }
 
+    /// Наборы стикеров. Ответ сервера сохраняется на телефон вместе с самими стикерами (StickerVault);
+    /// без сети — отдаём сохранённое, панель стикеров работает как обычно
     func stickers() async throws -> [StickerPack] {
-        let data = try await api.request("GET", "/v1/stickers")
-        return try decodeAPI(PackListDTO.self, from: data).packs.map(\.model)
+        do {
+            let data = try await api.request("GET", "/v1/stickers")
+            let packs = try decodeAPI(PackListDTO.self, from: data).packs.map(\.model)
+            StickerVault.shared.store(packs, account: api.accountID)
+            return packs
+        } catch {
+            if let saved = StickerVault.shared.packs(account: api.accountID) { return saved }
+            throw error
+        }
     }
 
+    func savedStickers() -> [StickerPack]? { StickerVault.shared.packs(account: api.accountID) }
+
     func stickerPack(id: String) async throws -> CustomStickerPack {
-        let dto = try decodeAPI(PackDTO.self, from: try await api.request("GET", "/v1/stickers/packs/\(id)"))
-        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? false, mine: dto.mine ?? false)
+        do {
+            let dto = try decodeAPI(PackDTO.self, from: try await api.request("GET", "/v1/stickers/packs/\(id)"))
+            return CustomStickerPack(pack: dto.model, installed: dto.installed ?? false, mine: dto.mine ?? false)
+        } catch {
+            // без сети — сохранённый на телефоне набор
+            if let saved = StickerVault.shared.packs(account: api.accountID)?.first(where: { $0.id == id }) {
+                return CustomStickerPack(pack: saved, installed: true, mine: saved.mine)
+            }
+            throw error
+        }
     }
 
     func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack {
         let dto = try decodeAPI(PackDTO.self, from: try await api.request(installed ? "PUT" : "DELETE", "/v1/stickers/packs/\(id)/install"))
-        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? installed, mine: dto.mine ?? false)
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? installed, mine: dto.mine ?? false)
+        // добавили — сразу на телефон; убрали из набора своими руками — только тогда стираем с телефона
+        if result.installed { StickerVault.shared.keep(result.pack, account: api.accountID) }
+        else { StickerVault.shared.forget(packID: id, account: api.accountID) }
+        return result
     }
 
     func createStickerPack(title: String) async throws -> CustomStickerPack {
         let dto = try decodeAPI(PackDTO.self, from: try await api.request("POST", "/v1/stickers/packs",
                                                                            body: ServerAPI.json(["title": title])))
-        return CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+        StickerVault.shared.keep(result.pack, account: api.accountID)
+        return result
     }
 
     func addSticker(packID: String, mediaID: String, emoji: String) async throws {
@@ -1195,6 +1223,7 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func deleteStickerPack(id: String) async throws {
         _ = try await api.request("DELETE", "/v1/stickers/packs/\(id)")
+        StickerVault.shared.forget(packID: id, account: api.accountID)          // удалили набор — и с телефона
     }
 
     // MARK: Контакты

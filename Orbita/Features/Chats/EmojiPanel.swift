@@ -99,16 +99,29 @@ struct StickerImage: View {
     let sticker: Sticker
     var size: CGFloat = 80
 
+    /// Стикер из установленного набора лежит на телефоне постоянно (StickerVault) — показываем его оттуда, и без сети тоже
+    @State private var local: UIImage?
+    private var maxPixel: CGFloat { max(256, size * 3) }
+
     var body: some View {
-        if let media = sticker.mediaID {
-            // свой стикер (через бота @stickers): картинка или анимированный — беззвучное видео по кругу
-            if sticker.animated {
-                StickerVideo(mediaID: media).frame(width: size, height: size)
-            } else {
-                RemoteImage(id: media, fill: false, maxPixel: max(256, size * 3), backdrop: .clear).frame(width: size, height: size)
-            }
+        if sticker.animated, let media = sticker.mediaID {
+            // анимированный — беззвучное видео по кругу, файл с телефона, если он уже сохранён
+            StickerVideo(mediaID: media, local: StickerVault.shared.localFile(sticker)).frame(width: size, height: size)
+        } else if let img = local ?? StickerVault.shared.cachedImage(sticker, maxPixel: maxPixel) {
+            Image(uiImage: img).resizable().scaledToFit().frame(width: size, height: size)
         } else {
-            builtIn
+            Group {
+                if let media = sticker.mediaID {
+                    // свой стикер (через бота @stickers)
+                    RemoteImage(id: media, fill: false, maxPixel: maxPixel, backdrop: .clear).frame(width: size, height: size)
+                } else {
+                    builtIn
+                }
+            }
+            .task(id: sticker.id) {
+                // файл на телефоне есть — разжимаем в фоне и подменяем сетевую картинку
+                if let img = await StickerVault.shared.image(sticker, maxPixel: maxPixel) { local = img }
+            }
         }
     }
 
@@ -131,6 +144,7 @@ struct StickerImage: View {
 /// раньше каждый анимированный стикер в истории декодировал видео без остановки. Теперь играет только видимый
 struct StickerVideo: View {
     let mediaID: String
+    var local: URL? = nil                       // файл с телефона (сохранённый набор)
     @StateObject private var box = LoopPlayerBox()
     @State private var onScreen = false
 
@@ -150,7 +164,7 @@ struct StickerVideo: View {
     private func setOnScreen(_ now: Bool) {
         guard now != onScreen else { return }
         onScreen = now
-        if now { box.start(mediaID) } else { box.stop() }
+        if now { box.start(mediaID, local: local) } else { box.stop() }
     }
 }
 
@@ -166,8 +180,8 @@ final class LoopPlayerBox: ObservableObject {
         player.preventsDisplaySleepDuringVideoPlayback = false
     }
 
-    func start(_ mediaID: String) {
-        if current != mediaID, let url = MediaFileCache.shared.playableURL(mediaID) {
+    func start(_ mediaID: String, local: URL? = nil) {
+        if current != mediaID, let url = local ?? MediaFileCache.shared.playableURL(mediaID) {
             current = mediaID
             player.removeAllItems()
             looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))

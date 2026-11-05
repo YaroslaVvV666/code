@@ -428,6 +428,7 @@ struct DataScreen: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var cacheBytes = URLCache.shared.currentDiskUsage + MediaFileCache.shared.diskUsage()
+    @State private var stickerBytes = 0
     @State private var clearing = false
     @State private var freedBytes = 0
 
@@ -478,7 +479,19 @@ struct DataScreen: View {
                 }
                 .buttonStyle(PressStyle())
             }
+
+            // стикеры установленных наборов лежат отдельно и кэшем не считаются: «Очистить кэш» их не трогает
+            SettingsGroup {
+                SettingsRow(icon: "face.smiling.inverse", tint: .yellow, title: s.t("Стикеры на телефоне", "Stickers on device"),
+                            value: ByteCountFormatter.string(fromByteCount: Int64(stickerBytes), countStyle: .file))
+            }
+            Text(s.t("Стикеры ваших наборов хранятся на телефоне и работают без интернета. Очистка кэша их не удаляет — только удаление самого набора.",
+                     "Stickers from your packs are kept on the phone and work offline. Clearing the cache keeps them — only removing the pack deletes them."))
+                .font(.system(size: 13))
+                .foregroundStyle(theme.textSecondary)
+                .padding(.horizontal, 30)
         }
+        .task { stickerBytes = await Task.detached(priority: .utility) { StickerVault.shared.diskUsage() }.value }
         .fullScreenCover(isPresented: $clearing) {
             CacheClearView(freedBytes: freedBytes) { clearing = false }
                 .preferredColorScheme(theme.dark ? .dark : .light)
