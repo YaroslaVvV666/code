@@ -517,6 +517,8 @@ protocol MessengerRepository: Sendable {
     func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage
     func delete(messageID: String, forEveryone: Bool) async throws
     func typing(peerID: String, action: String) async
+    /// Только «печатает…» собеседника — без загрузки всей переписки
+    func typingStatus(peerID: String) async throws -> String?
     func clear(peerID: String) async throws
     func stickers() async throws -> [StickerPack]
     /// Наборы, сохранённые на телефоне (сразу, без сети); nil — ещё не сохраняли
@@ -1169,6 +1171,11 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func delete(messageID: String, forEveryone: Bool) async throws {
         _ = try await api.request("DELETE", "/v1/messages/\(messageID)", query: forEveryone ? ["all": "1"] : [:])
+    }
+
+    func typingStatus(peerID: String) async throws -> String? {
+        struct R: Decodable { let typing: String? }
+        return try decodeAPI(R.self, from: try await api.request("GET", "/v1/chats/\(peerID)/typing")).typing
     }
 
     func typing(peerID: String, action: String) async {

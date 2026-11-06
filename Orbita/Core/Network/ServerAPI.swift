@@ -58,6 +58,23 @@ actor ServerAPI {
 
     // MARK: Запросы
 
+    // MARK: Условные запросы (ETag)
+
+    /// Последний ответ на каждый GET и его отпечаток: сервер отвечает 304 без тела, если ничего не изменилось —
+    /// переписка, лента и список чатов при обновлении не гоняются по сети заново, а сервер их не сжимает
+    private var etags: [String: (tag: String, body: Data)] = [:]
+    private var etagOrder: [String] = []
+    private static let etagLimit = 150
+
+    private func rememberETag(_ key: String, tag: String, body: Data) {
+        guard body.count < 3_000_000 else { return }
+        if etags[key] == nil {
+            etagOrder.append(key)
+            if etagOrder.count > Self.etagLimit { etags[etagOrder.removeFirst()] = nil }
+        }
+        etags[key] = (tag, body)
+    }
+
     func request(_ method: String, _ path: String, query: [String: String] = [:], body: Data? = nil) async throws -> Data {
         for attempt in 0..<2 {
             do {
@@ -65,6 +82,11 @@ actor ServerAPI {
                 if let body {
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = body
+                }
+                if method == "GET", let key = req.url?.absoluteString {
+                    req.cachePolicy = .reloadIgnoringLocalCacheData        // кэшируем сами, системный кэш не мешает
+                    if let cached = etags[key] { req.setValue(cached.tag, forHTTPHeaderField: "If-None-Match") }
+                    return try await perform(req, upload: nil, etagKey: key)
                 }
                 return try await perform(req, upload: nil)
             } catch APIError.unauthorized where attempt == 0 {
@@ -225,7 +247,7 @@ actor ServerAPI {
         return issued
     }
 
-    private func perform(_ req: URLRequest, upload: Payload?) async throws -> Data {
+    private func perform(_ req: URLRequest, upload: Payload?, etagKey: String? = nil) async throws -> Data {
         do {
             let result: (Data, URLResponse)
             switch upload {
@@ -236,7 +258,13 @@ actor ServerAPI {
             let (data, response) = result
             guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
             switch http.statusCode {
-            case 200..<300: return data
+            case 304:
+                // не изменилось — отдаём сохранённый ответ
+                if let etagKey, let cached = etags[etagKey] { return cached.body }
+                throw APIError.invalidResponse
+            case 200..<300:
+                if let etagKey, let tag = http.value(forHTTPHeaderField: "ETag") { rememberETag(etagKey, tag: tag, body: data) }
+                return data
             case 401:       throw APIError.unauthorized
             default:
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

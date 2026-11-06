@@ -1010,7 +1010,14 @@ struct ChatScreen: View {
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await model.refresh()
-                await session.live.waitForTopics(["dm", "group", "typing"], timeout: 5)
+                // Новое сообщение будит сразу (long-poll), таймер — лишь страховка: 25 с вместо 5 с.
+                // Если пришёл только «печатает» — лёгкий запрос статуса, без пересборки всей переписки на сервере
+                // «печатает…» гаснет само (события об этом нет) — пока оно видно, перепроверяем статус каждые 6 с
+                var topics = await session.live.waitForTopics(["dm", "group", "typing"], timeout: model.typing == nil ? 25 : 6)
+                while !Task.isCancelled, topics == ["typing"] || (topics.isEmpty && model.typing != nil) {
+                    await model.refreshTyping()
+                    topics = await session.live.waitForTopics(["dm", "group", "typing"], timeout: model.typing == nil ? 25 : 6)
+                }
             }
         }
         .overlay(alignment: .top) {

@@ -360,6 +360,12 @@ final class ChatModel: ObservableObject {
         } catch {}
     }
 
+    /// Пришло только событие «печатает» — обновляем лишь его, не загружая заново всю переписку
+    func refreshTyping() async {
+        guard let t = try? await repo.typingStatus(peerID: peerID) else { return }
+        if typing != t { typing = t }
+    }
+
     /// Вступление из режима просмотра (подписка на канал / заявка)
     func join() async {
         joining = true

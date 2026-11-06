@@ -17,7 +17,7 @@ final class LiveEvents: ObservableObject {
 
     // Реестр ждущих waitForTopics: id -> (интересующие темы, как разбудить). Без Combine-подписки на каждого —
     // чтобы не плодить retain-cycle и утечки в частом цикле обновления.
-    private var waiters: [Int: (want: Set<String>, resume: () -> Void)] = [:]
+    private var waiters: [Int: (want: Set<String>, resume: (Set<String>) -> Void)] = [:]
     private var nextWaiterID = 0
 
     init(api: ServerAPI) { self.api = api }
@@ -40,22 +40,24 @@ final class LiveEvents: ObservableObject {
         events.send(topics)                          // экранам на .onReceive
         for (id, w) in waiters where !topics.isDisjoint(with: w.want) {
             waiters[id] = nil
-            w.resume()
+            w.resume(topics.intersection(w.want))
         }
     }
 
     /// Ждать первую пачку, пересекающуюся с `want`, либо истечения `timeout` секунд (страховка, если побудка не дошла).
     /// Экраны используют это вместо фиксированного короткого сна в цикле обновления.
-    func waitForTopics(_ want: Set<String>, timeout: TimeInterval) async {
+    /// Возвращает темы, которые пришли (пусто — разбудил таймаут): экран может обновить только нужное
+    @discardableResult
+    func waitForTopics(_ want: Set<String>, timeout: TimeInterval) async -> Set<String> {
         let id = nextWaiterID
         nextWaiterID += 1
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            waiters[id] = (want, { cont.resume() })
+        return await withCheckedContinuation { (cont: CheckedContinuation<Set<String>, Never>) in
+            waiters[id] = (want, { cont.resume(returning: $0) })
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
                 if let w = waiters[id] {             // ещё не разбудили событием — будим по таймауту
                     waiters[id] = nil
-                    w.resume()
+                    w.resume([])
                 }
             }
         }

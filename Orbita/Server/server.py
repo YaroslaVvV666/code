@@ -29,6 +29,7 @@ import secrets
 import sqlite3
 import sys
 import threading
+import bisect
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1197,6 +1198,18 @@ class Handler(BaseHTTPRequestHandler):
         self._write_json(status, body)
 
     def _write_json(self, status, body, gz=None):
+        # Условный ответ: у GET-ответа есть отпечаток (ETag). Приложение присылает его обратно в If-None-Match —
+        # если данные не изменились (переписка, лента, список чатов), отвечаем 304 без тела: не сжимаем
+        # и не гоним по сети те же десятки килобайт на каждом обновлении
+        etag = None
+        if status == 200 and self.command == "GET":
+            etag = '"%s"' % hashlib.sha1(body).hexdigest()[:24]
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
         gzipped = False
         # большие ответы (лента, переписка) сжимаем: на мобильной сети это в разы быстрее
         if len(body) > 1200 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
@@ -1207,6 +1220,8 @@ class Handler(BaseHTTPRequestHandler):
         if gzipped:
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Vary", "Accept-Encoding")
+        if etag:
+            self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -5503,7 +5518,7 @@ def message_json(m, me_id):
     mid = m["id"]
     reply = None
     if m["reply_to"]:
-        r = q1("SELECT * FROM messages WHERE id = ?", (m["reply_to"],))
+        r = pf_reply("messages", m["reply_to"])
         if r:
             reply = {"id": r["id"], "from_me": r["sender"] == me_id,
                      "name": user_brief(r["sender"], me_id)["name"],
@@ -5853,9 +5868,89 @@ def message_info(req, me, mid):
                         "sent_at": m["created_at"], "mine": m["sender"] == uid})
 
 
+# ---------- Пакетная подгрузка для страницы сообщений ----------
+# Раньше каждое сообщение отдельно спрашивало базу: реакции, свою заметку, цитату ответа, а в группах ещё
+# «прочитано» и (в каналах) число просмотров — COUNT по всем подписчикам на КАЖДЫЙ пост. На странице из 100
+# сообщений это сотни запросов (в Postgres — сотни сетевых обращений). Теперь перед сборкой страницы всё нужное
+# берётся несколькими запросами, а message_json / gmsg_json читают из этого кэша (свой у каждого потока-запроса).
+
+_PF = threading.local()
+
+
+def _chunks(items, n=400):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def prefetch_messages(rows, me_id, table="messages", group_id=None):
+    ids = [r["id"] for r in rows]
+    pf = {"ids": set(ids), "reactions": {}, "notes": {}, "replies": {}, "table": table}
+    for chunk in _chunks(ids):
+        ph = ",".join("?" * len(chunk))
+        for r in q("SELECT message_id, emoji, user_id FROM reactions WHERE message_id IN (%s) ORDER BY created_at" % ph, tuple(chunk)):
+            pf["reactions"].setdefault(r["message_id"], []).append(r)
+        for r in q("SELECT message_id, text_enc FROM message_notes WHERE user_id = ? AND message_id IN (%s)" % ph,
+                   (me_id,) + tuple(chunk)):
+            pf["notes"][r["message_id"]] = r
+    reply_ids = list({r["reply_to"] for r in rows if r["reply_to"]})
+    for chunk in _chunks(reply_ids):
+        ph = ",".join("?" * len(chunk))
+        for r in q("SELECT * FROM %s WHERE id IN (%s)" % (table, ph), tuple(chunk)):
+            pf["replies"][r["id"]] = r
+    pf["reply_ids"] = set(reply_ids)
+    if group_id:
+        # «прочитано» = кто-то кроме автора дочитал до этого сообщения; просмотры поста = сколько дочитали.
+        # Одним запросом берём все отметки «дочитал до» и дальше считаем в памяти (бинарным поиском)
+        reads = q("SELECT user_id, last_read FROM group_members WHERE group_id = ?", (group_id,))
+        pf["reads_sorted"] = sorted(r["last_read"] or 0 for r in reads)
+        top = sorted(reads, key=lambda r: -(r["last_read"] or 0))[:2]
+        pf["reads_top"] = [(r["user_id"], r["last_read"] or 0) for r in top]
+    _PF.data = pf
+
+
+def end_prefetch():
+    _PF.data = None
+
+
+def _pf():
+    return getattr(_PF, "data", None)
+
+
+def pf_reply(table, reply_id):
+    pf = _pf()
+    if pf is not None and pf["table"] == table and reply_id in pf["reply_ids"]:
+        return pf["replies"].get(reply_id)
+    return q1("SELECT * FROM %s WHERE id = ?" % table, (reply_id,))
+
+
+def pf_group_read(m):
+    """Прочитал ли сообщение кто-то, кроме автора"""
+    pf = _pf()
+    if pf is not None and "reads_top" in pf and m["id"] in pf["ids"]:
+        for user_id, last in pf["reads_top"]:
+            if user_id != m["sender"]:
+                return last >= m["created_at"]
+        return False
+    return q1("SELECT 1 FROM group_members WHERE group_id = ? AND user_id != ? AND last_read >= ?",
+              (m["group_id"], m["sender"], m["created_at"])) is not None
+
+
+def pf_group_views(m):
+    """Сколько участников дочитали до поста (просмотры в канале)"""
+    pf = _pf()
+    if pf is not None and "reads_sorted" in pf and m["id"] in pf["ids"]:
+        arr = pf["reads_sorted"]
+        return len(arr) - bisect.bisect_left(arr, m["created_at"])
+    return q1("SELECT COUNT(*) c FROM group_members WHERE group_id = ? AND last_read >= ?",
+              (m["group_id"], m["created_at"]))["c"]
+
+
 def reactions_of(mid, me_id):
     agg = {}
-    for r in q("SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY created_at", (mid,)):
+    pf = _pf()
+    rows = pf["reactions"].get(mid, []) if pf is not None and mid in pf["ids"] else \
+        q("SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY created_at", (mid,))
+    for r in rows:
         e = agg.setdefault(r["emoji"], {"emoji": r["emoji"], "count": 0, "mine": False})
         e["count"] += 1
         e["mine"] = e["mine"] or r["user_id"] == me_id
@@ -6069,7 +6164,12 @@ def chat_messages(req, me, peer):
              "OR (sender = ? AND recipient = ? AND del_recipient = 0)) ORDER BY created_at DESC LIMIT ?",
              (uid, peer, peer, uid, limit))
     rows.reverse()
-    req.send_json(200, {"messages": [message_json(m, uid) for m in rows],
+    prefetch_messages(rows, uid, "messages")
+    try:
+        items = [message_json(m, uid) for m in rows]
+    finally:
+        end_prefetch()
+    req.send_json(200, {"messages": items,
                         "peer": {**profile_json(pr, uid), "name": contact_name(uid, peer) or names(pr)[2]},
                         "typing": typing_action(peer, uid),
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
@@ -6737,6 +6837,18 @@ def delete_story(req, me, sid):
     req.send_json(200, {"ok": True})
 
 
+@route("GET", r"/v1/chats/([A-Za-z0-9_\-]+)/typing")
+def get_typing(req, me, peer):
+    """Только «печатает…» — без всей переписки. Приложение зовёт это, когда пришло лишь событие набора текста:
+    раньше на каждое такое событие сервер заново собирал и расшифровывал всю страницу сообщений"""
+    uid = me["id"]
+    if is_group(peer):
+        if not member_row(peer, uid):
+            raise ApiError(404, "not_found")
+        return req.send_json(200, {"typing": group_typing(peer, uid)})
+    req.send_json(200, {"typing": typing_action(peer, uid)})
+
+
 @route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/typing")
 def chat_typing(req, me, peer):
     if is_group(peer) and not member_row(peer, me["id"]):
@@ -7110,7 +7222,11 @@ MAX_NOTE = 2000
 
 def note_field(mid, me_id):
     """Своя заметка к сообщению — только для того, кто её оставил"""
-    r = q1("SELECT text_enc FROM message_notes WHERE user_id = ? AND message_id = ?", (me_id, mid))
+    pf = _pf()
+    if pf is not None and mid in pf["ids"]:
+        r = pf["notes"].get(mid)
+    else:
+        r = q1("SELECT text_enc FROM message_notes WHERE user_id = ? AND message_id = ?", (me_id, mid))
     text = dec(me_id, "messages", NOTE_COL, mid + ":" + me_id, r["text_enc"]) if r else None
     return {"note": text} if text else {}
 
@@ -7545,12 +7661,11 @@ def gmsg_json(m, me_id, channel=None):
     mid = m["id"]
     reply = None
     if m["reply_to"]:
-        r = q1("SELECT * FROM group_messages WHERE id = ?", (m["reply_to"],))
+        r = pf_reply("group_messages", m["reply_to"])
         if r:
             reply = {"id": r["id"], "from_me": r["sender"] == me_id,
                      "name": user_brief(r["sender"], me_id)["name"], "text": summary_of(r, 140)}
-    read = q1("SELECT 1 FROM group_members WHERE group_id = ? AND user_id != ? AND last_read >= ?",
-              (m["group_id"], m["sender"], m["created_at"])) is not None
+    read = pf_group_read(m)
     if channel is None:
         g = group_row(m["group_id"])
         channel = bool(g) and g["type"] == "channel"
@@ -7571,8 +7686,7 @@ def gmsg_json(m, me_id, channel=None):
     if "kind" in m.keys() and m["kind"] == "poll":
         out["poll"] = poll_json(mid, me_id)
     if channel:
-        out["views"] = max(1, q1("SELECT COUNT(*) c FROM group_members WHERE group_id = ? AND last_read >= ?",
-                                 (m["group_id"], m["created_at"]))["c"])
+        out["views"] = max(1, pf_group_views(m))
         cg = group_row(m["group_id"])
         n = comments_count(cg, mid)
         if n is not None:
@@ -7617,7 +7731,12 @@ def group_messages(req, me, gid):
     if channel and req.query().get("peek") != "1":
         source = "subscribers" if mem else ("url" if req.query().get("src") == "link" else "other")
         record_views(g["id"], [m["id"] for m in rows if not m["kind"]], uid, source)
-    req.send_json(200, {"messages": [gmsg_json(m, uid, channel) for m in rows], "peer": group_peer(g),
+    prefetch_messages(rows, uid, "group_messages", gid)
+    try:
+        items = [gmsg_json(m, uid, channel) for m in rows]
+    finally:
+        end_prefetch()
+    req.send_json(200, {"messages": items, "peer": group_peer(g),
                         "typing": None if preview else group_typing(gid, uid),
                         "can_write": can_post(g, mem), "group": group_info(g, uid), "preview": preview,
                         "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread})
