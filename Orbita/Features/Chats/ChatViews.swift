@@ -860,6 +860,7 @@ struct ChatScreen: View {
                     // переписка с ботом: /команды в тексте подсвечены, нажатие отправляет команду
                     .environment(\.botCommandLinks, model.isBot)
                     .environment(\.onBotCommand, model.isBot ? { [model] cmd in model.sendCommand(cmd) } : nil)
+                    .environment(\.onBotButton, { [model, lang] m, b in model.pressBotButton(m, b, lang: lang) })
             }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 6) {

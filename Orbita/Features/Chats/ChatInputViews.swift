@@ -46,6 +46,7 @@ struct ChatInputBar: View {
     @State private var showSchedule = false
     @State private var showStickerCreator = false
     @State private var kbVisible = false
+    @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
@@ -81,6 +82,10 @@ struct ChatInputBar: View {
                 BotStartBar { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { model.startBot() } }
             } else if model.canWrite {
                 inputRow
+                if let kb = model.botKeyboard, botKeysOpen, !kbVisible, !recording {
+                    BotReplyKeyboardPanel(keyboard: kb) { model.pressBotKey($0) }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             } else if model.peer.isChannel {
                 Button {
                     Task { await model.setMuted(!(model.group?.muted ?? false)) }
@@ -418,6 +423,27 @@ struct ChatInputBar: View {
             .frame(maxWidth: .infinity)
             .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))      // отдельная стеклянная плашка ввода
 
+            if model.botKeyboard != nil, !recording, !controller.hasContent {
+                // клавиатура бота ⇄ обычная клавиатура
+                Button {
+                    Haptics.impact(.light)
+                    if botKeysOpen && !kbVisible {
+                        botKeysOpen = false
+                        controller.focus()
+                    } else {
+                        controller.unfocus()
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { botKeysOpen = true }
+                    }
+                } label: {
+                    Image(systemName: botKeysOpen && !kbVisible ? "keyboard" : "square.grid.2x2")
+                        .font(.system(size: 18, weight: .medium)).foregroundStyle(theme.text)
+                        .frame(width: 44, height: 44)
+                        .glassCircle()
+                }
+                .buttonStyle(PressStyle())
+                .transition(.scale.combined(with: .opacity))
+            }
+
             trailingButton
         }
         .padding(.horizontal, 12)
@@ -429,6 +455,7 @@ struct ChatInputBar: View {
             if showCommands { withAnimation(.easeOut(duration: 0.2)) { showCommands = false } }     // начали печатать — меню команд закрывается
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in kbVisible = false }
+        .onChange(of: model.botKeyboard) { _, kb in if kb != nil { botKeysOpen = true } }      // бот прислал новую клавиатуру — показываем
         .animation(.easeOut(duration: 0.18), value: recording)
         .animation(.easeOut(duration: 0.2), value: trashing)
     }

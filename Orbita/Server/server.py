@@ -2161,11 +2161,7 @@ def upload_media(req, me):
     params = req.query()
     kind = params.get("kind", "")
     mime = (req.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if kind == "file":
-        allowed = re.fullmatch(r"[a-z0-9][a-z0-9.+\-]*/[a-z0-9][a-z0-9.+\-]*", mime) is not None
-    else:
-        allowed = kind in ("image", "video", "audio") and mime in ALLOWED_MIME and mime.split("/")[0] == kind
-    if not allowed:
+    if not media_kind_allowed(kind, mime):
         req.drain()
         raise ApiError(415, "unsupported_media")
     length = int(req.headers.get("Content-Length") or 0)
@@ -2174,9 +2170,26 @@ def upload_media(req, me):
     if length > (MAX_AUDIO_BYTES if kind == "audio" else MAX_MEDIA_BYTES):
         req.close_connection = True
         raise ApiError(413, "too_large")
+    try:
+        result = ingest_media(me["id"], kind, mime, params, req.rfile.read, length)
+    except ApiError:
+        req.close_connection = True          # тело могло быть дочитано не до конца
+        raise
+    req.send_json(201, result)
+
+
+def media_kind_allowed(kind, mime):
+    if kind == "file":
+        return re.fullmatch(r"[a-z0-9][a-z0-9.+\-]*/[a-z0-9][a-z0-9.+\-]*", mime) is not None
+    return kind in ("image", "video", "audio") and mime in ALLOWED_MIME and mime.split("/")[0] == kind
+
+
+def ingest_media(owner_id, kind, mime, params, read, length):
+    """Принимает файл (поток read, length байт): проверка типа по содержимому, модерация, шифрование, запись.
+    Общая для загрузки из приложения, загрузки частями и файлов от ботов. Возвращает JSON-ответ."""
+    me = {"id": owner_id}
     thumb = params.get("thumb") or None
     if thumb and not q1("SELECT 1 FROM media WHERE id = ? AND owner = ?", (thumb, me["id"])):
-        req.drain()
         raise ApiError(400, "media_not_found")
 
     mid = uuid.uuid4().hex
@@ -2191,11 +2204,10 @@ def upload_media(req, me):
     inspect = safety or scan_mod
     verdict, detail = "ok", {}
     scan_path, scan_file, digest = path + ".scan", None, hashlib.sha256()
-    read = req.rfile.read
     if inspect:
         scan_file = open(scan_path, "wb")
 
-        def read(n, _r=req.rfile.read):
+        def read(n, _r=read):
             b = _r(n)
             scan_file.write(b)
             digest.update(b)
@@ -2206,7 +2218,6 @@ def upload_media(req, me):
                 encrypt_stream(media_key(me["id"], mid), mid, read, length, f.write)
         except EOFError:
             STORE.discard(mid)
-            req.close_connection = True
             raise ApiError(400, "incomplete")
         if inspect:
             scan_file.close()
@@ -2264,8 +2275,7 @@ def upload_media(req, me):
     if verdict == "review":                                # спорное — публикуется (с размытием), и попадает в очередь на проверку человеком
         run("INSERT OR REPLACE INTO media_review(media_id, owner, verdict, detail, created_at) VALUES (?,?,?,?,?)",
             (mid, me["id"], verdict, json.dumps(detail, ensure_ascii=False)[:2000], time.time()))
-    req.send_json(201, {"id": mid, "kind": kind, "width": width, "height": height,
-                        "duration": duration, "thumb": thumb})
+    return {"id": mid, "kind": kind, "width": width, "height": height, "duration": duration, "thumb": thumb}
 
 
 @route("GET", r"/media/([A-Za-z0-9]+)", auth=False)
@@ -4652,7 +4662,10 @@ def bot_commands_of(bot_id):
 
 def bot_thread_fields(peer, uid):
     info = bot_info_json(peer, uid)
-    return {"bot": info, "bot_commands": info["commands"]} if info else {}
+    if not info:
+        return {}
+    kb = bot_keyboard_of(peer, uid)
+    return {"bot": info, "bot_commands": info["commands"], **({"bot_keyboard": kb} if kb else {})}
 
 
 def bot_started(bot_id, uid):
@@ -4762,6 +4775,9 @@ def bot_deliver_webhook(bot_id, url, update, seq):
 
 def bot_incoming(bot, uid, row, text, atts):
     """Человек написал пользовательскому боту — это обновление для кода бота"""
+    kb = bot_keyboard_of(bot["id"], uid)
+    if kb and kb.get("one_time") and text and any(text == b["text"] for r in kb["keyboard"] for b in r):
+        apply_keyboard(bot["id"], uid, "remove")             # одноразовая клавиатура прячется после нажатия
     bot_push_update(bot, bot_message_update(row, uid, text, atts))
 
 
@@ -4779,6 +4795,11 @@ def new_bot_token(bot_id):
 
 def bot_params(req):
     p = dict(req.query())
+    if req.command == "POST" and (req.headers.get("Content-Type") or "").lower().startswith("multipart/form-data"):
+        fields, files = _multipart(req, BOT_FILE_MAX + 64 * 1024)
+        p.update(fields)
+        p["_files"] = files
+        return p
     if req.command == "POST":
         try:
             body = req.body_json()
@@ -4797,14 +4818,387 @@ def bot_api_err(req, code, text):
     req.send_json(code, {"ok": False, "error_code": code, "description": text})
 
 
+# --- Кнопки ботов: под сообщением (inline) и вместо клавиатуры (reply keyboard), как в Telegram ---
+
+ensure_column("messages", "markup_enc", "markup_enc BLOB")
+DB.execute("CREATE TABLE IF NOT EXISTS bot_keyboards(bot_id TEXT NOT NULL, user_id TEXT NOT NULL, markup TEXT NOT NULL, "
+           "updated_at REAL NOT NULL, PRIMARY KEY(bot_id, user_id))")
+
+BOT_FILE_MAX = 50 * 1024 * 1024
+CALLBACK_WAIT = 6.0
+
+
+def _btn_text(v):
+    return " ".join(str(v or "").split())[:64]
+
+
+def clean_markup(raw):
+    """reply_markup бота → (inline-кнопки или None, действие с клавиатурой: None / "remove" / dict).
+    Ссылки в кнопках — только http(s); callback_data — до 64 байт, как в Telegram."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else None
+        except ValueError:
+            raise ApiError(400, "bad_markup")
+    if not isinstance(raw, dict):
+        return None, None
+    inline = None
+    if isinstance(raw.get("inline_keyboard"), list):
+        rows = []
+        for row in raw["inline_keyboard"][:10]:
+            if not isinstance(row, list):
+                continue
+            out = []
+            for b in row[:8]:
+                if not isinstance(b, dict):
+                    continue
+                text = _btn_text(b.get("text"))
+                if not text:
+                    continue
+                if b.get("url"):
+                    url = str(b["url"]).strip()[:500]
+                    if not re.match(r"^https?://[^\s/]+", url, re.I):
+                        raise ApiError(400, "bad_button_url")
+                    out.append({"text": text, "url": url})
+                elif b.get("callback_data") is not None:
+                    data = str(b["callback_data"])
+                    if not data or len(data.encode()) > 64:
+                        raise ApiError(400, "bad_callback_data")
+                    out.append({"text": text, "callback_data": data})
+            if out:
+                rows.append(out)
+        inline = rows or None
+    kb = None
+    if raw.get("remove_keyboard"):
+        kb = "remove"
+    elif isinstance(raw.get("keyboard"), list):
+        rows = []
+        for row in raw["keyboard"][:12]:
+            if not isinstance(row, list):
+                continue
+            out = []
+            for b in row[:8]:
+                text = _btn_text(b.get("text") if isinstance(b, dict) else b)
+                if text:
+                    out.append({"text": text})
+            if out:
+                rows.append(out)
+        if rows:
+            kb = {"keyboard": rows, "resize": bool(raw.get("resize_keyboard")),
+                  "one_time": bool(raw.get("one_time_keyboard")),
+                  "placeholder": _btn_text(raw.get("input_field_placeholder"))}
+    return inline, kb
+
+
+def set_inline_markup(mid, sender, inline):
+    run("UPDATE messages SET markup_enc = ? WHERE id = ?",
+        (enc(sender, "messages", COL["msg_entities"], mid + ":kb", json.dumps(inline, ensure_ascii=False)) if inline else None, mid))
+
+
+def markup_of(m):
+    try:
+        raw = m["markup_enc"]
+    except (KeyError, IndexError):
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(dec(m["sender"], "messages", COL["msg_entities"], m["id"] + ":kb", raw) or "null")
+    except ValueError:
+        return None
+
+
+def apply_keyboard(bot_id, uid, kb):
+    if kb == "remove":
+        run("DELETE FROM bot_keyboards WHERE bot_id = ? AND user_id = ?", (bot_id, uid))
+    elif kb:
+        run("DELETE FROM bot_keyboards WHERE bot_id = ? AND user_id = ?", (bot_id, uid))
+        run("INSERT INTO bot_keyboards(bot_id, user_id, markup, updated_at) VALUES (?,?,?,?)",
+            (bot_id, uid, json.dumps(kb, ensure_ascii=False), time.time()))
+
+
+def bot_keyboard_of(bot_id, uid):
+    r = q1("SELECT markup FROM bot_keyboards WHERE bot_id = ? AND user_id = ?", (bot_id, uid))
+    try:
+        return json.loads(r["markup"]) if r else None
+    except ValueError:
+        return None
+
+
+def bot_user_wake(uid):
+    """У человека переписка с ботом обновится сразу (новое/изменённое/удалённое сообщение бота)"""
+    SHARED.ver_bump("uver:" + uid)
+    SHARED.events_publish(uid, "dm")
+
+
+@route("POST", r"/v1/messages/([a-f0-9]+)/callback")
+def bot_callback(req, me, mid):
+    """Нажали кнопку под сообщением бота: обновление callback_query коду бота, ждём answerCallbackQuery до ~6 с"""
+    uid = me["id"]
+    rate_limit("cbq:" + uid, 60, 60)
+    m = q1("SELECT * FROM messages WHERE id = ? AND recipient = ? AND del_recipient = 0", (mid, uid))
+    if not m:
+        raise ApiError(404, "not_found")
+    bot = bot_row(m["sender"])
+    if not bot:
+        raise ApiError(400, "not_a_bot")
+    data = str(req.body_json().get("data", ""))
+    allowed = {b.get("callback_data") for row in (markup_of(m) or []) for b in row}
+    if not data or data not in allowed:
+        raise ApiError(400, "bad_callback_data")
+    qid = uuid.uuid4().hex
+    SHARED.cache_set("cbqb:" + qid, json.dumps({"bot": bot["id"], "user": uid}), 600)
+    brief = user_brief(uid)
+    who = {"id": uid, "is_bot": False, "first_name": brief["name"], "username": brief.get("username")}
+    text = dec(m["sender"], "messages", COL["msg_text"], mid, m["text_enc"]) or ""
+    bot_push_update(bot, {"callback_query": {
+        "id": qid, "from": who, "data": data, "chat_instance": dm_key(bot["id"], uid),
+        "message": {"message_id": mid, "date": int(m["created_at"]), "text": text,
+                    "chat": {"id": uid, "type": "private", "first_name": brief["name"]}}}})
+    deadline = time.time() + CALLBACK_WAIT
+    ans = None
+    while time.time() < deadline:
+        raw = SHARED.cache_get("cbqa:" + qid)
+        if raw:
+            ans = json.loads(raw)
+            break
+        SHARED.events_wait("cbq:" + qid, min(0.5, max(0.05, deadline - time.time())))
+    req.send_json(200, {"answered": ans is not None, **(ans or {})})
+
+
+def _multipart(req, limit):
+    """multipart/form-data от кода бота (sendPhoto и т.п. с файлом): поля и файлы"""
+    from email.parser import BytesParser
+    from email.policy import HTTP
+    length = int(req.headers.get("Content-Length") or 0)
+    if length <= 0 or length > limit:
+        req.close_connection = True
+        raise ApiError(413, "too_large")
+    body = req.rfile.read(length)
+    msg = BytesParser(policy=HTTP).parsebytes(
+        b"Content-Type: " + req.headers.get("Content-Type", "").encode("latin-1", "replace") + b"\r\n\r\n" + body)
+    fields, files = {}, {}
+    if not msg.is_multipart():
+        return fields, files
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        if filename is not None:
+            files[name] = (filename, (part.get_content_type() or "application/octet-stream").lower(), payload)
+        else:
+            fields[name] = payload.decode("utf-8", "replace")
+    return fields, files
+
+
+def _image_size(data):
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(data)) as im:
+            return im.size
+    except Exception:
+        pass
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            seg = int.from_bytes(data[i + 2:i + 4], "big")
+            if marker in (0xC0, 0xC1, 0xC2):
+                return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+            i += 2 + seg
+    return 0, 0
+
+
+BOT_SEND_KINDS = {   # метод → (тип вложения, тип файла на сервере, поле с файлом)
+    "sendphoto": ("photo", "image", "photo"), "senddocument": ("file", "file", "document"),
+    "sendvideo": ("video", "video", "video"), "sendanimation": ("video", "video", "animation"),
+    "sendaudio": ("audio", "audio", "audio"), "sendvoice": ("voice", "audio", "voice"),
+    "sendvideonote": ("circle", "video", "video_note"),
+}
+
+
+def _sniff_mime(data, kind, declared):
+    if kind == "image":
+        return "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg" if data[:3] == b"\xff\xd8\xff" else ""
+    if kind == "video":
+        return "video/mp4" if data[4:8] == b"ftyp" else ""
+    if kind == "audio":
+        return "audio/mp4" if data[4:8] == b"ftyp" else "audio/mpeg" if (data[:3] == b"ID3" or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")) else ""
+    return declared if re.fullmatch(r"[a-z0-9][a-z0-9.+\-]*/[a-z0-9][a-z0-9.+\-]*", declared or "") else "application/octet-stream"
+
+
+def bot_media(bid, kind, value, files, field, p):
+    """Файл для отправки ботом: загруженный в этом запросе, file_id (свой прежний файл) или https-ссылка.
+    Возвращает (media_id, имя файла)."""
+    if field in files:
+        name, ctype, data = files[field]
+    elif isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value):
+        m = q1("SELECT * FROM media WHERE id = ? AND owner = ? AND kind = ?", (value, bid, kind))
+        if not m:
+            raise ApiError(400, "Bad Request: wrong file identifier")
+        return m["id"], None
+    elif isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+        got = safe_request(value, timeout=15, max_bytes=BOT_FILE_MAX + 1, redirects=3)
+        if not got or got[0] != 200 or len(got[2]) > BOT_FILE_MAX:
+            raise ApiError(400, "Bad Request: failed to get HTTP URL content")
+        data, ctype = got[2], (got[1].getheader("Content-Type") or "").split(";")[0].strip().lower()
+        name = urlparse(got[3]).path.rsplit("/", 1)[-1] or "file"
+    else:
+        raise ApiError(400, "Bad Request: file is required")
+    if not data:
+        raise ApiError(400, "Bad Request: file is empty")
+    mime = _sniff_mime(data, kind, ctype)
+    if not mime or not media_kind_allowed(kind, mime):
+        raise ApiError(400, "Bad Request: wrong file type")
+    params = {"dur": str(p.get("duration") or 0)}
+    if kind == "image":
+        w, h = _image_size(data)
+        params.update(w=str(w), h=str(h))
+    elif p.get("width") and p.get("height"):
+        params.update(w=str(p.get("width")), h=str(p.get("height")))
+    import io
+    res = ingest_media(bid, kind, mime, params, io.BytesIO(data).read, len(data))
+    return res["id"], name
+
+
+def bot_sent_json(row, chat):
+    """Ответ Bot API на отправку/изменение: сообщение в формате Telegram"""
+    mid = row["id"]
+    text = dec(row["sender"], "messages", COL["msg_text"], mid, row["text_enc"]) or ""
+    out = {"message_id": mid, "date": int(row["created_at"]), "chat": {"id": chat, "type": "private"}}
+    atts = attachments_of(row)
+    if row["edited_at"]:
+        out["edit_date"] = int(row["edited_at"])
+    if atts:
+        if text:
+            out["caption"] = text
+        a = atts[0]
+        t = a.get("type")
+        if t == "photo":
+            out["photo"] = [{"file_id": a["media_id"], "width": a.get("width", 0), "height": a.get("height", 0)}]
+        elif t == "file":
+            out["document"] = {"file_id": a["media_id"], "file_name": a.get("name"), "mime_type": a.get("mime")}
+        elif t == "sticker":
+            out["sticker"] = {"file_id": a.get("sticker") or a.get("media_id")}
+        elif t in ("video", "audio", "voice", "circle"):
+            out[{"circle": "video_note"}.get(t, t)] = {"file_id": a["media_id"], "duration": int(a.get("duration") or 0)}
+    elif text:
+        out["text"] = text
+    inline = markup_of(row)
+    if inline:
+        out["reply_markup"] = {"inline_keyboard": inline}
+    return out
+
+
+def bot_own_message(bid, p):
+    chat = str(p.get("chat_id") or "")
+    mid = str(p.get("message_id") or "")
+    m = q1("SELECT * FROM messages WHERE id = ? AND sender = ? AND recipient = ?", (mid, bid, chat)) if chat and mid else None
+    return chat, m
+
+
+def bot_api_extra(req, bot, m, p, files):
+    """Методы Bot API сверх базовых: кнопки, медиа, изменение и удаление. None — метод не отсюда."""
+    bid = bot["id"]
+    if m == "answercallbackquery":
+        qid = str(p.get("callback_query_id") or "")
+        meta = SHARED.cache_get("cbqb:" + qid)
+        if not meta or json.loads(meta).get("bot") != bid:
+            return bot_api_err(req, 400, "Bad Request: query is too old or query ID is invalid")
+        ans = {"text": str(p.get("text") or "")[:200], "show_alert": bool(p.get("show_alert") in (True, "true", "1", 1))}
+        url = str(p.get("url") or "")
+        if url and re.match(r"^https?://", url, re.I):
+            ans["url"] = url[:500]
+        SHARED.cache_set("cbqa:" + qid, json.dumps(ans, ensure_ascii=False), 60)
+        SHARED.events_publish("cbq:" + qid, "answer")
+        return bot_api_ok(req, True)
+    if m in ("editmessagetext", "editmessagecaption", "editmessagereplymarkup"):
+        chat, row = bot_own_message(bid, p)
+        if not row or row["del_recipient"]:
+            return bot_api_err(req, 400, "Bad Request: message to edit not found")
+        inline, _ = clean_markup(p.get("reply_markup"))
+        if m != "editmessagereplymarkup":
+            text = str(p.get("caption") if m == "editmessagecaption" else p.get("text") or "")[:4000]
+            if not text.strip() and not attachments_of(row):
+                return bot_api_err(req, 400, "Bad Request: message text is empty")
+            run("UPDATE messages SET text_enc = ?, entities_enc = ?, edited_at = ? WHERE id = ?",
+                (enc(bid, "messages", COL["msg_text"], row["id"], text),
+                 enc(bid, "messages", COL["msg_entities"], row["id"], "[]"), time.time(), row["id"]))
+        set_inline_markup(row["id"], bid, inline)
+        bot_user_wake(chat)
+        return bot_api_ok(req, bot_sent_json(q1("SELECT * FROM messages WHERE id = ?", (row["id"],)), chat))
+    if m == "deletemessage":
+        chat, row = bot_own_message(bid, p)
+        if not row:
+            return bot_api_err(req, 400, "Bad Request: message to delete not found")
+        drop_message_media(row)
+        retained_delete_dm(row["id"])
+        run("DELETE FROM reactions WHERE message_id = ?", (row["id"],))
+        bot_user_wake(chat)
+        return bot_api_ok(req, True)
+    if m in BOT_SEND_KINDS or m == "sendsticker":
+        chat = str(p.get("chat_id") or "")
+        if not chat:
+            return bot_api_err(req, 400, "Bad Request: chat_id is required")
+        if not bot_started(bid, chat):
+            return bot_api_err(req, 403, "Forbidden: bot can't initiate conversation with a user")
+        if either_blocked(bid, chat):
+            return bot_api_err(req, 403, "Forbidden: bot was blocked by the user")
+        rate_limit("botfile:" + bid, 120, 60)
+        if m == "sendsticker":
+            value = p.get("sticker")
+            if "sticker" in files:
+                media_id, _ = bot_media(bid, "image", None, files, "sticker", p)
+                atts = clean_attachments([{"type": "photo", "media_id": media_id}], bid)
+            else:
+                atts = clean_attachments([{"type": "sticker", "sticker": str(value or "")}], bid)
+            if not atts:
+                return bot_api_err(req, 400, "Bad Request: wrong sticker")
+        else:
+            att_type, kind, field = BOT_SEND_KINDS[m]
+            media_id, name = bot_media(bid, kind, p.get(field), files, field, p)
+            item = {"type": att_type, "media_id": media_id}
+            if att_type in ("file", "audio"):
+                item["name"] = p.get("file_name") or name or "file"
+            if att_type == "audio":
+                item.update(title=p.get("title"), artist=p.get("performer"))
+            if m == "sendanimation":
+                item["gif"] = True
+            atts = clean_attachments([item], bid)
+        caption = str(p.get("caption") or "")[:1024]
+        inline, kb = clean_markup(p.get("reply_markup"))
+        row = deliver_dm(bid, chat, caption, [], atts, str(p.get("reply_to_message_id") or "") or None,
+                         silent=bool(p.get("disable_notification")))
+        set_inline_markup(row["id"], bid, inline)
+        apply_keyboard(bid, chat, kb)
+        return bot_api_ok(req, bot_sent_json(q1("SELECT * FROM messages WHERE id = ?", (row["id"],)), chat))
+    return "skip"
+
+
 def bot_api(req, me, token, method):
     bot = bot_by_token(token)
     if not bot:
         return bot_api_err(req, 401, "Unauthorized")
     rate_limit("botapi:" + bot["id"], 1200, 60)
     p = bot_params(req)
+    files = p.pop("_files", {})
     m = method.lower()
     bid = bot["id"]
+    try:
+        handled = bot_api_extra(req, bot, m, p, files)
+    except ApiError as e:
+        code = e.status if e.status in (403, 404, 413, 429) or e.status >= 500 else 400
+        return bot_api_err(req, code, e.code if " " in e.code else "Bad Request: " + e.code)
+    if handled != "skip":
+        return
     if m == "getme":
         u = q1("SELECT * FROM users WHERE id = ?", (bid,))
         return bot_api_ok(req, {"id": bid, "is_bot": True, "first_name": names(u)[2] if u else "",
@@ -4819,8 +5213,9 @@ def bot_api(req, me, token, method):
         if offset:
             run("DELETE FROM bot_updates WHERE bot_id = ? AND seq < ?", (bid, offset))   # подтверждённые
         rows = q("SELECT * FROM bot_updates WHERE bot_id = ? ORDER BY seq LIMIT ?", (bid, limit))
-        if not rows and timeout:
-            SHARED.events_wait("bot:" + bid, timeout)
+        deadline = time.time() + timeout
+        while not rows and time.time() < deadline:      # старый «будильник» мог остаться — ждём, пока правда что-то придёт
+            SHARED.events_wait("bot:" + bid, max(0.05, deadline - time.time()))
             rows = q("SELECT * FROM bot_updates WHERE bot_id = ? ORDER BY seq LIMIT ?", (bid, limit))
         return bot_api_ok(req, [json.loads(r["payload"]) for r in rows])
     if m == "sendmessage":
@@ -4832,9 +5227,15 @@ def bot_api(req, me, token, method):
             return bot_api_err(req, 403, "Forbidden: bot can't initiate conversation with a user")
         if either_blocked(bid, chat):
             return bot_api_err(req, 403, "Forbidden: bot was blocked by the user")
-        row = deliver_dm(bid, chat, text, [], [], str(p.get("reply_to_message_id") or "") or None)
-        return bot_api_ok(req, {"message_id": row["id"], "date": int(row["created_at"]),
-                                "chat": {"id": chat, "type": "private"}, "text": text})
+        try:
+            inline, kb = clean_markup(p.get("reply_markup"))
+        except ApiError as e:
+            return bot_api_err(req, 400, "Bad Request: " + e.code)
+        row = deliver_dm(bid, chat, text, [], [], str(p.get("reply_to_message_id") or "") or None,
+                         silent=bool(p.get("disable_notification")))
+        set_inline_markup(row["id"], bid, inline)
+        apply_keyboard(bid, chat, kb)
+        return bot_api_ok(req, bot_sent_json(q1("SELECT * FROM messages WHERE id = ?", (row["id"],)), chat))
     if m == "setmycommands":
         cmds = p.get("commands")
         if isinstance(cmds, str):
@@ -5597,6 +5998,7 @@ def message_json(m, me_id):
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
         **({"expires_at": m["expires_at"]} if m["expires_at"] else {}),
+        **({"markup": mk} if (mk := markup_of(m)) else {}),
         **fwd_fields(m, me_id),
     }
 

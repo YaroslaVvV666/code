@@ -398,6 +398,7 @@ struct MessageRow: View {
             }
             .padding(.bottom, message.note != nil ? 16 : 0)      // место под выступающий пузырёк
             if !message.reactions.isEmpty { reactionChips }
+            if !message.markup.isEmpty && !mine { BotInlineButtons(message: message).padding(.top, 1) }
         }
     }
 

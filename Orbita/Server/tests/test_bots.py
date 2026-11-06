@@ -1,11 +1,13 @@
 """Боты: BotGod (создание и настройка), Bot API (getMe, getUpdates, sendMessage, setMyCommands), «Старт». Сервер должен быть запущен."""
 import json
+import time as _time
 import re
 import sys
 
 from smoke import jbody, req, session
 
 BOTGOD = "b0790d00-0000-4000-8000-00000000b070"
+JPEG_B64 = ("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDlqKKK+NP1M//Z")
 
 
 def main():
@@ -74,6 +76,84 @@ def main():
     check("sendMessage", s == 200 and (jbody(b) or {}).get("ok"), (s, b[:200]))
     s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
     check("человек видит ответ", (jbody(b) or {}).get("messages", [])[-1]["text"] == "Привет от бота")
+
+    # --- кнопки под сообщением + ответ на нажатие ---
+    kb = {"inline_keyboard": [[{"text": "Да", "callback_data": "yes"}, {"text": "Сайт", "url": "https://example.com"}]]}
+    s, b, _ = req("POST", "/bot%s/sendMessage" % token, body={"chat_id": user, "text": "Выберите", "reply_markup": kb})
+    sent = (jbody(b) or {}).get("result", {})
+    check("sendMessage с кнопками", s == 200 and sent.get("reply_markup", {}).get("inline_keyboard"), (s, b[:300]))
+    s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    last = (jbody(b) or {}).get("messages", [])[-1]
+    check("у человека кнопки под сообщением", last.get("markup") == kb["inline_keyboard"], last)
+    check("javascript: в кнопке — отказ", req("POST", "/bot%s/sendMessage" % token, body={
+        "chat_id": user, "text": "x", "reply_markup": {"inline_keyboard": [[{"text": "x", "url": "javascript:alert(1)"}]]}})[0] == 400)
+    req("GET", "/bot%s/getUpdates?offset=%d" % (token, int(_time.time() * 1e6) + 10**9))          # очистить очередь
+
+    import threading
+    answered = {}
+
+    def bot_side():
+        s, b, _ = req("GET", "/bot%s/getUpdates?timeout=5" % token, timeout=15)
+        for u in (jbody(b) or {}).get("result", []):
+            cq = u.get("callback_query")
+            if cq:
+                answered["data"] = cq["data"]
+                req("POST", "/bot%s/answerCallbackQuery" % token, body={"callback_query_id": cq["id"], "text": "Принято!"})
+    th = threading.Thread(target=bot_side); th.start()
+    import time as _t; _t.sleep(0.3)
+    s, b, _ = req("POST", "/v1/messages/%s/callback" % last["id"], tu, {"data": "yes"})
+    th.join()
+    d = jbody(b) or {}
+    check("нажатие кнопки → callback_query и ответ бота", answered.get("data") == "yes" and d.get("text") == "Принято!", (d, answered))
+    check("чужие callback_data — отказ", req("POST", "/v1/messages/%s/callback" % last["id"], tu, {"data": "hack"})[0] == 400)
+
+    s, b, _ = req("POST", "/bot%s/editMessageText" % token, body={"chat_id": user, "message_id": last["id"], "text": "Готово ✅"})
+    check("editMessageText", s == 200, (s, b[:200]))
+    s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    last2 = (jbody(b) or {}).get("messages", [])[-1]
+    check("текст изменён, кнопки убраны", last2["text"] == "Готово ✅" and not last2.get("markup") and last2.get("edited_at"), last2)
+
+    # --- клавиатура вместо обычной ---
+    s, b, _ = req("POST", "/bot%s/sendMessage" % token, body={"chat_id": user, "text": "Меню", "reply_markup": {
+        "keyboard": [["Каталог", "Корзина"], [{"text": "Помощь"}]], "resize_keyboard": True, "one_time_keyboard": True}})
+    s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    kbd = (jbody(b) or {}).get("bot_keyboard") or {}
+    check("клавиатура бота", [[x["text"] for x in r] for r in kbd.get("keyboard", [])] == [["Каталог", "Корзина"], ["Помощь"]], kbd)
+    req("POST", "/v1/chats/%s/messages" % bot_id, tu, {"text": "Каталог"})
+    s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    check("одноразовая клавиатура спрятана", not (jbody(b) or {}).get("bot_keyboard"), b[-300:])
+
+    # --- фото и файл (multipart, как в Telegram) ---
+    import base64, uuid as _u
+    jpeg = base64.b64decode(JPEG_B64)
+
+    def multipart(method, fields, fname, filename, ctype, data):
+        bnd = _u.uuid4().hex
+        body = b""
+        for k, v in fields.items():
+            body += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (bnd, k, v)).encode()
+        body += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n"
+                 % (bnd, fname, filename, ctype)).encode() + data + ("\r\n--%s--\r\n" % bnd).encode()
+        return req("POST", "/bot%s/%s" % (token, method), raw=body, ctype="multipart/form-data; boundary=" + bnd)
+    s, b, _ = multipart("sendPhoto", {"chat_id": user, "caption": "Фото"}, "photo", "a.jpg", "image/jpeg", jpeg)
+    ph = (jbody(b) or {}).get("result", {})
+    check("sendPhoto", s == 200 and ph.get("photo") and ph.get("caption") == "Фото", (s, b[:300]))
+    s, b, _ = multipart("sendDocument", {"chat_id": user}, "document", "../../отчёт.pdf", "application/pdf", b"%PDF-1.4 test")
+    doc = (jbody(b) or {}).get("result", {}).get("document", {})
+    check("sendDocument (имя очищено)", s == 200 and doc.get("file_name") and "/" not in doc["file_name"], (s, b[:300]))
+    s, b, _ = multipart("sendPhoto", {"chat_id": user}, "photo", "x.jpg", "image/jpeg", b"<html><script>")
+    check("sendPhoto с HTML — отказ", s == 400, (s, b[:200]))
+    s, b, _ = req("POST", "/bot%s/sendPhoto" % token, body={"chat_id": user, "photo": ph.get("photo", [{}])[0].get("file_id")})
+    check("sendPhoto по file_id", s == 200, (s, b[:200]))
+    s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    msgs = (jbody(b) or {}).get("messages", [])
+    check("человек видит фото и файл", any(a.get("type") == "photo" for m in msgs for a in m.get("attachments", []))
+          and any(a.get("type") == "file" for m in msgs for a in m.get("attachments", [])))
+    s, b, _ = req("POST", "/bot%s/deleteMessage" % token, body={"chat_id": user, "message_id": msgs[-1]["id"]})
+    s2, b2, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
+    check("deleteMessage", s == 200 and all(m["id"] != msgs[-1]["id"] for m in (jbody(b2) or {}).get("messages", [])))
+    check("нельзя удалить чужое", req("POST", "/bot%s/deleteMessage" % token, body={"chat_id": user, "message_id": msgs[0]["id"]})[0] == 400
+          if msgs and not msgs[0]["mine"] is False else True)
 
     s, b, _ = req("POST", "/bot%s/setMyCommands" % token, body={"commands": [{"command": "go", "description": "Поехали"}]})
     check("setMyCommands", s == 200)

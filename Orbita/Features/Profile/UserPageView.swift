@@ -585,6 +585,11 @@ struct UserPageView: View {
             // чтобы они не перестраивали её посреди анимации
             if model.prefilled { try? await Task.sleep(nanoseconds: 450_000_000) }
             await model.load()
+            // открыли ссылку на бота с ?start= — сразу в переписку, там «Старт» отправит параметр
+            if let profile = model.profile, profile.isBot, BotStartLinks.peek(username: profile.username) != nil {
+                chatRoute = ChatRoute(peer: ChatPeer(id: profile.id, name: profile.name,
+                                                     username: profile.username, avatarID: profile.avatarID))
+            }
         }
         .onChange(of: stage) { _, new in
             if new == 0 {

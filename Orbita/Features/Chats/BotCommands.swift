@@ -313,3 +313,159 @@ private struct BotHintTail: Shape {
         return p
     }
 }
+
+// MARK: - Кнопки бота: под сообщением (inline) и клавиатура вместо обычной (как в Telegram)
+
+/// Кнопка под сообщением бота: ссылка или «callback» — нажатие уходит коду бота
+struct BotButton: Equatable, Hashable, Codable {
+    let text: String
+    var url: String? = nil
+    var callbackData: String? = nil
+}
+
+/// Клавиатура бота вместо обычной: нажатие отправляет текст кнопки
+struct BotKeyboard: Equatable, Decodable {
+    struct Key: Equatable, Hashable, Decodable { let text: String }
+    let keyboard: [[Key]]
+    let resize: Bool?
+    let oneTime: Bool?
+    let placeholder: String?
+}
+
+struct BotCallbackAnswer: Decodable {
+    let answered: Bool
+    let text: String?
+    let showAlert: Bool?
+    let url: String?
+}
+
+private struct BotButtonActionKey: EnvironmentKey {
+    static let defaultValue: ((ChatMessage, BotButton) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// Нажали кнопку под сообщением бота
+    var onBotButton: ((ChatMessage, BotButton) -> Void)? {
+        get { self[BotButtonActionKey.self] }
+        set { self[BotButtonActionKey.self] = newValue }
+    }
+}
+
+/// Ряды кнопок под пузырём сообщения бота
+struct BotInlineButtons: View {
+    let message: ChatMessage
+    @Environment(\.onBotButton) private var onBotButton
+    @Environment(\.theme) private var theme
+    @ObservedObject private var progress = BotButtonProgress.shared
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ForEach(Array(message.markup.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 4) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, b in
+                        Button {
+                            Haptics.impact(.light)
+                            onBotButton?(message, b)
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Group {
+                                    if progress.loading == key(b) {
+                                        ProgressView().tint(.white).controlSize(.small)
+                                    } else {
+                                        Text(b.text).font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                                            .multilineTextAlignment(.center).minimumScaleFactor(0.8)
+                                    }
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity, minHeight: 40)
+                                .padding(.horizontal, 8)
+                                if b.url != nil {
+                                    Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white.opacity(0.85)).padding(5)
+                                }
+                            }
+                            .background(.black.opacity(theme.dark ? 0.35 : 0.22), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(PressStyle())
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 340)
+    }
+
+    private func key(_ b: BotButton) -> String { message.id + "|" + (b.callbackData ?? "") }
+}
+
+/// Какая кнопка бота сейчас ждёт ответа (крутилка вместо подписи)
+@MainActor
+final class BotButtonProgress: ObservableObject {
+    static let shared = BotButtonProgress()
+    @Published var loading: String?
+}
+
+/// Клавиатура бота на месте системной: ряды крупных кнопок
+struct BotReplyKeyboardPanel: View {
+    let keyboard: BotKeyboard
+    let onPress: (String) -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                ForEach(Array(keyboard.keyboard.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 6) {
+                        ForEach(row, id: \.self) { key in
+                            Button {
+                                Haptics.impact(.light)
+                                onPress(key.text)
+                            } label: {
+                                Text(key.text).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text)
+                                    .lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.8)
+                                    .frame(maxWidth: .infinity, minHeight: keyboard.resize == true ? 44 : 52)
+                                    .padding(.horizontal, 6)
+                                    .background(theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    .shadow(color: .black.opacity(theme.dark ? 0 : 0.12), radius: 0, y: 1)
+                            }
+                            .buttonStyle(PressStyle())
+                        }
+                    }
+                }
+            }
+            .padding(8)
+        }
+        .frame(maxHeight: keyboard.resize == true ? min(CGFloat(keyboard.keyboard.count) * 50 + 16, 280) : 280)
+        .background(theme.dark ? Color(white: 0.09) : Color(white: 0.86))
+    }
+}
+
+/// Ссылка на бота с параметром запуска: orbita.app/<bot>?start=abc → «Старт» отправит «/start abc»
+enum BotStartParam {
+    static func clean(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty, raw.count <= 64,
+              raw.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" }),
+              raw.allSatisfy(\.isASCII) else { return nil }
+        return raw
+    }
+}
+
+/// Параметры запуска ботов из ссылок (?start=…), ждут, пока откроется переписка с ботом
+@MainActor
+enum BotStartLinks {
+    private static var pending: [String: String] = [:]
+
+    nonisolated static func set(username: String, param: String) {
+        Task { @MainActor in pending[username.lowercased()] = param }
+    }
+
+    static func peek(username: String?) -> String? {
+        guard let username else { return nil }
+        return pending[username.lowercased()]
+    }
+
+    static func take(username: String?) -> String? {
+        guard let username else { return nil }
+        return pending.removeValue(forKey: username.lowercased())
+    }
+}

@@ -354,6 +354,7 @@ struct ChatMessage: Identifiable, Equatable {
     var comments: Int? = nil        // в канале с обсуждением — число комментариев
     var note: String? = nil         // своя заметка к сообщению: видна только тебе
     var commenters: [ChatPeer] = [] // пост канала: последние комментаторы (аватарки под постом)
+    var markup: [[BotButton]] = []  // сообщение бота: кнопки под ним
 
     var summary: String {
         if system != nil { return "" }
@@ -389,6 +390,7 @@ struct ChatThread {
     var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
     var botCommands: [BotCommand] = []  // переписка с ботом: его команды (меню «/»)
     var bot: BotInfo? = nil             // переписка с ботом: приветствие, «Старт», пользователи
+    var botKeyboard: BotKeyboard? = nil // клавиатура бота вместо обычной
 }
 
 struct Sticker: Identifiable, Equatable, Hashable {
@@ -506,6 +508,8 @@ protocol MessengerRepository: Sendable {
     func setChatTTL(peerID: String, seconds: Int) async throws -> Int
     /// Личная переписка: запретить копирование и пересылку (включить/выключить)
     func setChatProtected(peerID: String, on: Bool) async throws -> Bool
+    /// Нажали кнопку под сообщением бота: ответ бота (подсказка, окно или ссылка)
+    func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer
     /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
     func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
@@ -744,6 +748,7 @@ private struct MessageDTO: Decodable {
     let comments: Int?
     let note: String?
     let commenters: [PeerDTO]?
+    let markup: [[BotButton]]?
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -755,7 +760,8 @@ private struct MessageDTO: Decodable {
                     forwarded: forwarded.map { ForwardRef(id: $0.id, name: $0.name, postID: $0.post) },
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
-                    comments: comments, note: note, commenters: (commenters ?? []).map(\.model))
+                    comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
+                    markup: markup ?? [])
     }
 }
 
@@ -977,6 +983,7 @@ private struct ThreadDTO: Decodable {
     let ttl: Int?
     let botCommands: [BotCommand]?
     let bot: BotInfo?
+    let botKeyboard: BotKeyboard?
     let `protected`: Bool?                  // личная переписка: запрещено копирование и пересылка
 }
 
@@ -1065,7 +1072,13 @@ struct RemoteMessengerRepository: MessengerRepository {
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
-                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot)
+                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot,
+                          botKeyboard: dto.botKeyboard)
+    }
+
+    func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer {
+        let body = ServerAPI.json(["data": data] as [String: Any])
+        return try decodeAPI(BotCallbackAnswer.self, from: try await api.request("POST", "/v1/messages/\(messageID)/callback", body: body))
     }
 
     func setChatProtected(peerID: String, on: Bool) async throws -> Bool {

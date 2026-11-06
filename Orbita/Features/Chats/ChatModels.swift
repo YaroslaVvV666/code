@@ -265,8 +265,12 @@ final class ChatModel: ObservableObject {
     /// Бот: «Что умеет этот бот?», нажат ли «Старт», сколько пользователей
     @Published private(set) var bot: BotInfo?
     var isBot: Bool { bot != nil || !botCommands.isEmpty }
+    /// Клавиатура бота вместо обычной (кнопки с готовыми ответами)
+    @Published private(set) var botKeyboard: BotKeyboard?
+    /// Чат открыли по ссылке с параметром (?start=abc): «Старт» показывается снова и отправит «/start abc»
+    @Published var startParam: String?
     /// «Старт» ещё не нажимали — вместо поля ввода большая кнопка «Старт»
-    var needsStart: Bool { bot.map { !$0.started } ?? false }
+    var needsStart: Bool { (bot.map { !$0.started } ?? false) || (startParam != nil && isBot) }
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
@@ -298,10 +302,12 @@ final class ChatModel: ObservableObject {
             firstUnreadID = t.firstUnread
             botCommands = BotCommand.resolve(t.botCommands, peerID: peer.id)
             bot = t.bot
+            botKeyboard = t.botKeyboard
             loaded = true
         }
         // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
         if botCommands.isEmpty { botCommands = BotCommand.resolve([], peerID: peer.id) }
+        startParam = BotStartLinks.take(username: self.peer.username)
     }
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
@@ -351,6 +357,7 @@ final class ChatModel: ObservableObject {
                 if bot?.started == true { fresh?.started = true }
                 bot = fresh
             }
+            if botKeyboard != thread.botKeyboard { botKeyboard = thread.botKeyboard }
             if !loaded { firstUnreadID = thread.firstUnread }
             if !loaded { loaded = true }
             refreshedOnce = true
@@ -612,7 +619,42 @@ final class ChatModel: ObservableObject {
     /// «Старт»: кнопка сразу уступает место полю ввода, боту уходит /start
     func startBot() {
         bot?.started = true
-        sendCommand("/start")
+        let param = startParam
+        startParam = nil
+        sendCommand(param.map { "/start " + $0 } ?? "/start")
+    }
+
+    /// Нажали кнопку под сообщением бота: ссылка открывается (после подтверждения), callback уходит боту
+    func pressBotButton(_ message: ChatMessage, _ button: BotButton, lang: AppLanguage) {
+        let s = Strings(lang: lang)
+        if let raw = button.url {
+            guard let url = SafeLink.url(raw) else { return }
+            AppAlert.confirm(s.t("Открыть ссылку?", "Open this link?"), url.absoluteString,
+                             ok: s.t("Открыть", "Open"), cancel: s.t("Отмена", "Cancel")) { UIApplication.shared.open(url) }
+            return
+        }
+        guard let data = button.callbackData else { return }
+        let key = message.id + "|" + data
+        guard BotButtonProgress.shared.loading != key else { return }
+        BotButtonProgress.shared.loading = key
+        Task {
+            defer { if BotButtonProgress.shared.loading == key { BotButtonProgress.shared.loading = nil } }
+            guard let answer = try? await repo.botCallback(messageID: message.id, data: data) else {
+                AppToast.show(s.t("Бот не ответил", "The bot didn't respond"), icon: "exclamationmark.circle")
+                return
+            }
+            if let text = answer.text, !text.isEmpty {
+                if answer.showAlert == true { AppAlert.info(peer.name, text) } else { AppToast.show(text) }
+            }
+            if let raw = answer.url, let url = SafeLink.url(raw) { UIApplication.shared.open(url) }
+            await refresh()                     // бот мог сразу изменить сообщение или кнопки
+        }
+    }
+
+    /// Нажали кнопку клавиатуры бота: уходит её текст; одноразовая клавиатура прячется сразу
+    func pressBotKey(_ text: String) {
+        if botKeyboard?.oneTime == true { botKeyboard = nil }
+        sendCommand(text)
     }
 
     /// Отправить боту команду («/newpack»): из меню «/» или нажатием на команду в тексте

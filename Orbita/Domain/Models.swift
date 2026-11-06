@@ -373,6 +373,16 @@ enum DeepLink: Identifiable, Equatable {
     }
 
     init?(url: URL) {
+        guard let link = DeepLink(parsing: url) else { return nil }
+        // ссылка на бота с параметром запуска (…/u/somebot?start=abc): откроется сразу переписка, «Старт» отправит «/start abc»
+        if case .username(let name) = link,
+           let start = BotStartParam.clean(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "start" }?.value) {
+            BotStartLinks.set(username: name, param: start)
+        }
+        self = link
+    }
+
+    private init?(parsing url: URL) {
         // http(s)://адрес-вашего-сервера/p/<id> — ссылка, которой делятся в мессенджерах
         if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
             let parts = url.pathComponents.filter { $0 != "/" }
