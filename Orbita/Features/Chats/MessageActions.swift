@@ -149,7 +149,7 @@ struct MessageActionOverlay: View {
         if !message.text.isEmpty && !noForward && message.poll == nil { n += 1 }
         if model.canPin { n += 1 }
         if showSender { n += 1 }
-        if canEdit && message.poll == nil { n += 1 }
+        if canEdit && message.poll == nil && !message.isArticle { n += 1 }
         if canTranslate { n += 1 }
         if canNote { n += 1 }
         return n
@@ -403,7 +403,7 @@ struct MessageActionOverlay: View {
                 divider
                 row("eye", s.t("Кто прочитал и отреагировал", "Seen & reactions")) { dismiss(onInfo) }
             }
-            if canEdit && message.poll == nil {
+            if canEdit && message.poll == nil && !message.isArticle {
                 divider
                 row("pencil", s.editMessage) { dismiss(onEdit) }
             }

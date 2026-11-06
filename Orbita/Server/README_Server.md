@@ -246,3 +246,14 @@ while True:
 `setMyDescription`/`getMyDescription`, `getWebhookInfo`, `setWebhook(secret_token, drop_pending_updates)`.
 Входящие сообщения приходят в формате Telegram: `photo`, `document`, `video`, `animation`, `video_note`, `voice`,
 `audio`, `sticker`, `location`, `caption`, `reply_to_message`.
+
+
+## Статьи в сообщениях
+
+`POST /v1/chats/<id>/messages` принимает `blocks` — сообщение из блоков, как статьи в Telegram:
+`heading` (`level` 1–6), `text`, `quote`, `pullquote` (`author`), `code` (`lang`), `formula` (LaTeX),
+`button` (`text`, `url`, `color`: default/red/blue/green/orange/yellow/white), `list` (`style`: bullet/number/check,
+`items`), `collapse` (`text` — заголовок, `body`), `table` (`rows`, `header`), `media` (вложение, как в `attachments`,
+и `caption`), `divider`. И `buttons` — кнопки-ссылки под сообщением с цветом. Блоки шифруются, медиа — только свои
+файлы, ссылки — только http(s). Поле `text` заполняется выжимкой для списка чатов. Работает в личке, группах и каналах.
+Проверка: `python3 tests/test_articles.py`.

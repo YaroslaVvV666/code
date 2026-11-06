@@ -400,7 +400,9 @@ struct MessageRow: View {
             }
             .padding(.bottom, message.note != nil ? 16 : 0)      // место под выступающий пузырёк
             if !message.reactions.isEmpty { reactionChips }
-            if !message.markup.isEmpty && !mine { BotInlineButtons(message: message).padding(.top, 1) }
+            if !message.markup.isEmpty && (!mine || message.markup.joined().allSatisfy { $0.url != nil }) {
+                BotInlineButtons(message: message).padding(.top, 1)      // бота — у собеседника; кнопки-ссылки — у обоих
+            }
         }
     }
 
@@ -627,6 +629,19 @@ struct MessageRow: View {
                     .padding(.horizontal, 11).padding(.bottom, 5)
             }
 
+            if message.isArticle {
+                // статья: блоки по порядку — заголовки, текст, цитаты, медиа там, где их поставили
+                ArticleBody(blocks: message.blocks, mine: mine, pending: message.isPending, textColor: textColor,
+                            secondary: secondary, messageID: message.id, blocked: blocked,
+                            onOpenMedia: { a in if let item = a.mediaItem { onOpenMedia([item], 0) } },
+                            onOpenFile: onOpenFile, onPlayAudio: onPlayAudio)
+                    .padding(.top, message.reply == nil ? 0 : 6)
+                    .padding(.bottom, 4)
+                HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
+                    .padding(.horizontal, 11)
+                    .padding(.bottom, 6)
+            }
+
             if !mediaItems.isEmpty {
                 MediaBlock(items: mediaItems, pending: message.isPending) { index in
                     // присланный шортс: нажатие открывает ленту шортсов на этом видео (как в TikTok)
@@ -676,7 +691,9 @@ struct MessageRow: View {
                 }
             }
 
-            if hasText && message.poll == nil {
+            if message.isArticle {
+                EmptyView()
+            } else if hasText && message.poll == nil {
                 RichInlineText(text: message.text, entities: message.entities, size: 16,
                                color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler,
                                detect: interactive)
@@ -692,7 +709,7 @@ struct MessageRow: View {
                     .padding(.bottom, 5)
             }
 
-            if hasText, message.poll == nil, mediaItems.isEmpty, let link = LinkPreviewCard.firstURL(in: message.text) {
+            if hasText, !message.isArticle, message.poll == nil, mediaItems.isEmpty, let link = LinkPreviewCard.firstURL(in: message.text) {
                 LinkPreviewCard(url: link, mine: mine)
             }
 

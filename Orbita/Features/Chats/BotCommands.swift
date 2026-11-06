@@ -321,6 +321,7 @@ struct BotButton: Equatable, Hashable, Codable {
     let text: String
     var url: String? = nil
     var callbackData: String? = nil
+    var color: String? = nil            // кнопка-ссылка человека: red, blue, green, orange, yellow, white, default
 }
 
 /// Клавиатура бота вместо обычной: нажатие отправляет текст кнопки
@@ -359,6 +360,24 @@ struct BotInlineButtons: View {
     @ObservedObject private var progress = BotButtonProgress.shared
 
     var body: some View {
+        if message.markup.joined().contains(where: { $0.color != nil }) {
+            // кнопки-ссылки от человека: цветные капсулы под сообщением
+            VStack(alignment: message.mine ? .trailing : .leading, spacing: 6) {
+                ForEach(Array(message.markup.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 6) {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, b in
+                            ArticleLinkButton(text: b.text, url: b.url ?? "", color: b.color ?? "default", mine: false)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 340, alignment: message.mine ? .trailing : .leading)
+        } else {
+            botButtons
+        }
+    }
+
+    private var botButtons: some View {
         VStack(spacing: 4) {
             ForEach(Array(message.markup.enumerated()), id: \.offset) { _, row in
                 HStack(spacing: 4) {

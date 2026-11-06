@@ -47,6 +47,7 @@ struct ChatInputBar: View {
     @State private var showStickerCreator = false
     @State private var kbVisible = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
+    @State private var showArticle = false              // редактор статьи (сообщение из блоков)
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
@@ -166,6 +167,10 @@ struct ChatInputBar: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
         }
+        .fullScreenCover(isPresented: $showArticle) {
+            ArticleComposer(model: model)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
         .sheet(isPresented: $showLocation) {
             LocationShareSheet { point, live in model.sendLocation(point, live: live) }
                 .environment(\.theme, theme).environment(\.lang, lang)
@@ -178,6 +183,7 @@ struct ChatInputBar: View {
                         onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
                         onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
                         onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
+                        onArticle: model.isBot ? nil : { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showArticle = true } },
                         onPhoto: { addPhoto($0) },
                         onVideo: { addVideoFile($0) },
                         onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true } })

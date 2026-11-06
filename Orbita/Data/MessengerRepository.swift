@@ -360,7 +360,9 @@ struct ChatMessage: Identifiable, Equatable {
     var comments: Int? = nil        // в канале с обсуждением — число комментариев
     var note: String? = nil         // своя заметка к сообщению: видна только тебе
     var commenters: [ChatPeer] = [] // пост канала: последние комментаторы (аватарки под постом)
-    var markup: [[BotButton]] = []  // сообщение бота: кнопки под ним
+    var markup: [[BotButton]] = []  // кнопки под сообщением (бота или кнопки-ссылки человека)
+    var blocks: [ArticleBlock] = [] // статья: заголовки, текст, цитаты, таблицы, медиа — по порядку
+    var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
         if system != nil { return "" }
@@ -518,6 +520,9 @@ protocol MessengerRepository: Sendable {
     func setChatProtected(peerID: String, on: Bool) async throws -> Bool
     /// Нажали кнопку под сообщением бота: ответ бота (подсказка, окно или ссылка)
     func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer
+    /// Статья: блоки (медиа уже загружены) и кнопки-ссылки под сообщением
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+                     topic: String?) async throws -> ChatMessage
     /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
     func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
@@ -772,6 +777,7 @@ private struct MessageDTO: Decodable {
     let note: String?
     let commenters: [PeerDTO]?
     let markup: [[BotButton]]?
+    let blocks: [ArticleBlockDTO]?
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -784,7 +790,45 @@ private struct MessageDTO: Decodable {
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
                     comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
-                    markup: markup ?? [])
+                    markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model))
+    }
+}
+
+private struct ArticleBlockDTO: Decodable {
+    struct Item: Decodable { let text: String; let checked: Bool? }
+    let kind: String
+    let text: String?
+    let level: Int?
+    let author: String?
+    let lang: String?
+    let url: String?
+    let color: String?
+    let style: String?
+    let items: [Item]?
+    let body: String?
+    let rows: [[String]]?
+    let header: Bool?
+    let caption: String?
+    let media: AttachmentDTO?
+
+    var model: ArticleBlock? {
+        guard let k = ArticleBlock.Kind(rawValue: kind) else { return nil }
+        var b = ArticleBlock(kind: k)
+        b.text = text ?? ""
+        b.level = level ?? 1
+        b.author = author ?? ""
+        b.lang = lang ?? ""
+        b.url = url ?? ""
+        b.color = color ?? "default"
+        b.style = style ?? "bullet"
+        b.items = (items ?? []).map { ArticleListItem(text: $0.text, checked: $0.checked ?? false) }
+        b.body = body ?? ""
+        b.rows = rows ?? []
+        b.header = header ?? true
+        b.caption = caption ?? ""
+        b.media = media?.model
+        if k == .media && b.media == nil { return nil }
+        return b
     }
 }
 
@@ -1132,6 +1176,16 @@ struct RemoteMessengerRepository: MessengerRepository {
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
                           isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot,
                           botKeyboard: dto.botKeyboard)
+    }
+
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+                     topic: String?) async throws -> ChatMessage {
+        var body: [String: Any] = ["text": "", "blocks": blocks]
+        if !buttons.isEmpty { body["buttons"] = buttons }
+        if let replyTo { body["reply_to"] = replyTo }
+        if let topic, topic != "general" { body["topic_id"] = topic }
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
     }
 
     func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer {

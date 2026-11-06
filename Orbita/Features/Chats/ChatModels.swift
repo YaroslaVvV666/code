@@ -685,6 +685,38 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// Статья: сначала загружаются файлы из блоков (по порядку), потом уходит само сообщение.
+    /// nil — отправлено; иначе — ошибка (редактор остаётся открытым, ничего не теряется)
+    func sendArticle(blocks: [ArticleBlock], buttons: [ArticleButton]) async -> APIError? {
+        do {
+            var out: [[String: Any]] = []
+            for b in blocks {
+                var d = b.json
+                if b.kind == .media {
+                    guard let local = b.local else { continue }
+                    switch local.source {
+                    case .prepared(let m): ping(m.isVideo ? "video" : "photo")
+                    case .file: ping("file")
+                    case .location: break
+                    }
+                    d["media"] = try await repo.upload(local.outgoing).json
+                }
+                out.append(d)
+            }
+            let reply = replyTo
+            var sent = try await repo.sendArticle(peerID: peerID, blocks: out, buttons: buttons.map(\.json),
+                                                  replyTo: reply?.id, topic: topic?.id)
+            replyTo = nil
+            sent.key = sent.id
+            if let i = messages.firstIndex(where: { $0.id == sent.id }) { messages[i] = sent } else { messages.append(sent) }
+            return nil
+        } catch let e as APIError {
+            return e
+        } catch {
+            return .offline
+        }
+    }
+
     /// Нажали кнопку клавиатуры бота: уходит её текст; одноразовая клавиатура прячется сразу
     func pressBotKey(_ text: String) {
         if botKeyboard?.oneTime == true { botKeyboard = nil }

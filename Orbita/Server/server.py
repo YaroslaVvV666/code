@@ -6290,6 +6290,7 @@ def message_json(m, me_id):
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
         **({"expires_at": m["expires_at"]} if m["expires_at"] else {}),
         **({"markup": mk} if (mk := markup_of(m)) else {}),
+        **article_fields(m),
         **fwd_fields(m, me_id),
     }
 
@@ -7237,11 +7238,16 @@ def send_message(req, me, peer):
         if either_blocked(uid, peer):
             raise ApiError(403, "blocked")
     poll = clean_poll(d.get("poll"))
+    blocks = None if poll else clean_blocks(d.get("blocks"), uid)          # статья из блоков
+    buttons = clean_user_buttons(d.get("buttons"))                         # кнопки-ссылки под сообщением
     text = poll["question"] if poll else str(d.get("text", "")).strip()
+    if blocks:
+        text = (text or blocks_summary(blocks))[:MAX_MSG]
+        send_at = None                                                     # статьи уходят сразу
     attachments = [] if poll else clean_attachments(d.get("attachments"), uid)
     if len(text) > MAX_MSG or not (text or attachments):
         raise ApiError(400, "bad_text")
-    entities = [] if poll else clean_entities(d.get("entities", []), text)
+    entities = [] if poll or blocks else clean_entities(d.get("entities", []), text)
     reply_to = None
     if d.get("reply_to"):
         r = q1("SELECT * FROM messages WHERE id = ?", (str(d["reply_to"]),))
@@ -7271,6 +7277,9 @@ def send_message(req, me, peer):
         if st:
             story = {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"]}
     row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")))
+    if blocks or buttons:
+        store_article("messages", row["id"], uid, blocks, buttons)
+        row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
     if peer == STICKER_BOT_ID:
         mark_bot_started(peer, uid)
         sticker_bot_handle(uid, text, attachments)              # бот @stickers отвечает сразу
@@ -7283,6 +7292,167 @@ def send_message(req, me, peer):
             mark_bot_started(peer, uid)
             bot_incoming(b, uid, row, text, attachments)        # пользовательский бот: обновление для его кода
     req.send_json(201, message_json(row, uid))
+
+
+# ---------- статьи в сообщениях (как «Instant View»-посты в Telegram) ----------
+# Сообщение может состоять из блоков: заголовки H1–H6, текст, цитата, выносная цитата, код, формула, кнопка-ссылка,
+# списки (маркированный, нумерованный, контрольный), сворачиваемый блок, таблица и медиа (фото, видео, звук, файл,
+# геопозиция) — в любом месте статьи, с подписью. Кнопки можно добавить и под сообщением, как у ботов.
+# Блоки шифруются тем же ключом, что и текст сообщения; поле text — короткая выжимка для списка чатов и уведомлений.
+
+ensure_column("messages", "blocks_enc", "blocks_enc BLOB")
+ensure_column("group_messages", "blocks_enc", "blocks_enc BLOB")
+ensure_column("group_messages", "markup_enc", "markup_enc BLOB")
+
+BUTTON_COLORS = ("default", "red", "blue", "green", "orange", "yellow", "white")
+ARTICLE_MAX_BLOCKS = 100
+ARTICLE_MAX_BYTES = 96 * 1024
+
+
+_ARTICLE_JUNK = re.compile("[\x00-\x08\x0b-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
+
+
+def _txt(v, limit):
+    """Текст блока: переводы строк остаются, управляющие и «переворачивающие» символы — нет"""
+    return _ARTICLE_JUNK.sub("", str(v or "")).strip()[:limit]
+
+
+def clean_link_button(b):
+    """Кнопка-ссылка от человека: текст, https/http-адрес, цвет"""
+    if not isinstance(b, dict):
+        return None
+    text = clean_line(b.get("text"), 64)
+    url = str(b.get("url") or "").strip()[:500]
+    if not text or not re.match(r"^https?://[^\s/]+", url, re.I):
+        return None
+    color = str(b.get("color") or "default")
+    return {"text": text, "url": url, "color": color if color in BUTTON_COLORS else "default"}
+
+
+def clean_user_buttons(raw):
+    """Кнопки под сообщением: по одной в ряд (или ряды списками), до 8 штук"""
+    if not isinstance(raw, list):
+        return None
+    rows = []
+    for item in raw[:8]:
+        row = [clean_link_button(x) for x in (item if isinstance(item, list) else [item])][:3]
+        row = [x for x in row if x]
+        if row:
+            rows.append(row)
+    return rows or None
+
+
+def clean_blocks(raw, uid):
+    """Проверка блоков статьи. Медиа — только свои загруженные файлы (как обычные вложения)"""
+    if not isinstance(raw, list) or not raw:
+        return None
+    out = []
+    for b in raw[:ARTICLE_MAX_BLOCKS]:
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("kind")
+        item = {"kind": kind}
+        if kind == "heading":
+            try:
+                level = max(1, min(6, int(b.get("level") or 1)))
+            except (TypeError, ValueError):
+                level = 1
+            item.update(text=_txt(b.get("text"), 300), level=level)
+        elif kind in ("text", "quote"):
+            item["text"] = _txt(b.get("text"), 4000)
+        elif kind == "pullquote":
+            item.update(text=_txt(b.get("text"), 1000), author=_txt(b.get("author"), 120))
+        elif kind == "code":
+            item.update(text=_txt(b.get("text"), 8000), lang=clean_line(b.get("lang"), 20))
+        elif kind == "formula":
+            item["text"] = _txt(b.get("text"), 500)
+        elif kind == "button":
+            btn = clean_link_button(b)
+            if not btn:
+                raise ApiError(400, "bad_button")
+            item.update(btn)
+        elif kind == "list":
+            style = b.get("style") if b.get("style") in ("bullet", "number", "check") else "bullet"
+            items = []
+            for it in (b.get("items") or [])[:100]:
+                if isinstance(it, dict):
+                    t = _txt(it.get("text"), 1000)
+                    if t:
+                        items.append({"text": t, "checked": bool(it.get("checked"))})
+            item.update(style=style, items=items)
+            if not items:
+                continue
+        elif kind == "collapse":
+            item.update(text=_txt(b.get("text"), 200), body=_txt(b.get("body"), 4000))
+        elif kind == "table":
+            rows = []
+            for r in (b.get("rows") or [])[:30]:
+                if isinstance(r, list):
+                    rows.append([_txt(c, 200) for c in r[:8]])
+            width = max((len(r) for r in rows), default=0)
+            rows = [r + [""] * (width - len(r)) for r in rows]
+            if not rows or width == 0:
+                continue
+            item.update(rows=rows, header=bool(b.get("header", True)))
+        elif kind == "media":
+            atts = clean_attachments([b.get("media")], uid) if isinstance(b.get("media"), dict) else []
+            if not atts or atts[0].get("type") == "sticker":
+                raise ApiError(400, "media_not_found")
+            item.update(media=atts[0], caption=_txt(b.get("caption"), 300))
+        elif kind == "divider":
+            pass
+        else:
+            continue
+        if kind not in ("media", "divider", "table", "list", "button") and not item.get("text") and not item.get("body"):
+            continue
+        out.append(item)
+    if not out:
+        return None
+    if len(json.dumps(out, ensure_ascii=False).encode()) > ARTICLE_MAX_BYTES:
+        raise ApiError(413, "article_too_large")
+    return out
+
+
+def blocks_summary(blocks):
+    """Выжимка статьи для списка чатов, уведомлений и поиска"""
+    title = next((b["text"] for b in blocks if b["kind"] == "heading" and b.get("text")), "")
+    body = next((b["text"] for b in blocks if b["kind"] in ("text", "quote", "pullquote") and b.get("text")), "")
+    if title and body:
+        return (title + "\n" + body)[:1000]
+    if title or body:
+        return (title or body)[:1000]
+    media = next((b["media"]["type"] for b in blocks if b["kind"] == "media"), None)
+    return {"photo": "🖼 Статья с фото", "video": "🎬 Статья с видео"}.get(media, "📄 Статья")
+
+
+def blocks_media(blocks):
+    return [b["media"] for b in (blocks or []) if b["kind"] == "media"]
+
+
+def store_article(table, mid, uid, blocks, buttons):
+    if blocks:
+        run("UPDATE %s SET blocks_enc = ? WHERE id = ?" % table,
+            (enc(uid, "messages", COL["msg_entities"], mid + ":blocks", json.dumps(blocks, ensure_ascii=False)), mid))
+    if buttons:
+        run("UPDATE %s SET markup_enc = ? WHERE id = ?" % table,
+            (enc(uid, "messages", COL["msg_entities"], mid + ":kb", json.dumps(buttons, ensure_ascii=False)), mid))
+
+
+def article_fields(m):
+    try:
+        raw = m["blocks_enc"]
+    except (KeyError, IndexError):
+        return {}
+    if not raw:
+        return {}
+    try:
+        blocks = json.loads(dec(m["sender"], "messages", COL["msg_entities"], m["id"] + ":blocks", raw) or "[]")
+    except ValueError:
+        return {}
+    for b in blocks:
+        if b.get("kind") == "media" and b.get("media", {}).get("type") == "location":
+            b["media"] = with_live([b["media"]], m["id"])[0]
+    return {"blocks": blocks} if blocks else {}
 
 
 def scheduled_json(r, uid):
@@ -8475,6 +8645,10 @@ def gmsg_json(m, me_id, channel=None):
     }
     if "topic_id" in m.keys() and m["topic_id"]:
         out["topic"] = m["topic_id"]
+    out.update(article_fields(m))
+    mk = markup_of(m)
+    if mk:
+        out["markup"] = mk
     if m["fwd_enc"]:
         out["forwarded"] = fwd_of(m)
         if m["sender"] != me_id:
@@ -8980,7 +9154,11 @@ def group_send(req, me, gid):
         raise ApiError(403, "forbidden")
     d = req.body_json()
     poll = clean_poll(d.get("poll"))
+    blocks = None if poll else clean_blocks(d.get("blocks"), uid)
+    buttons = clean_user_buttons(d.get("buttons"))
     text = poll["question"] if poll else str(d.get("text", "")).strip()
+    if blocks:
+        text = (text or blocks_summary(blocks))[:MAX_MSG]
     attachments = [] if poll else clean_attachments(d.get("attachments"), uid)
     if len(text) > MAX_MSG or not (text or attachments):
         raise ApiError(400, "bad_text")
@@ -8990,8 +9168,10 @@ def group_send(req, me, gid):
         wait = g["slow"] - (now - last["t"]) if last and last["t"] else 0
         if wait > 0:
             raise ApiError(429, "slow_mode", wait=int(wait) + 1)
-    entities = [] if poll else clean_entities(d.get("entities", []), text)
-    check_perms(g, mem, text, entities, attachments, poll)
+    entities = [] if poll or blocks else clean_entities(d.get("entities", []), text)
+    check_perms(g, mem, text, entities, attachments + blocks_media(blocks), poll)
+    if buttons and not can_post(g, mem):
+        buttons = None
     topic_id = None
     if g["forum"] and d.get("topic_id") and str(d["topic_id"]) != GENERAL_TOPIC:
         t = topic_row(gid, str(d["topic_id"]))
@@ -9013,6 +9193,8 @@ def group_send(req, me, gid):
          reply_to, now, "poll" if poll else None))
     if topic_id:
         run("UPDATE group_messages SET topic_id = ? WHERE id = ?", (topic_id, mid))
+    if blocks or buttons:
+        store_article("group_messages", mid, uid, blocks, buttons)
     if poll:
         create_poll(mid, uid, poll)
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, gid, uid))

@@ -11,6 +11,7 @@ struct AttachSheet: View {
     var onFiles: () -> Void
     var onPoll: () -> Void
     var onLocation: () -> Void = {}
+    var onArticle: (() -> Void)? = nil          // «Статья»: сообщение из блоков (заголовки, цитаты, таблицы, медиа…)
     var onPhoto: (Data) -> Void = { _ in }
     var onVideo: (URL) -> Void = { _ in }
     var onSystemPicker: () -> Void
@@ -182,6 +183,7 @@ struct AttachSheet: View {
                 tab("doc.fill", s.attachFile, on: false) { dismiss(); onFiles() }
                 tab("location.fill", s.t("Геопозиция", "Location"), on: false) { dismiss(); onLocation() }
                 if canPoll { tab("chart.bar.fill", s.t("Опрос", "Poll"), on: false) { dismiss(); onPoll() } }
+                if let onArticle { tab("doc.richtext.fill", s.t("Статья", "Article"), on: false) { dismiss(); onArticle() } }
             }
             .padding(6)
             .glass(Capsule())
