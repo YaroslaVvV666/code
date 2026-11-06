@@ -117,6 +117,8 @@ private struct ProfileDTO: Decodable {
     let requestsCount: Int?
     let listening: Bool?
     let orbit: [OrbitDTO]?
+    let bot: Bool?
+    let monthlyUsers: Int?
 
     var model: UserProfile {
         UserProfile(id: id, name: name, username: username, bio: bio, avatarID: avatar, phone: phone,
@@ -131,7 +133,8 @@ private struct ProfileDTO: Decodable {
                     styleColor: style?.color, styleEmoji: style?.emoji,
                     friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, followersCount: followersCount, following: following ?? false,
                     requestsCount: requestsCount, statusEmoji: statusEmoji, listening: listening ?? false,
-                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar) })
+                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar) },
+                    isBot: bot ?? false, monthlyUsers: monthlyUsers)
     }
 }
 

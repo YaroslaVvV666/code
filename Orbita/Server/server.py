@@ -894,6 +894,11 @@ def profile_json(r, me_id=None):
         "following": (not own) and is_following(me_id, uid),
         "requests_count": q1("SELECT COUNT(*) c FROM friend_requests WHERE to_id = ?", (uid,))["c"] if own else None,
     }
+    if is_bot_user(uid):
+        # у ботов «был(а) в сети» не пишем; вместо этого — «N пользователей в месяц», если владелец разрешил и их 10 000+
+        out["bot"] = True
+        out["last_seen"] = None
+        out["monthly_users"] = bot_users_shown(uid)
     return out
 
 
@@ -4499,6 +4504,12 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_bot_updates ON bot_updates(bot_id, se
 # кто нажал «Старт» (писал боту): счётчик «N пользователей» и право бота писать человеку первым
 DB.execute("CREATE TABLE IF NOT EXISTS bot_starts(bot_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
            "PRIMARY KEY(bot_id, user_id))")
+# кто и когда последний раз писал боту — для «N пользователей в месяц»
+DB.execute("CREATE TABLE IF NOT EXISTS bot_activity(bot_id TEXT NOT NULL, user_id TEXT NOT NULL, last_at REAL NOT NULL, "
+           "PRIMARY KEY(bot_id, user_id))")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_bot_activity ON bot_activity(bot_id, last_at)")
+ensure_column("bots", "show_users", "show_users INTEGER NOT NULL DEFAULT 0")   # владелец разрешил показывать «пользователей в месяц»
+BOT_USERS_SHOW_MIN = 10000            # меньше — не пишем ничего
 
 # Встроенные боты: описание для приветственного экрана «Что умеет этот бот?»
 BUILTIN_BOTS = {
@@ -4523,6 +4534,7 @@ BOTGOD_COMMANDS = [
     {"command": "setabouttext", "description": "Текст «о себе»"},
     {"command": "setuserpic", "description": "Аватарка бота"},
     {"command": "setcommands", "description": "Список команд бота"},
+    {"command": "setusercount", "description": "Показывать «пользователей в месяц»"},
     {"command": "token", "description": "Показать токен"},
     {"command": "revoke", "description": "Выпустить новый токен"},
     {"command": "deletebot", "description": "Удалить бота"},
@@ -4593,11 +4605,29 @@ def bot_info_json(bot_id, viewer):
     users = q1("SELECT COUNT(*) c FROM bot_starts WHERE bot_id = ?", (bot_id,))["c"]
     return {"description": desc or "", "banner": banner, "banner_kind": kind or "photo",
             "commands": bot_commands_of(bot_id) or [], "started": started, "users": users,
-            "owner": owner == viewer}
+            "monthly_users": bot_users_shown(bot_id), "owner": owner == viewer}
 
 
 def mark_bot_started(bot_id, uid):
-    run("INSERT OR IGNORE INTO bot_starts(bot_id, user_id, created_at) VALUES (?,?,?)", (bot_id, uid, time.time()))
+    now = time.time()
+    run("INSERT OR IGNORE INTO bot_starts(bot_id, user_id, created_at) VALUES (?,?,?)", (bot_id, uid, now))
+    run("INSERT OR IGNORE INTO bot_activity(bot_id, user_id, last_at) VALUES (?,?,?)", (bot_id, uid, now))
+    run("UPDATE bot_activity SET last_at = ? WHERE bot_id = ? AND user_id = ?", (now, bot_id, uid))
+
+
+def bot_monthly_users(bot_id):
+    return q1("SELECT COUNT(*) c FROM bot_activity WHERE bot_id = ? AND last_at > ?",
+              (bot_id, time.time() - 30 * 86400))["c"]
+
+
+def bot_users_shown(bot_id):
+    """«N пользователей в месяц» — только если владелец разрешил и их 10 000+; иначе None (ничего не пишем)"""
+    if bot_id not in BUILTIN_BOTS:
+        b = bot_row(bot_id)
+        if not b or not b["show_users"]:
+            return None
+    n = bot_monthly_users(bot_id)
+    return n if n >= BOT_USERS_SHOW_MIN else None
 
 
 # --- обновления для кода бота (getUpdates / вебхук) ---
@@ -4788,7 +4818,8 @@ BOTGOD_HELP = ("Я — BotGod. Помогу создать своих ботов
                "/setdescriptionpic — баннер над описанием (картинка или видео)\n"
                "/setabouttext — текст «о себе» в профиле\n"
                "/setuserpic — аватарка\n"
-               "/setcommands — команды (меню «/»)\n\n"
+               "/setcommands — команды (меню «/»)\n"
+               "/setusercount — показывать «N пользователей в месяц» (от 10 000)\n\n"
                "Токен:\n/token — показать\n/revoke — выпустить новый\n\n"
                "/deletebot — удалить бота\n/cancel — отменить действие\n\n"
                "Код бота работает через Bot API: https://<ваш сервер>/bot<токен>/getUpdates, sendMessage, setMyCommands…")
@@ -4871,7 +4902,7 @@ def botgod_handle(uid, text, atts):
         lines = "\n".join("• %s — @%s" % (name, un) for b, name, un in bots)
         return botgod_say(uid, "Ваши боты:\n" + lines + "\n\nНастройка: /setdescription, /setdescriptionpic, /setuserpic, /setcommands")
     if cmd in ("/setname", "/setdescription", "/setdescriptionpic", "/setabouttext", "/setuserpic", "/setcommands",
-               "/token", "/revoke", "/deletebot"):
+               "/setusercount", "/token", "/revoke", "/deletebot"):
         return botgod_pick_prompt(uid, cmd[1:], "Какого бота настроить?" if cmd != "/deletebot" else "Какого бота удалить?")
     if cmd and cmd != "/empty":
         return botgod_say(uid, "Не знаю такой команды. /help — все команды.")
@@ -4918,6 +4949,17 @@ def botgod_handle(uid, text, atts):
             BOTGOD_STATE.pop(uid, None)
             token = dec(uid, "profile", "bots.token", bid, b["token_enc"]) if b["token_enc"] else None
             return botgod_say(uid, "Токен @%s:\n%s" % (bot_username(bid), token or "не сохранён — выпустите новый: /revoke"))
+        if action == "setusercount":
+            BOTGOD_STATE.pop(uid, None)
+            on = not b["show_users"]
+            run("UPDATE bots SET show_users = ? WHERE id = ?", (1 if on else 0, bid))
+            SHARED.ver_bump("uver:" + bid)
+            n = bot_monthly_users(bid)
+            if on:
+                return botgod_say(uid, "Готово: под именем @%s будет написано, сколько пользователей в месяц пишут боту — "
+                                       "когда их станет %s+. Сейчас: %d. Выключить — /setusercount ещё раз."
+                                  % (bot_username(bid), "{:,}".format(BOT_USERS_SHOW_MIN).replace(",", " "), n))
+            return botgod_say(uid, "Готово: число пользователей @%s больше не показывается." % bot_username(bid))
         if action == "revoke":
             BOTGOD_STATE.pop(uid, None)
             token = new_bot_token(bid)

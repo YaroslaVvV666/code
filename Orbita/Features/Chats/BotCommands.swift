@@ -38,10 +38,25 @@ struct BotInfo: Equatable, Decodable {
     let commands: [BotCommand]
     var started: Bool
     let users: Int
+    /// «N пользователей в месяц»: сервер присылает, только если владелец разрешил и их 10 000+
+    let monthlyUsers: Int?
     let owner: Bool?
 
     var bannerIsVideo: Bool { bannerKind == "video" }
     var hasIntro: Bool { !description.isEmpty || banner != nil }
+}
+
+/// Подпись под именем бота: «12 345 пользователей в месяц» (у ботов не пишем «был(а) в сети»)
+enum BotUsers {
+    static func text(_ n: Int, lang: AppLanguage) -> String {
+        let num = n.formatted(.number.grouping(.automatic))
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let w = (m100 >= 11 && m100 <= 14) ? "пользователей" : (m10 == 1 ? "пользователь" : (m10 >= 2 && m10 <= 4 ? "пользователя" : "пользователей"))
+            return "\(num) \(w) в месяц"
+        }
+        return "\(num) monthly user\(n == 1 ? "" : "s")"
+    }
 }
 
 // MARK: Окружение: нажимаемые /команды в тексте сообщений

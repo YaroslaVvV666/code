@@ -866,11 +866,13 @@ struct UserPageView: View {
     }
 
     private func statusIsOnline(_ profile: UserProfile) -> Bool {
-        !model.isMe && s.lastSeenText(profile.lastSeen) == s.online
+        !model.isMe && !profile.isBot && s.lastSeenText(profile.lastSeen) == s.online
     }
 
     /// «в сети» / «был(а) …»; ник вынесен в карточку с данными
     private func statusLine(_ profile: UserProfile) -> String {
+        // бот: вместо «был(а) в сети» — ничего или «N пользователей в месяц»
+        if profile.isBot { return profile.monthlyUsers.map { BotUsers.text($0, lang: lang) } ?? "" }
         let base = model.isMe ? (profile.username.map { "@" + $0 } ?? "") : s.lastSeenText(profile.lastSeen)
         guard let n = profile.followersCount, n > 0 else { return base }      // 0 подписчиков — не пишем
         let f = followersText(n)

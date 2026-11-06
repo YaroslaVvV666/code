@@ -291,9 +291,11 @@ struct ChatInfoView: View {
                 if let real = model.realName, model.isContact, real != model.peer.name, !isGroup {
                     Text(real).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
                 }
-                Text(subtitle)
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.textSecondary)
+                if !subtitle.isEmpty {                  // у бота без счётчика подписи нет вовсе
+                    Text(subtitle)
+                        .font(.system(size: 15))
+                        .foregroundStyle(theme.textSecondary)
+                }
             }
             requestsBanner.padding(.top, 8)
         }
@@ -370,6 +372,10 @@ struct ChatInfoView: View {
             let channel = group?.isChannel ?? model.peer.isChannel
             // «661 подписчик», как в Telegram
             return "\(count) " + Self.countWord(count, channel: channel, lang: lang)
+        }
+        // бот: не «был(а) в сети», а ничего или «N пользователей в месяц»
+        if model.isBot || profile?.isBot == true {
+            return (model.bot?.monthlyUsers ?? profile?.monthlyUsers).map { BotUsers.text($0, lang: lang) } ?? ""
         }
         return s.lastSeenText(model.lastSeen)
     }
