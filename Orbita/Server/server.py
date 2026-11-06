@@ -2286,6 +2286,150 @@ def ingest_media(owner_id, kind, mime, params, read, length):
     return {"id": mid, "kind": kind, "width": width, "height": height, "duration": duration, "thumb": thumb}
 
 
+# ---------- загрузка больших файлов частями (докачка после обрыва связи) ----------
+# Приложение создаёт загрузку, шлёт куски по порядку (PUT ?offset=), при обрыве спрашивает, сколько дошло,
+# и продолжает с этого места. Куски на диске сразу зашифрованы (AES-CTR, ключ загрузки хранится зашифрованным
+# ключом владельца), а после последнего куска файл проходит ту же проверку и шифрование, что и обычная загрузка.
+
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+UPLOAD_CHUNK_MAX = 8 * 1024 * 1024
+UPLOAD_TTL = 24 * 3600
+DB.execute("CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY, owner TEXT NOT NULL, kind TEXT NOT NULL, mime TEXT NOT NULL, "
+           "size INTEGER NOT NULL, received INTEGER NOT NULL DEFAULT 0, params TEXT, key_enc BLOB NOT NULL, "
+           "created_at REAL NOT NULL, updated_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_uploads_owner ON uploads(owner)")
+
+
+def _upload_path(upid):
+    return os.path.join(UPLOAD_DIR, upid + ".part")
+
+
+def _upload_key(r):
+    raw = base64.b64decode(dec(r["owner"], "messages", COL["msg_text"], r["id"] + ":upkey", r["key_enc"]) or "")
+    return raw[:32], raw[32:48]
+
+
+def _ctr(key, nonce, offset, data):
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    counter = (int.from_bytes(nonce, "big") + offset // 16) % (1 << 128)
+    c = Cipher(algorithms.AES(key), modes.CTR(counter.to_bytes(16, "big"))).encryptor()
+    c.update(b"\0" * (offset % 16))
+    return c.update(data)
+
+
+def _upload_row(upid, uid):
+    r = q1("SELECT * FROM uploads WHERE id = ? AND owner = ?", (upid, uid))
+    if not r:
+        raise ApiError(404, "not_found")
+    return r
+
+
+def _upload_drop(r):
+    run("DELETE FROM uploads WHERE id = ?", (r["id"],))
+    try:
+        os.remove(_upload_path(r["id"]))
+    except OSError:
+        pass
+
+
+def reap_uploads():
+    for r in q("SELECT * FROM uploads WHERE updated_at < ? LIMIT 100", (time.time() - UPLOAD_TTL,)):
+        _upload_drop(r)
+
+
+@route("POST", r"/v1/uploads")
+def upload_start(req, me):
+    rate_limit("upload:" + me["id"], 120, 60)
+    d = req.body_json()
+    kind = str(d.get("kind", ""))
+    mime = str(d.get("mime", "")).split(";")[0].strip().lower()
+    try:
+        size = int(d.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if not media_kind_allowed(kind, mime):
+        raise ApiError(415, "unsupported_media")
+    if size <= 0:
+        raise ApiError(400, "empty")
+    if size > (MAX_AUDIO_BYTES if kind == "audio" else MAX_MEDIA_BYTES):
+        raise ApiError(413, "too_large")
+    if q1("SELECT COUNT(*) c FROM uploads WHERE owner = ?", (me["id"],))["c"] >= 20:
+        raise ApiError(429, "too_many_uploads")
+    params = {k: str(d.get(k))[:40] for k in ("w", "h", "dur", "thumb") if d.get(k) not in (None, "")}
+    upid = uuid.uuid4().hex
+    key = secrets.token_bytes(48)                   # 32 байта ключа + 16 байт начального счётчика
+    now = time.time()
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    fd = os.open(_upload_path(upid), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    run("INSERT INTO uploads(id, owner, kind, mime, size, received, params, key_enc, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (upid, me["id"], kind, mime, size, 0, json.dumps(params),
+         enc(me["id"], "messages", COL["msg_text"], upid + ":upkey", base64.b64encode(key).decode()), now, now))
+    req.send_json(201, {"id": upid, "received": 0, "size": size, "chunk": 1024 * 1024})
+
+
+@route("GET", r"/v1/uploads/([a-f0-9]{32})")
+def upload_status(req, me, upid):
+    r = _upload_row(upid, me["id"])
+    req.send_json(200, {"id": upid, "received": r["received"], "size": r["size"]})
+
+
+@route("PUT", r"/v1/uploads/([a-f0-9]{32})")
+def upload_chunk(req, me, upid):
+    rate_limit("upchunk:" + me["id"], 2000, 60)
+    r = _upload_row(upid, me["id"])
+    length = int(req.headers.get("Content-Length") or 0)
+    try:
+        offset = int(req.query().get("offset", "-1"))
+    except ValueError:
+        offset = -1
+    if length <= 0 or length > UPLOAD_CHUNK_MAX or offset + length > r["size"]:
+        req.close_connection = True
+        raise ApiError(400, "bad_chunk")
+    if offset != r["received"]:
+        # кусок не с того места (повтор после обрыва) — сообщаем, сколько уже есть, приложение продолжит оттуда
+        req.drain()
+        return req.send_json(409, {"error": "offset_mismatch", "received": r["received"]})
+    data = req.rfile.read(length)
+    if len(data) != length:
+        req.close_connection = True
+        raise ApiError(400, "incomplete")
+    key, nonce = _upload_key(r)
+    with open(_upload_path(upid), "r+b") as f:
+        f.seek(offset)
+        f.write(_ctr(key, nonce, offset, data))
+        f.truncate(offset + length)
+    received = offset + length
+    run("UPDATE uploads SET received = ?, updated_at = ? WHERE id = ?", (received, time.time(), upid))
+    req.send_json(200, {"id": upid, "received": received, "size": r["size"]})
+
+
+@route("POST", r"/v1/uploads/([a-f0-9]{32})/finish")
+def upload_finish(req, me, upid):
+    r = _upload_row(upid, me["id"])
+    if r["received"] != r["size"]:
+        return req.send_json(409, {"error": "incomplete", "received": r["received"], "size": r["size"]})
+    key, nonce = _upload_key(r)
+    pos = [0]
+    try:
+        with open(_upload_path(upid), "rb") as f:
+            def read(n):
+                chunk = f.read(n)
+                out = _ctr(key, nonce, pos[0], chunk)
+                pos[0] += len(chunk)
+                return out
+            result = ingest_media(me["id"], r["kind"], r["mime"], json.loads(r["params"] or "{}"), read, r["size"])
+    finally:
+        _upload_drop(r)
+    req.send_json(201, result)
+
+
+@route("DELETE", r"/v1/uploads/([a-f0-9]{32})")
+def upload_cancel(req, me, upid):
+    _upload_drop(_upload_row(upid, me["id"]))
+    req.send_json(200, {"ok": True})
+
+
 @route("GET", r"/media/([A-Za-z0-9]+)", auth=False)
 def get_media(req, me, mid):
     row = q1("SELECT * FROM media WHERE id = ?", (mid,))
@@ -7091,6 +7235,10 @@ def scheduler_loop():
             reap_disappearing()  # удаляем личные сообщения с истёкшим таймером исчезновения
         except Exception as e:
             print("reap_disappearing: %s" % e.__class__.__name__)
+        try:
+            reap_uploads()       # брошенные загрузки частями (не продолжали сутки)
+        except Exception as e:
+            print("reap_uploads: %s" % e.__class__.__name__)
         try:
             for r in q("SELECT * FROM scheduled WHERE send_at <= ? ORDER BY send_at LIMIT 50", (time.time(),)):
                 run("DELETE FROM scheduled WHERE id = ?", (r["id"],))

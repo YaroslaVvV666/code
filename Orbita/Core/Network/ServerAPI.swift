@@ -97,9 +97,18 @@ actor ServerAPI {
     }
 
     func upload(_ path: String, query: [String: String], payload: Payload, contentType: String) async throws -> Data {
+        // большие файлы — частями, с докачкой после обрыва связи (видео, документы)
+        if path == "/v1/media", let size = Self.payloadSize(payload), size >= Self.resumableThreshold {
+            return try await uploadResumable(query: query, payload: payload, size: size, contentType: contentType)
+        }
+        return try await uploadOnce(path, method: "POST", query: query, payload: payload, contentType: contentType)
+    }
+
+    private func uploadOnce(_ path: String, method: String, query: [String: String], payload: Payload,
+                            contentType: String) async throws -> Data {
         for attempt in 0..<2 {
             do {
-                var req = try await authorized("POST", path, query: query)
+                var req = try await authorized(method, path, query: query)
                 req.setValue(contentType, forHTTPHeaderField: "Content-Type")
                 req.timeoutInterval = 300
                 return try await perform(req, upload: payload)
@@ -108,6 +117,87 @@ actor ServerAPI {
             }
         }
         throw APIError.unauthorized
+    }
+
+    // MARK: Загрузка частями (докачка)
+
+    /// С какого размера файл грузится частями: обрыв связи посередине не начинает загрузку заново
+    static let resumableThreshold = 3 * 1024 * 1024
+    private static let chunkSize = 1024 * 1024
+
+    private static func payloadSize(_ payload: Payload) -> Int? {
+        switch payload {
+        case .data(let d): return d.count
+        case .file(let url): return (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? nil
+        }
+    }
+
+    /// Номер незаконченной загрузки этого файла — переживает перезапуск приложения
+    private static func resumeKey(_ payload: Payload, size: Int, query: [String: String]) -> String? {
+        guard case .file(let url) = payload else { return nil }
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+        let raw = "\(url.path)|\(size)|\(mtime)|\(query["kind"] ?? "")"
+        let digest = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "upload.resume." + digest.prefix(32)
+    }
+
+    private struct UploadState: Decodable { let id: String; let received: Int; let size: Int }
+
+    private func uploadResumable(query: [String: String], payload: Payload, size: Int, contentType: String) async throws -> Data {
+        let key = Self.resumeKey(payload, size: size, query: query)
+        let mime = contentType.split(separator: ";").first.map(String.init) ?? contentType
+        var uploadID: String?
+        var offset = 0
+        if let key, let saved = UserDefaults.standard.string(forKey: key),
+           let data = try? await request("GET", "/v1/uploads/\(saved)"),
+           let state = try? JSONDecoder().decode(UploadState.self, from: data), state.size == size {
+            uploadID = saved                       // продолжаем с того, что уже дошло до сервера
+            offset = state.received
+        }
+        if uploadID == nil {
+            var body: [String: Any] = ["kind": query["kind"] ?? "file", "mime": mime, "size": size]
+            for k in ["w", "h", "dur", "thumb"] { if let v = query[k] { body[k] = v } }
+            let data = try await request("POST", "/v1/uploads", body: Self.json(body))
+            let state = try JSONDecoder().decode(UploadState.self, from: data)
+            uploadID = state.id
+            if let key { UserDefaults.standard.set(state.id, forKey: key) }
+        }
+        guard let id = uploadID else { throw APIError.invalidResponse }
+
+        let handle: FileHandle? = { if case .file(let url) = payload { return try? FileHandle(forReadingFrom: url) } else { return nil } }()
+        defer { try? handle?.close() }
+        var failures = 0
+        while offset < size {
+            let length = min(Self.chunkSize, size - offset)
+            let chunk: Data
+            switch payload {
+            case .data(let d): chunk = d.subdata(in: offset..<(offset + length))
+            case .file:
+                guard let handle else { throw APIError.invalidResponse }
+                try handle.seek(toOffset: UInt64(offset))
+                chunk = handle.readData(ofLength: length)
+            }
+            do {
+                let data = try await uploadOnce("/v1/uploads/\(id)", method: "PUT", query: ["offset": String(offset)],
+                                                payload: .data(chunk), contentType: "application/octet-stream")
+                offset = (try? JSONDecoder().decode(UploadState.self, from: data))?.received ?? (offset + length)
+                failures = 0
+            } catch APIError.server(let status, _) where status == 409 {
+                // сервер уже получил другое количество байт — сверяемся и продолжаем оттуда
+                let data = try await request("GET", "/v1/uploads/\(id)")
+                offset = try JSONDecoder().decode(UploadState.self, from: data).received
+            } catch APIError.offline {
+                // связь пропала: ждём и пробуем снова с того же места (уже отправленное не теряется)
+                failures += 1
+                if failures > 8 { throw APIError.offline }
+                try? await Task.sleep(nanoseconds: UInt64(min(30, 1 << min(failures, 5))) * 1_000_000_000)
+                if let data = try? await request("GET", "/v1/uploads/\(id)"),
+                   let state = try? JSONDecoder().decode(UploadState.self, from: data) { offset = state.received }
+            }
+        }
+        let result = try await request("POST", "/v1/uploads/\(id)/finish", body: Self.json([:] as [String: Any]))
+        if let key { UserDefaults.standard.removeObject(forKey: key) }
+        return result
     }
 
     // MARK: Внутреннее
