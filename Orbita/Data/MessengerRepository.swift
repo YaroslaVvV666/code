@@ -49,6 +49,7 @@ struct GroupInfo: Equatable {
     var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var discussion: DiscussionRef? = nil    // чат для комментариев канала
     var forum = false                   // группа разделена на темы
+    var call: GroupCallBrief? = nil     // идёт групповой звонок / видеочат
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
     var isOpen: Bool { kind == "open" }
@@ -841,6 +842,7 @@ private struct GroupDTO: Decodable {
     let writers: [String]?
     let restrictedUntil: Double?
     let forum: Bool?
+    let call: GroupCallBrief?
     var model: GroupInfo {
         GroupInfo(id: id, name: name, about: about, kind: kind, members: members.map(\.model), myRole: myRole, code: code,
                   type: type ?? "group", handle: handle, approve: approve ?? false, noForward: noForward ?? false,
@@ -851,7 +853,7 @@ private struct GroupDTO: Decodable {
                                                      pin: p["pin"] ?? true) } ?? GroupPerms(),
                   writers: writers ?? [],
                   restrictedUntil: restrictedUntil.map { $0 > 0 ? Date(timeIntervalSince1970: $0) : .distantFuture },
-                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) }, forum: forum ?? false)
+                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) }, forum: forum ?? false, call: call)
     }
 }
 

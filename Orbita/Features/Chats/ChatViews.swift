@@ -835,6 +835,7 @@ struct ChatScreen: View {
     @State private var showDigest = false
     @ObservedObject private var voicePlayer = VoicePlayer.shared
     @ObservedObject private var circleFocus = CircleFocus.shared
+    @ObservedObject private var groupCall = GroupCallManager.shared
 
     init(route: ChatRoute, session: AppSession, standalone: Bool = false) {
         self.route = route
@@ -884,6 +885,10 @@ struct ChatScreen: View {
                     VStack(spacing: 6) {
                         if searching { searchBar } else { header }
                         requestsBar
+                        if let call = model.group?.call, !model.isPreview, groupCall.group?.id != route.peer.id {
+                            GroupCallJoinBanner(brief: call) { joinGroupCall(video: call.video) }
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
                         scheduledBar
                         pinnedBar
                         LiveLocationBar(chatID: route.peer.id)
@@ -1448,6 +1453,17 @@ struct ChatScreen: View {
             .buttonStyle(.plain)
 
             HStack(spacing: 8) {
+                if model.peer.isGroup, !model.peer.isChannel, !model.isPreview, model.group?.call == nil {
+                    // групповой звонок / видеочат (как в Telegram): начать для всей группы
+                    Menu {
+                        Button { joinGroupCall(video: false) } label: { Label(s.t("Групповой звонок", "Group call"), systemImage: "phone.fill") }
+                        Button { joinGroupCall(video: true) } label: { Label(s.t("Видеочат", "Video chat"), systemImage: "video.fill") }
+                    } label: {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(width: 44, height: 44).glassCircle()
+                    }
+                }
                 Button { startSearch() } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
@@ -1475,6 +1491,12 @@ struct ChatScreen: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: headerStatusKey)
         .padding(.horizontal, 10)
         .padding(.top, 2)
+    }
+
+    private func joinGroupCall(video: Bool) {
+        Haptics.impact(.medium)
+        hideKeyboard()
+        groupCall.join(model.peer, video: video)
     }
 
     /// Что сейчас написано под ником — от этого зависит ширина островка

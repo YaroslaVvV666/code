@@ -216,3 +216,20 @@ while True:
 ```
 
 Проверка: `python3 tests/test_bots.py`.
+
+
+## Новое: кнопки ботов, докачка, темы, групповые звонки
+
+- **Bot API**: `reply_markup` (`inline_keyboard` с `callback_data`/`url`, `keyboard`, `remove_keyboard`), `answerCallbackQuery`,
+  `editMessageText/Caption/ReplyMarkup`, `deleteMessage`, `sendPhoto/Document/Video/Animation/Audio/Voice/VideoNote/Sticker`
+  (multipart, `file_id` или https-ссылка). Ссылка на бота `…/u/<bot>?start=abc` — «Старт» отправит `/start abc`.
+- **Вход с нового устройства**: сообщение от служебного аккаунта «Orbita» с кнопкой «Это не я» (завершает тот сеанс).
+- **Викторины**: `poll.quiz = true`, `correct`, `explanation`; правильный ответ виден только после ответа.
+- **Загрузка частями**: `POST /v1/uploads` → `PUT /v1/uploads/<id>?offset=` (куски до 8 МБ) → `POST …/finish`.
+  Куски на диске зашифрованы, незаконченные загрузки удаляются через сутки.
+- **Темы в группах**: `PUT /v1/groups/<id>/forum`, `GET/POST /v1/groups/<id>/topics`, `PUT/DELETE …/topics/<tid>`;
+  сообщения темы — `GET /v1/chats/<id>/messages?topic=<tid|general>`, отправка — `topic_id` в теле.
+- **Групповые звонки** (mesh, до 8 участников): `/v1/groups/<id>/call` (статус), `/join`, `/leave`, `/state`,
+  `/signal` (offer/answer/ice), `/poll` (long-poll). Нужен тот же TURN, что и для личных звонков.
+
+Тесты: `test_login_alert.py`, `test_quiz.py`, `test_uploads.py`, `test_topics.py`, `test_group_calls.py`.

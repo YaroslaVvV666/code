@@ -81,6 +81,7 @@ final class AppSession: ObservableObject {
         reportListening()
         LiveLocationManager.shared.attach(repo: messengerRepo, userID: serverID)    // продолжить трансляции геопозиции после перезапуска
         PersistentOutbox.shared.attach(repo: messengerRepo, account: serverID)      // написанное без связи уйдёт само
+        GroupCallManager.shared.attach(api: api, userID: serverID)                  // групповые звонки и видеочаты
     }
 
     /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает
@@ -108,6 +109,7 @@ final class AppSession: ObservableObject {
     /// Выход: завершаем этот сеанс на сервере
     func signOutRemote() async {
         PersistentOutbox.shared.detach()
+        GroupCallManager.shared.leave()
         if let token = await PushManager.shared.token {          // устройство больше не получает уведомления
             _ = try? await api.request("DELETE", "/v1/me/push", body: ServerAPI.json(["token": token]))
         }

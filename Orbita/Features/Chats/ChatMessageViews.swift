@@ -289,11 +289,13 @@ struct MessageRow: View {
         case "left": what = s.t("вышел(а) из группы", "left the group")
         case "joined": what = s.t("вступил(а) в группу", "joined the group")
         case "removed": what = s.t("исключён(а) из группы", "was removed from the group")
+        case "vc_start": what = s.t("начал(а) видеочат", "started a video chat")
+        case "vc_end": what = s.t("Видеочат завершён", "Video chat ended")
         default: what = ""
         }
         return HStack {
             Spacer(minLength: 0)
-            Text(who.isEmpty ? what : who + " " + what)
+            Text(who.isEmpty || kind == "vc_end" ? what : who + " " + what)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)

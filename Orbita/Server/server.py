@@ -8261,7 +8261,17 @@ def group_info(g, me_id):
             "muted": bool(mem and mem["muted"]), "can_write": can_post(g, mem),
             "requests": q1("SELECT COUNT(*) c FROM group_requests WHERE group_id = ?", (gid,))["c"] if admin else 0,
             "pending": q1("SELECT 1 FROM group_requests WHERE group_id = ? AND user_id = ?", (gid, me_id)) is not None,
-            "discussion": discussion_info(g), "forum": bool(g["forum"])}
+            "discussion": discussion_info(g), "forum": bool(g["forum"]),
+            "call": gcall_brief(g["id"]) if mem else None}
+
+
+def gcall_brief(gid):
+    """Идёт ли в группе звонок: для плашки «Присоединиться» в переписке"""
+    c = q1("SELECT * FROM group_calls WHERE group_id = ?", (gid,))
+    if not c:
+        return None
+    n = q1("SELECT COUNT(*) n FROM group_call_members WHERE call_id = ? AND last_seen > ?", (c["id"], time.time() - GCALL_STALE))["n"]
+    return {"id": c["id"], "count": n, "video": bool(c["video"]), "started_at": c["started_at"]} if n else None
 
 
 def discussion_info(g):
@@ -8613,6 +8623,209 @@ def delete_topic(req, me, gid, tid):
     run("DELETE FROM group_topics WHERE id = ?", (tid,))
     run("DELETE FROM topic_reads WHERE group_id = ? AND topic_id = ?", (gid, tid))
     req.send_json(200, {"ok": True})
+
+
+# ---------- групповые звонки и видеочаты (mesh: каждый участник соединён с каждым) ----------
+# Комната — одна на группу. Новичок сам отправляет предложения (offer) всем, кто уже в звонке, поэтому
+# встречных предложений не бывает. Сигналы (offer/answer/ice) лежат в базе до получения — так работает
+# и с несколькими процессами сервера. Кто не опрашивал звонок 30 секунд — считается вышедшим.
+
+GCALL_MAX = 8                    # больше в mesh тяжело телефону: каждый отправляет своё видео каждому
+GCALL_STALE = 30
+DB.execute("CREATE TABLE IF NOT EXISTS group_calls(group_id TEXT PRIMARY KEY, id TEXT NOT NULL, started_by TEXT NOT NULL, "
+           "started_at REAL NOT NULL, video INTEGER NOT NULL DEFAULT 0)")
+DB.execute("CREATE TABLE IF NOT EXISTS group_call_members(call_id TEXT NOT NULL, user_id TEXT NOT NULL, joined_at REAL NOT NULL, "
+           "last_seen REAL NOT NULL, muted INTEGER NOT NULL DEFAULT 0, video INTEGER NOT NULL DEFAULT 0, "
+           "PRIMARY KEY(call_id, user_id))")
+DB.execute("CREATE TABLE IF NOT EXISTS group_call_signals(id TEXT PRIMARY KEY, call_id TEXT NOT NULL, to_user TEXT NOT NULL, "
+           "from_user TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_gcs_to ON group_call_signals(call_id, to_user, created_at)")
+SYS_LABELS["vc_start"] = "начал(а) видеочат"
+SYS_LABELS["vc_end"] = "видеочат завершён"
+
+
+def gcall_of(gid):
+    return q1("SELECT * FROM group_calls WHERE group_id = ?", (gid,))
+
+
+def gcall_end(c):
+    run("DELETE FROM group_calls WHERE group_id = ? AND id = ?", (c["group_id"], c["id"]))
+    run("DELETE FROM group_call_members WHERE call_id = ?", (c["id"],))
+    run("DELETE FROM group_call_signals WHERE call_id = ?", (c["id"],))
+    post_system(c["group_id"], c["started_by"], "vc_end")
+    gcall_wake(c["group_id"])
+
+
+def gcall_reap(c):
+    """Убираем пропавших участников; пустой звонок завершается"""
+    if not c:
+        return None
+    gone = q("SELECT user_id FROM group_call_members WHERE call_id = ? AND last_seen < ?", (c["id"], time.time() - GCALL_STALE))
+    for r in gone:
+        gcall_drop_member(c, r["user_id"])
+    if not q1("SELECT 1 FROM group_call_members WHERE call_id = ?", (c["id"],)):
+        if time.time() - c["started_at"] > 15:           # только что созданный ещё ждёт первого участника
+            gcall_end(c)
+            return None
+    return c
+
+
+def gcall_drop_member(c, uid):
+    run("DELETE FROM group_call_members WHERE call_id = ? AND user_id = ?", (c["id"], uid))
+    run("DELETE FROM group_call_signals WHERE call_id = ? AND (to_user = ? OR from_user = ?)", (c["id"], uid, uid))
+    for r in q("SELECT user_id FROM group_call_members WHERE call_id = ?", (c["id"],)):
+        SHARED.events_publish("gcs:" + r["user_id"], "members")
+
+
+def gcall_wake(gid):
+    """Участники группы видят «Идёт видеочат» сразу"""
+    for r in q("SELECT user_id FROM group_members WHERE group_id = ?", (gid,)):
+        SHARED.ver_bump("uver:" + r["user_id"])
+        SHARED.events_publish(r["user_id"], "group")
+
+
+def gcall_members_json(c, me_id):
+    rows = q("SELECT * FROM group_call_members WHERE call_id = ? ORDER BY joined_at", (c["id"],))
+    return [{**user_brief(r["user_id"], me_id), "muted": bool(r["muted"]), "video": bool(r["video"]),
+             "joined_at": r["joined_at"], "me": r["user_id"] == me_id} for r in rows]
+
+
+def gcall_json(c, me_id):
+    if not c:
+        return {"active": False}
+    return {"active": True, "call_id": c["id"], "started_at": c["started_at"], "video": bool(c["video"]),
+            "participants": gcall_members_json(c, me_id), "max": GCALL_MAX,
+            "joined": q1("SELECT 1 FROM group_call_members WHERE call_id = ? AND user_id = ?", (c["id"], me_id)) is not None}
+
+
+def gcall_access(gid, uid):
+    g = group_row(gid)
+    mem = member_row(gid, uid) if g else None
+    if not mem:
+        raise ApiError(404, "not_found")
+    if g["type"] == "channel" and not is_admin(mem):
+        pass                                             # трансляцию в канале начинают админы, слушать могут все
+    return g, mem
+
+
+@route("GET", r"/v1/groups/(g_[a-f0-9]{32})/call")
+def gcall_status(req, me, gid):
+    gcall_access(gid, me["id"])
+    req.send_json(200, gcall_json(gcall_reap(gcall_of(gid)), me["id"]))
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/call/join")
+def gcall_join(req, me, gid):
+    uid = me["id"]
+    rate_limit("gcall:" + uid, 30, 60)
+    g, mem = gcall_access(gid, uid)
+    d = req.body_json()
+    c = gcall_reap(gcall_of(gid))
+    if not c:
+        if g["type"] == "channel" and not is_admin(mem):
+            raise ApiError(403, "forbidden")
+        if not can_post(g, mem):
+            raise ApiError(403, "forbidden")
+        cid = uuid.uuid4().hex
+        run("INSERT OR IGNORE INTO group_calls(group_id, id, started_by, started_at, video) VALUES (?,?,?,?,?)",
+            (gid, cid, uid, time.time(), 1 if d.get("video") else 0))
+        c = gcall_of(gid)
+        if c["id"] == cid:                               # мы и начали (а не кто-то одновременно с нами)
+            post_system(gid, uid, "vc_start")
+            notify_group(g, uid, "📹 Видеочат: присоединяйтесь" if d.get("video") else "📞 Групповой звонок: присоединяйтесь")
+            gcall_wake(gid)
+    existing = q1("SELECT 1 FROM group_call_members WHERE call_id = ? AND user_id = ?", (c["id"], uid))
+    if not existing:
+        if q1("SELECT COUNT(*) n FROM group_call_members WHERE call_id = ?", (c["id"],))["n"] >= GCALL_MAX:
+            raise ApiError(409, "call_full")
+        if SHARED.user_call_get(uid):
+            raise ApiError(409, "busy")                  # уже в личном звонке
+        now = time.time()
+        run("INSERT INTO group_call_members(call_id, user_id, joined_at, last_seen, muted, video) VALUES (?,?,?,?,?,?)",
+            (c["id"], uid, now, now, 1 if d.get("muted") else 0, 1 if d.get("video") else 0))
+        for r in q("SELECT user_id FROM group_call_members WHERE call_id = ? AND user_id != ?", (c["id"], uid)):
+            SHARED.events_publish("gcs:" + r["user_id"], "members")
+    else:
+        # переподключение (например, после обрыва): старые сигналы к нам больше не нужны
+        run("DELETE FROM group_call_signals WHERE call_id = ? AND to_user = ?", (c["id"], uid))
+    out = gcall_json(c, uid)
+    out["ice"] = ice_servers(req.client_ip(), c["id"])
+    req.send_json(200, out)
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/call/leave")
+def gcall_leave(req, me, gid):
+    gcall_access(gid, me["id"])
+    c = gcall_of(gid)
+    if c:
+        gcall_drop_member(c, me["id"])
+        if not q1("SELECT 1 FROM group_call_members WHERE call_id = ?", (c["id"],)):
+            gcall_end(c)
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/call/state")
+def gcall_state(req, me, gid):
+    gcall_access(gid, me["id"])
+    c = gcall_of(gid)
+    if not c:
+        raise ApiError(404, "no_call")
+    d = req.body_json()
+    run("UPDATE group_call_members SET muted = ?, video = ?, last_seen = ? WHERE call_id = ? AND user_id = ?",
+        (1 if d.get("muted") else 0, 1 if d.get("video") else 0, time.time(), c["id"], me["id"]))
+    for r in q("SELECT user_id FROM group_call_members WHERE call_id = ? AND user_id != ?", (c["id"], me["id"])):
+        SHARED.events_publish("gcs:" + r["user_id"], "members")
+    req.send_json(200, {"ok": True})
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/call/signal")
+def gcall_signal(req, me, gid):
+    uid = me["id"]
+    rate_limit("gcsig:" + uid, 600, 60)
+    gcall_access(gid, uid)
+    c = gcall_of(gid)
+    if not c:
+        raise ApiError(404, "no_call")
+    d = req.body_json()
+    to, kind, payload = str(d.get("to", "")), str(d.get("kind", "")), str(d.get("data", ""))
+    if kind not in ("offer", "answer", "ice") or len(payload) > 20000:
+        raise ApiError(400, "bad_signal")
+    both = q("SELECT user_id FROM group_call_members WHERE call_id = ? AND user_id IN (?, ?)", (c["id"], uid, to))
+    if len(both) != 2:
+        raise ApiError(404, "not_in_call")
+    run("INSERT INTO group_call_signals(id, call_id, to_user, from_user, kind, payload, created_at) VALUES (?,?,?,?,?,?,?)",
+        (uuid.uuid4().hex, c["id"], to, uid, kind, payload, time.time()))
+    SHARED.events_publish("gcs:" + to, "signal")
+    req.send_json(200, {"ok": True})
+
+
+@route("GET", r"/v1/groups/(g_[a-f0-9]{32})/call/poll")
+def gcall_poll(req, me, gid):
+    """Long-poll участника: сигналы для него и текущий состав. Заодно — «я ещё здесь»"""
+    uid = me["id"]
+    gcall_access(gid, uid)
+    try:
+        timeout = max(0, min(25, int(req.query().get("timeout", "20"))))
+    except ValueError:
+        timeout = 20
+    deadline = time.time() + timeout
+    woke = False
+    while True:
+        c = gcall_of(gid)
+        if not c or not q1("SELECT 1 FROM group_call_members WHERE call_id = ? AND user_id = ?", (c["id"], uid)):
+            return req.send_json(200, {"active": bool(c), "joined": False, "signals": []})
+        run("UPDATE group_call_members SET last_seen = ? WHERE call_id = ? AND user_id = ?", (time.time(), c["id"], uid))
+        rows = q("SELECT * FROM group_call_signals WHERE call_id = ? AND to_user = ? ORDER BY created_at LIMIT 200", (c["id"], uid))
+        if rows or woke or time.time() >= deadline:
+            break
+        # проснулись (новый сигнал или сменился состав) — ещё раз забираем сигналы и отвечаем
+        woke = bool(SHARED.events_wait("gcs:" + uid, min(5.0, max(0.05, deadline - time.time()))))
+    for r in rows:
+        run("DELETE FROM group_call_signals WHERE id = ?", (r["id"],))
+    c = gcall_reap(c)
+    out = gcall_json(c, uid)
+    out["signals"] = [{"from": r["from_user"], "kind": r["kind"], "data": r["payload"]} for r in rows]
+    req.send_json(200, out)
 
 
 MENTION_RE = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_]{4,31})")
