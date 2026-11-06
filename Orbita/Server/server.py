@@ -8261,7 +8261,7 @@ def group_info(g, me_id):
             "muted": bool(mem and mem["muted"]), "can_write": can_post(g, mem),
             "requests": q1("SELECT COUNT(*) c FROM group_requests WHERE group_id = ?", (gid,))["c"] if admin else 0,
             "pending": q1("SELECT 1 FROM group_requests WHERE group_id = ? AND user_id = ?", (gid, me_id)) is not None,
-            "discussion": discussion_info(g)}
+            "discussion": discussion_info(g), "forum": bool(g["forum"])}
 
 
 def discussion_info(g):
@@ -8371,6 +8371,8 @@ def gmsg_json(m, me_id, channel=None):
         "reply": reply, "attachments": with_live(attachments_of(m), m["id"]), "sender": user_brief(m["sender"], me_id),
         "reactions": reactions_of(mid, me_id), **note_field(mid, me_id),
     }
+    if "topic_id" in m.keys() and m["topic_id"]:
+        out["topic"] = m["topic_id"]
     if m["fwd_enc"]:
         out["forwarded"] = fwd_of(m)
         if m["sender"] != me_id:
@@ -8414,8 +8416,18 @@ def group_messages(req, me, gid):
         first_unread = fu["id"] if fu else None
     if not preview and req.query().get("peek") != "1":
         run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (time.time(), gid, uid))
+    topic = req.query().get("topic") or None
+    if topic and topic != GENERAL_TOPIC and not topic_row(gid, topic):
+        raise ApiError(404, "topic_not_found")
     if preview and not g["history"]:
         rows = []
+    elif topic:
+        cond, args = topic_filter(topic)
+        rows = q("SELECT * FROM group_messages WHERE group_id = ? AND %s AND created_at >= ? AND id NOT IN "
+                 "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT ?" % cond,
+                 (gid,) + args + (0 if preview else history_since(g, mem), uid, limit))
+        if not preview and req.query().get("peek") != "1":
+            mark_topic_read(gid, topic, uid)
     else:
         rows = q("SELECT * FROM group_messages WHERE group_id = ? AND created_at >= ? AND id NOT IN "
                  "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT ?",
@@ -8430,10 +8442,177 @@ def group_messages(req, me, gid):
         items = [gmsg_json(m, uid, channel) for m in rows]
     finally:
         end_prefetch()
+    can_write = can_post(g, mem)
+    if topic and topic != GENERAL_TOPIC and topic_row(gid, topic)["closed"] and not is_admin(mem):
+        can_write = False                                  # закрытая тема: писать могут только админы
     req.send_json(200, {"messages": items, "peer": group_peer(g),
                         "typing": None if preview else group_typing(gid, uid),
-                        "can_write": can_post(g, mem), "group": group_info(g, uid), "preview": preview,
+                        "can_write": can_write, "group": group_info(g, uid), "preview": preview,
                         "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread})
+
+
+# ---------- темы в группах (форум, как в Telegram) ----------
+# Большая группа делится на темы: у каждой свой список сообщений и свои непрочитанные.
+# «Общая» тема — это сообщения без темы (topic_id IS NULL), она есть всегда.
+
+ensure_column("groups", "forum", "forum INTEGER NOT NULL DEFAULT 0")
+ensure_column("group_messages", "topic_id", "topic_id TEXT")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_gmsg_topic ON group_messages(group_id, topic_id, created_at)")
+DB.execute("CREATE TABLE IF NOT EXISTS group_topics(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, title_enc BLOB NOT NULL, "
+           "icon TEXT, color INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at REAL NOT NULL, "
+           "closed INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_topics_group ON group_topics(group_id)")
+DB.execute("CREATE TABLE IF NOT EXISTS topic_reads(group_id TEXT NOT NULL, topic_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+           "last_read REAL NOT NULL, PRIMARY KEY(group_id, topic_id, user_id))")
+GENERAL_TOPIC = "general"
+TOPIC_COLORS = 7
+
+
+def topic_title(t):
+    return dec(t["created_by"], "groups", COL["group_title"], t["id"], t["title_enc"]) or ""
+
+
+def topic_row(gid, tid):
+    return q1("SELECT * FROM group_topics WHERE id = ? AND group_id = ?", (tid, gid))
+
+
+def topic_filter(tid):
+    """SQL-условие и параметры для сообщений темы"""
+    return ("topic_id IS NULL", ()) if tid == GENERAL_TOPIC else ("topic_id = ?", (tid,))
+
+
+def topic_last_read(gid, tid, uid, mem):
+    r = q1("SELECT last_read FROM topic_reads WHERE group_id = ? AND topic_id = ? AND user_id = ?", (gid, tid, uid))
+    return r["last_read"] if r else (mem["last_read"] if mem else 0)
+
+
+def mark_topic_read(gid, tid, uid):
+    run("DELETE FROM topic_reads WHERE group_id = ? AND topic_id = ? AND user_id = ?", (gid, tid, uid))
+    run("INSERT INTO topic_reads(group_id, topic_id, user_id, last_read) VALUES (?,?,?,?)", (gid, tid, uid, time.time()))
+
+
+def topic_json(g, t, uid, mem):
+    tid = t["id"] if t else GENERAL_TOPIC
+    cond, args = topic_filter(tid)
+    since = history_since(g, mem) if mem else 0
+    last = q1("SELECT * FROM group_messages WHERE group_id = ? AND %s AND created_at >= ? AND kind IS NULL "
+              "ORDER BY created_at DESC LIMIT 1" % cond, (g["id"],) + args + (since,))
+    lr = max(topic_last_read(g["id"], tid, uid, mem), since)
+    unread = q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND %s AND created_at > ? AND sender != ? "
+                "AND kind IS NULL" % cond, (g["id"],) + args + (lr, uid))["c"] if mem else 0
+    out = {"id": tid, "title": topic_title(t) if t else "Общая", "icon": (t["icon"] if t else None) or None,
+           "color": t["color"] if t else 0, "closed": bool(t["closed"]) if t else False,
+           "pinned": bool(t["pinned"]) if t else True, "general": t is None, "unread": unread,
+           "created_by_me": bool(t) and t["created_by"] == uid}
+    if last:
+        out["last"] = {"text": summary_of(last, 100), "who": user_brief(last["sender"], uid)["name"].split(" ")[0],
+                       "mine": last["sender"] == uid, "at": last["created_at"]}
+    return out
+
+
+def clean_topic_icon(v):
+    v = str(v or "").strip()
+    return v[:8] if v and not any(c.isalnum() for c in v) else None      # только эмодзи
+
+
+@route("PUT", r"/v1/groups/(g_[a-f0-9]{32})/forum")
+def set_forum(req, me, gid):
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    if not mem:
+        raise ApiError(404, "not_found")
+    if not is_admin(mem) or g["type"] != "group":
+        raise ApiError(403, "forbidden")
+    on = 1 if req.body_json().get("on") else 0
+    run("UPDATE groups SET forum = ? WHERE id = ?", (on, gid))
+    for mrow in q("SELECT user_id FROM group_members WHERE group_id = ?", (gid,)):
+        SHARED.ver_bump("uver:" + mrow["user_id"])
+    req.send_json(200, {"forum": bool(on)})
+
+
+@route("GET", r"/v1/groups/(g_[a-f0-9]{32})/topics")
+def list_topics(req, me, gid):
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    if not mem and not (g and g["kind"] == "open"):
+        raise ApiError(404, "not_found")
+    topics = [topic_json(g, None, me["id"], mem)]
+    rows = q("SELECT * FROM group_topics WHERE group_id = ?", (gid,))
+    items = [topic_json(g, t, me["id"], mem) for t in rows]
+    # закреплённые сверху, остальные — по последнему сообщению
+    items.sort(key=lambda x: (not x["pinned"], -(x.get("last") or {}).get("at", 0)))
+    topics += items
+    req.send_json(200, {"forum": bool(g["forum"]), "topics": topics,
+                        "can_create": is_admin(mem), "can_manage": is_admin(mem)})
+
+
+@route("POST", r"/v1/groups/(g_[a-f0-9]{32})/topics")
+def create_topic(req, me, gid):
+    rate_limit("topic:" + me["id"], 30, 3600)
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    if not mem:
+        raise ApiError(404, "not_found")
+    if not g["forum"] or not is_admin(mem):
+        raise ApiError(403, "forbidden")
+    d = req.body_json()
+    title = clean_line(d.get("title"), 64)
+    if not title:
+        raise ApiError(400, "bad_title")
+    if q1("SELECT COUNT(*) c FROM group_topics WHERE group_id = ?", (gid,))["c"] >= 200:
+        raise ApiError(400, "too_many")
+    tid = uuid.uuid4().hex
+    try:
+        color = max(0, min(TOPIC_COLORS - 1, int(d.get("color") or 0)))
+    except (TypeError, ValueError):
+        color = 0
+    run("INSERT INTO group_topics(id, group_id, title_enc, icon, color, created_by, created_at) VALUES (?,?,?,?,?,?,?)",
+        (tid, gid, enc(me["id"], "groups", COL["group_title"], tid, title), clean_topic_icon(d.get("icon")), color,
+         me["id"], time.time()))
+    for mrow in q("SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?", (gid, me["id"])):
+        SHARED.events_publish(mrow["user_id"], "group")
+    req.send_json(201, topic_json(g, topic_row(gid, tid), me["id"], mem))
+
+
+@route("PUT", r"/v1/groups/(g_[a-f0-9]{32})/topics/([a-f0-9]{32})")
+def edit_topic(req, me, gid, tid):
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    t = topic_row(gid, tid) if mem else None
+    if not t:
+        raise ApiError(404, "not_found")
+    if not (is_admin(mem) or t["created_by"] == me["id"]):
+        raise ApiError(403, "forbidden")
+    d = req.body_json()
+    if "title" in d:
+        title = clean_line(d.get("title"), 64)
+        if not title:
+            raise ApiError(400, "bad_title")
+        # заголовок шифруется ключом создателя темы
+        run("UPDATE group_topics SET title_enc = ? WHERE id = ?", (enc(t["created_by"], "groups", COL["group_title"], tid, title), tid))
+    if "icon" in d:
+        run("UPDATE group_topics SET icon = ? WHERE id = ?", (clean_topic_icon(d.get("icon")), tid))
+    if "closed" in d and is_admin(mem):
+        run("UPDATE group_topics SET closed = ? WHERE id = ?", (1 if d.get("closed") else 0, tid))
+    if "pinned" in d and is_admin(mem):
+        run("UPDATE group_topics SET pinned = ? WHERE id = ?", (1 if d.get("pinned") else 0, tid))
+    req.send_json(200, topic_json(g, topic_row(gid, tid), me["id"], mem))
+
+
+@route("DELETE", r"/v1/groups/(g_[a-f0-9]{32})/topics/([a-f0-9]{32})")
+def delete_topic(req, me, gid, tid):
+    g = group_row(gid)
+    mem = member_row(gid, me["id"]) if g else None
+    if not mem or not topic_row(gid, tid):
+        raise ApiError(404, "not_found")
+    if not is_admin(mem):
+        raise ApiError(403, "forbidden")
+    for m in q("SELECT * FROM group_messages WHERE group_id = ? AND topic_id = ?", (gid, tid)):
+        drop_message_media(m)
+    run("DELETE FROM group_messages WHERE group_id = ? AND topic_id = ?", (gid, tid))
+    run("DELETE FROM group_topics WHERE id = ?", (tid,))
+    run("DELETE FROM topic_reads WHERE group_id = ? AND topic_id = ?", (gid, tid))
+    req.send_json(200, {"ok": True})
 
 
 MENTION_RE = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_]{4,31})")
@@ -8508,6 +8687,14 @@ def group_send(req, me, gid):
             raise ApiError(429, "slow_mode", wait=int(wait) + 1)
     entities = [] if poll else clean_entities(d.get("entities", []), text)
     check_perms(g, mem, text, entities, attachments, poll)
+    topic_id = None
+    if g["forum"] and d.get("topic_id") and str(d["topic_id"]) != GENERAL_TOPIC:
+        t = topic_row(gid, str(d["topic_id"]))
+        if not t:
+            raise ApiError(404, "topic_not_found")
+        if t["closed"] and not is_admin(mem):
+            raise ApiError(403, "topic_closed")
+        topic_id = t["id"]
     reply_to = None
     if d.get("reply_to"):
         r = q1("SELECT id FROM group_messages WHERE id = ? AND group_id = ?", (str(d["reply_to"]), gid))
@@ -8519,6 +8706,8 @@ def group_send(req, me, gid):
          enc(uid, "messages", COL["msg_entities"], mid, json.dumps(entities, ensure_ascii=False)),
          enc(uid, "messages", COL["msg_attach"], mid, json.dumps(attachments)) if attachments else None,
          reply_to, now, "poll" if poll else None))
+    if topic_id:
+        run("UPDATE group_messages SET topic_id = ? WHERE id = ?", (topic_id, mid))
     if poll:
         create_poll(mid, uid, poll)
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, gid, uid))

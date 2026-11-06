@@ -840,15 +840,33 @@ struct ChatScreen: View {
         self.route = route
         self.session = session
         self.standalone = standalone
-        _model = StateObject(wrappedValue: ChatModel(peer: route.peer, repo: session.messengerRepo))
+        _model = StateObject(wrappedValue: ChatModel(peer: route.peer, repo: session.messengerRepo, topic: route.topic))
     }
 
     private var s: Strings { Strings(lang: lang) }
     private var isSaved: Bool { model.peer.id == session.serverID }
 
     var body: some View {
-        chatSheets(chatLifecycle(chatChrome(chatMain)))
-            .environment(\.theme, theme)
+        if route.topic == nil, let group = model.group, group.forum, !group.isChannel, !model.isPreview {
+            // группа разделена на темы: сначала список тем, переписка — внутри темы
+            ForumTopicsScreen(route: route, session: session, group: group, standalone: standalone) { showInfo = true }
+                .fullScreenCover(isPresented: $showInfo) {
+                    ChatInfoView(model: model, onPlayMusic: { track, queue in
+                        session.player.start(track, queue: queue)
+                    }, onLeftGroup: {
+                        showInfo = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { dismiss() }
+                    })
+                    .environmentObject(session)
+                    .environmentObject(flow)
+                    .environmentObject(session.player)
+                }
+                .task { await model.refresh() }             // настройки группы (в том числе «Темы») — свежие
+                .environment(\.theme, theme)
+        } else {
+            chatSheets(chatLifecycle(chatChrome(chatMain)))
+                .environment(\.theme, theme)
+        }
     }
 
     /// Сама переписка: список, шапка, поле ввода, меню сообщения
@@ -1388,7 +1406,11 @@ struct ChatScreen: View {
                             Image(systemName: "timer").font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(theme.accentColor)
                         }
-                        Text(isSaved ? s.t("Избранное", "Saved messages") : model.peer.name)
+                        if let topic = route.topic {
+                            TopicIcon(icon: topic.icon, color: topic.color, title: topic.title, general: topic.general, size: 18)
+                        }
+                        Text(isSaved ? s.t("Избранное", "Saved messages")
+                             : route.topic.map { $0.general ? s.t("Общая", "General") : $0.title } ?? model.peer.name)
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1).minimumScaleFactor(0.8)
@@ -1398,6 +1420,8 @@ struct ChatScreen: View {
                             Text(s.t("Ваши заметки", "Your notes")).foregroundStyle(theme.textSecondary)
                         } else if let action = model.typing {
                             ActionLabel(action: action)
+                        } else if route.topic != nil {
+                            Text(model.peer.name).foregroundStyle(theme.textSecondary)     // тема: ниже — название группы
                         } else if model.peer.isGroup {
                             Text("\(model.group?.count ?? model.peer.memberCount) \(s.memberWord(channel: model.peer.isChannel))")
                                 .foregroundStyle(theme.textSecondary)

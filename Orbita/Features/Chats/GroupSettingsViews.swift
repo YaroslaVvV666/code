@@ -104,6 +104,9 @@ struct GroupSettingsForm: View {
                 toggleRow(s.t("История для новых участников", "History for new members"), $draft.history,
                           s.t("Если выключить, новички увидят только сообщения после вступления.",
                               "If off, newcomers only see messages sent after they join."))
+                toggleRow(s.t("Темы", "Topics"), $draft.forum,
+                          s.t("Группа делится на темы: у каждой своя переписка и свои непрочитанные. Удобно для больших сообществ.",
+                              "The group is split into topics, each with its own messages and unread count. Great for large communities."))
             }
             toggleRow(s.t("Запретить копирование", "Restrict copying"), $draft.noForward,
                       s.t("Скрывает «Копировать» в сообщениях. Скриншоты запретить нельзя.",
@@ -281,7 +284,7 @@ struct GroupEditSheet: View {
             draft = GroupDraft(type: group.type, title: group.name, about: group.about, kind: group.kind,
                                handle: group.handle ?? "", approve: group.approve, noForward: group.noForward,
                                slow: group.slow, whoWrites: group.whoWrites, history: group.history,
-                               perms: group.perms, writers: group.writers)
+                               perms: group.perms, writers: group.writers, forum: group.forum)
             discussion = group.discussion
         }
         .confirmationDialog(s.t("Удалить для всех? Все сообщения будут стёрты.", "Delete for everyone? All messages will be erased."),
@@ -335,6 +338,9 @@ struct GroupEditSheet: View {
             }
             do {
                 _ = try await session.messengerRepo.editGroup(id: group.id, patch: p)
+                if !group.isChannel, draft.forum != group.forum {
+                    _ = try await session.messengerRepo.setForum(groupID: group.id, on: draft.forum)
+                }
                 await onDone()
                 dismiss()
             } catch { errorText = s.api((error as? APIError) ?? .offline) }

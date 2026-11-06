@@ -283,13 +283,23 @@ final class ChatModel: ObservableObject {
     let repo: MessengerRepository
     private var lastTypingPing = Date.distantPast
 
-    init(peer: ChatPeer, repo: MessengerRepository) {
+    /// Тема группы-форума, открытая в этом экране (nil — обычная переписка)
+    let topic: ForumTopicRef?
+
+    init(peer: ChatPeer, repo: MessengerRepository, topic: ForumTopicRef? = nil) {
+        self.topic = topic
         self.peer = peer
         self.peerID = peer.id
         self.repo = repo
         // предзагруженные (или сохранённые на телефоне) сообщения показываем сразу — и без интернета;
         // свежие приходят следом обычным обновлением
-        if let t = ThreadPrefetcher.shared.get(peer.id) ?? repo.cachedThread(peerID: peer.id) {
+        let saved: ChatThread?
+        if let topic {
+            saved = repo.cachedThread(peerID: peer.id, topic: topic.id)
+        } else {
+            saved = ThreadPrefetcher.shared.get(peer.id) ?? repo.cachedThread(peerID: peer.id)
+        }
+        if let t = saved {
             messages = t.messages
             self.peer = t.peer
             lastSeen = t.lastSeen
@@ -311,7 +321,7 @@ final class ChatModel: ObservableObject {
         // сообщения, написанные здесь без связи (в том числе до перезапуска приложения), снова в списке «Отправляется…»
         let queue = PersistentOutbox.shared
         queue.chatOpened(peer.id)
-        for e in queue.entries(for: peer.id) {
+        for e in queue.entries(for: peer.id) where topic == nil {
             pending.append(ChatMessage(key: e.key, id: e.key, mine: true, text: e.text, entities: e.entities,
                                        createdAt: e.createdAt, editedAt: nil, read: false, reply: nil,
                                        attachments: e.media.map(queue.placeholder), isPending: true, failed: true))
@@ -335,7 +345,7 @@ final class ChatModel: ObservableObject {
 
     func refresh() async {
         do {
-            let thread = try await repo.thread(peerID: peerID, limit: historyLimit)
+            let thread = try await repo.thread(peerID: peerID, limit: historyLimit, peek: false, topic: topic?.id)
             // Тот же ключ у тех же сообщений: список не перерисовывается и не «прыгает»
             let keys = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0.key) })
             let fresh = thread.messages.map { m -> ChatMessage in
@@ -508,7 +518,7 @@ final class ChatModel: ObservableObject {
 
     /// Больше сообщений — для вкладок «Медиа», «Файлы», «Музыка» в профиле чата
     func loadFullHistory() async -> [ChatMessage] {
-        (try? await repo.thread(peerID: peerID, limit: 300).messages) ?? messages
+        (try? await repo.thread(peerID: peerID, limit: 300, peek: false, topic: topic?.id).messages) ?? messages
     }
 
     func rename(to name: String) { peer.name = name }
@@ -580,7 +590,8 @@ final class ChatModel: ObservableObject {
                 uploaded.append(try await repo.upload(m))
             }
             var sent = try await repo.send(peerID: peerID, text: item.text, entities: item.entities,
-                                           attachments: uploaded, replyTo: item.replyID, silent: item.silent)
+                                           attachments: uploaded, replyTo: item.replyID, silent: item.silent,
+                                           topic: topic?.id)
             sent.key = key
             pending.removeAll { $0.key == key }
             outbox.removeAll { $0.key == key }
@@ -591,9 +602,9 @@ final class ChatModel: ObservableObject {
         } catch {
             if let e = error as? APIError, e == .offline {
                 if !outbox.contains(where: { $0.key == key }) { outbox.append((key, item)) }
-                // сохраняем на диск: уйдёт и после выхода из чата или перезапуска приложения
-                PersistentOutbox.shared.add(key: key, peerID: peerID, text: item.text, entities: item.entities,
-                                            replyID: item.replyID, silent: item.silent, media: item.media)
+                // сохраняем на диск: уйдёт и после выхода из чата или перезапуска приложения (темы форума — только в памяти)
+                if topic == nil { PersistentOutbox.shared.add(key: key, peerID: peerID, text: item.text, entities: item.entities,
+                                            replyID: item.replyID, silent: item.silent, media: item.media) }
                 setFailed(key, true)
                 return true
             }
@@ -792,7 +803,9 @@ final class ChatModel: ObservableObject {
 
 struct ChatRoute: Identifiable, Hashable {
     let peer: ChatPeer
-    var id: String { peer.id }
+    /// Тема группы-форума: открывается переписка только этой темы
+    var topic: ForumTopicRef? = nil
+    var id: String { peer.id + (topic.map { "#" + $0.id } ?? "") }
 }
 
 

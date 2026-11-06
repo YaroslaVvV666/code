@@ -48,6 +48,7 @@ struct GroupInfo: Equatable {
     var writers: [String] = []          // «писать могут выбранные» (видят только админы)
     var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var discussion: DiscussionRef? = nil    // чат для комментариев канала
+    var forum = false                   // группа разделена на темы
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
     var isOpen: Bool { kind == "open" }
@@ -140,6 +141,7 @@ struct GroupDraft: Equatable {
     var history = true
     var perms = GroupPerms()
     var writers: [String] = []
+    var forum = false                   // разделить группу на темы
 }
 
 /// Что изменить в группе (nil — не трогать)
@@ -501,10 +503,12 @@ struct UnreadDigest: Decodable, Equatable {
 
 protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
-    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread
+    /// topic — тема группы-форума ("general" — общая); nil — вся переписка
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread
     /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
     func cachedChats() -> (chats: [ChatSummary], unread: Int)?
     func cachedThread(peerID: String) -> ChatThread?
+    func cachedThread(peerID: String, topic: String) -> ChatThread?
     func react(messageID: String, emoji: String?) async throws -> ChatMessage
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
     func setNote(messageID: String, text: String) async throws -> ChatMessage
@@ -516,8 +520,14 @@ protocol MessengerRepository: Sendable {
     /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
     func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
-              replyTo: String?, silent: Bool) async throws -> ChatMessage
+              replyTo: String?, silent: Bool, topic: String?) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
+    // темы в группах
+    func topics(groupID: String) async throws -> ForumTopicList
+    func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
+    func updateTopic(groupID: String, topicID: String, fields: [String: Any]) async throws -> ForumTopic
+    func deleteTopic(groupID: String, topicID: String) async throws
+    func setForum(groupID: String, on: Bool) async throws -> Bool
     /// Трансляция геопозиции: новая точка / остановить
     func updateLiveLocation(messageID: String, point: GeoPoint) async throws
     func stopLiveLocation(messageID: String) async throws
@@ -583,6 +593,14 @@ extension MessengerRepository {
 
     func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
     func thread(peerID: String, limit: Int) async throws -> ChatThread { try await thread(peerID: peerID, limit: limit, peek: false) }
+    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
+        try await thread(peerID: peerID, limit: limit, peek: peek, topic: nil)
+    }
+    func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
+              replyTo: String?, silent: Bool) async throws -> ChatMessage {
+        try await send(peerID: peerID, text: text, entities: entities, attachments: attachments, replyTo: replyTo,
+                       silent: silent, topic: nil)
+    }
 
     /// Обычное текстовое сообщение
     func send(peerID: String, text: String, replyTo: String?) async throws -> ChatMessage {
@@ -822,6 +840,7 @@ private struct GroupDTO: Decodable {
     let perms: [String: Bool]?
     let writers: [String]?
     let restrictedUntil: Double?
+    let forum: Bool?
     var model: GroupInfo {
         GroupInfo(id: id, name: name, about: about, kind: kind, members: members.map(\.model), myRole: myRole, code: code,
                   type: type ?? "group", handle: handle, approve: approve ?? false, noForward: noForward ?? false,
@@ -832,7 +851,7 @@ private struct GroupDTO: Decodable {
                                                      pin: p["pin"] ?? true) } ?? GroupPerms(),
                   writers: writers ?? [],
                   restrictedUntil: restrictedUntil.map { $0 > 0 ? Date(timeIntervalSince1970: $0) : .distantFuture },
-                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) })
+                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) }, forum: forum ?? false)
     }
 }
 
@@ -1054,14 +1073,47 @@ struct RemoteMessengerRepository: MessengerRepository {
         return try decodeAPI(PinnedDTO.self, from: data).pinned.map(\.model)
     }
 
-    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
         if ChannelViewSource.openedByLink.contains(peerID) { query["src"] = "link" }      // статистика: «URL»
+        if let topic {
+            query["topic"] = topic
+            let slot = "t-" + topic + (peek ? "-p" : "")                  // у каждой темы своя копия на телефоне
+            return try decodeThread(try await api.requestCached("/v1/chats/\(peerID)/messages", query: query, slot: slot))
+        }
         // быстрый просмотр (предзагрузка) и полная загрузка хранятся отдельно: короткая копия не затирает длинную
         let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
                                                slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
         return try decodeThread(data)
+    }
+
+    func cachedThread(peerID: String, topic: String) -> ChatThread? {
+        api.cachedResponse("/v1/chats/\(peerID)/messages", slot: "t-" + topic, fallback: []).flatMap { try? decodeThread($0) }
+    }
+
+    func topics(groupID: String) async throws -> ForumTopicList {
+        try decodeAPI(ForumTopicList.self, from: try await api.requestCached("/v1/groups/\(groupID)/topics"))
+    }
+
+    func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic {
+        var body: [String: Any] = ["title": title, "color": color]
+        if let icon { body["icon"] = icon }
+        return try decodeAPI(ForumTopic.self, from: try await api.request("POST", "/v1/groups/\(groupID)/topics", body: ServerAPI.json(body)))
+    }
+
+    func updateTopic(groupID: String, topicID: String, fields: [String: Any]) async throws -> ForumTopic {
+        try decodeAPI(ForumTopic.self, from: try await api.request("PUT", "/v1/groups/\(groupID)/topics/\(topicID)", body: ServerAPI.json(fields)))
+    }
+
+    func deleteTopic(groupID: String, topicID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/topics/\(topicID)")
+    }
+
+    func setForum(groupID: String, on: Bool) async throws -> Bool {
+        struct R: Decodable { let forum: Bool }
+        let data = try await api.request("PUT", "/v1/groups/\(groupID)/forum", body: ServerAPI.json(["on": on]))
+        return (try? decodeAPI(R.self, from: data))?.forum ?? on
     }
 
     private func decodeThread(_ data: Data) throws -> ChatThread {
@@ -1112,9 +1164,10 @@ struct RemoteMessengerRepository: MessengerRepository {
     }
 
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
-              replyTo: String?, silent: Bool) async throws -> ChatMessage {
+              replyTo: String?, silent: Bool, topic: String?) async throws -> ChatMessage {
         var body: [String: Any] = ["text": text, "entities": Self.entityJSON(entities)]
         if silent { body["silent"] = true }
+        if let topic, topic != "general" { body["topic_id"] = topic }
         if !attachments.isEmpty { body["attachments"] = attachments.map(\.json) }
         if let replyTo { body["reply_to"] = replyTo }
         let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
