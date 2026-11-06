@@ -171,8 +171,15 @@ struct ExtrasAPI {
         _ = try await api.request("POST", "/v1/chats/\(peerID)/share-post", body: ServerAPI.json(body))
     }
 
-    func sendPoll(peerID: String, question: String, options: [String], multiple: Bool, anonymous: Bool) async throws {
-        let poll: [String: Any] = ["question": question, "options": options, "multiple": multiple, "anonymous": anonymous]
+    func sendPoll(peerID: String, question: String, options: [String], multiple: Bool, anonymous: Bool,
+                  quizCorrect: Int? = nil, explanation: String = "") async throws {
+        var poll: [String: Any] = ["question": question, "options": options, "multiple": multiple, "anonymous": anonymous]
+        if let quizCorrect {
+            poll["quiz"] = true
+            poll["correct"] = quizCorrect
+            poll["multiple"] = false
+            if !explanation.isEmpty { poll["explanation"] = explanation }
+        }
         let body: [String: Any] = ["text": question, "poll": poll]
         _ = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
     }

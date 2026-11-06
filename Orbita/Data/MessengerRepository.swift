@@ -316,6 +316,9 @@ struct PollInfo: Equatable {
     var total: Int
     var options: [PollOption]
     var mine: Bool          // я создатель
+    var quiz = false        // викторина: один правильный ответ
+    var correct: Int? = nil // правильный вариант (сервер присылает после ответа)
+    var explanation: String? = nil
 }
 
 struct MessageInfo: Equatable {
@@ -703,12 +706,13 @@ struct PollOptionDTO: Decodable {
 struct PollDTO: Decodable {
     let multiple: Bool; let anonymous: Bool; let closed: Bool; let total: Int
     let options: [PollOptionDTO]; let mineCreated: Bool
+    let quiz: Bool?; let correct: Int?; let explanation: String?
     var model: PollInfo {
         PollInfo(multiple: multiple, anonymous: anonymous, closed: closed, total: total,
                  options: options.map { o in
                      PollOption(id: o.idx, text: o.text, votes: o.votes, mine: o.mine,
                                 voters: (o.voters ?? []).map { PollVoter(id: $0.id, name: $0.name, avatarID: $0.avatar, at: Date(timeIntervalSince1970: $0.at)) })
-                 }, mine: mineCreated)
+                 }, mine: mineCreated, quiz: quiz ?? false, correct: correct, explanation: explanation)
     }
 }
 

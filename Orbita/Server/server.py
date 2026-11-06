@@ -332,6 +332,9 @@ CREATE TABLE IF NOT EXISTS poll_votes(
   message_id TEXT NOT NULL, user_id TEXT NOT NULL, idx INTEGER NOT NULL, created_at REAL NOT NULL,
   PRIMARY KEY(message_id, user_id, idx));""")
 ensure_column("posts", "pinned_comment", "pinned_comment TEXT")
+ensure_column("polls", "quiz", "quiz INTEGER NOT NULL DEFAULT 0")          # викторина: один правильный ответ
+ensure_column("polls", "correct", "correct INTEGER")
+ensure_column("polls", "explanation_enc", "explanation_enc BLOB")
 ensure_column("comments", "parent_id", "parent_id TEXT")
 ensure_column("comments", "reply_to_id", "reply_to_id TEXT")
 ensure_column("users", "last_name_enc", "last_name_enc BLOB")
@@ -6290,13 +6293,20 @@ def clean_poll(raw):
     opts = [o for o in opts if o][:10]
     if not question or len(opts) < 2:
         raise ApiError(400, "bad_poll")
-    return {"question": question, "options": opts, "multiple": 1 if raw.get("multiple") else 0,
-            "anonymous": 0 if raw.get("anonymous") is False else 1}
+    out = {"question": question, "options": opts, "multiple": 1 if raw.get("multiple") else 0,
+           "anonymous": 0 if raw.get("anonymous") is False else 1, "quiz": 0}
+    if raw.get("quiz"):
+        correct = raw.get("correct")
+        if not isinstance(correct, int) or isinstance(correct, bool) or not 0 <= correct < len(opts):
+            raise ApiError(400, "bad_quiz")
+        out.update(quiz=1, multiple=0, correct=correct, explanation=clean_line(raw.get("explanation"), 200))
+    return out
 
 
 def create_poll(mid, uid, poll):
-    run("INSERT INTO polls(message_id, creator, multiple, anonymous) VALUES (?,?,?,?)",
-        (mid, uid, poll["multiple"], poll["anonymous"]))
+    run("INSERT INTO polls(message_id, creator, multiple, anonymous, quiz, correct, explanation_enc) VALUES (?,?,?,?,?,?,?)",
+        (mid, uid, poll["multiple"], poll["anonymous"], poll.get("quiz", 0), poll.get("correct"),
+         enc(uid, "messages", COL["msg_text"], mid + ":expl", poll["explanation"]) if poll.get("explanation") else None))
     for i, text in enumerate(poll["options"]):
         run("INSERT INTO poll_options(message_id, idx, text_enc) VALUES (?,?,?)",
             (mid, i, enc(uid, "messages", COL["msg_text"], "%s:%d" % (mid, i), text)))
@@ -6318,8 +6328,21 @@ def poll_json(mid, me_id):
         if not p["anonymous"]:
             item["voters"] = [{**user_brief(v["user_id"], me_id), "at": v["created_at"]} for v in votes[:50]]
         options.append(item)
-    return {"multiple": bool(p["multiple"]), "anonymous": bool(p["anonymous"]), "closed": bool(p["closed"]),
-            "total": total_voters, "options": options, "mine_created": p["creator"] == me_id}
+    out = {"multiple": bool(p["multiple"]), "anonymous": bool(p["anonymous"]), "closed": bool(p["closed"]),
+           "total": total_voters, "options": options, "mine_created": p["creator"] == me_id}
+    if p["quiz"]:
+        out["quiz"] = True
+        # правильный ответ и пояснение — только тем, кто уже ответил (иначе подсмотрели бы), автору и после закрытия
+        if p["closed"] or p["creator"] == me_id or any(o["mine"] for o in options):
+            out["correct"] = p["correct"]
+            if p["explanation_enc"]:
+                out["explanation"] = dec(p["creator"], "messages", COL["msg_text"], mid + ":expl", p["explanation_enc"]) or ""
+        else:
+            for o in options:                        # до ответа — без результатов: ответ не подсказывает большинство
+                o["votes"] = 0
+                o.pop("voters", None)
+            out["total"] = total_voters
+    return out
 
 
 @route("PUT", r"/v1/messages/([a-f0-9]+)/vote")
@@ -6337,6 +6360,11 @@ def vote_poll(req, me, mid):
     picked = sorted({int(i) for i in picked if isinstance(i, int) and i in valid})
     if not p["multiple"]:
         picked = picked[:1]
+    if p["quiz"]:                                    # в викторине ответ один и навсегда
+        if q1("SELECT 1 FROM poll_votes WHERE message_id = ? AND user_id = ?", (mid, me["id"])):
+            raise ApiError(400, "already_voted")
+        if not picked:
+            raise ApiError(400, "bad_value")
     run("DELETE FROM poll_votes WHERE message_id = ? AND user_id = ?", (mid, me["id"]))
     now = time.time()
     for i in picked:
