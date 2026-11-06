@@ -80,6 +80,7 @@ final class AppSession: ObservableObject {
         BookmarkStore.onChange = { id, saved in Task { await ex.setSaved(id: id, saved: saved) } }
         reportListening()
         LiveLocationManager.shared.attach(repo: messengerRepo, userID: serverID)    // продолжить трансляции геопозиции после перезапуска
+        PersistentOutbox.shared.attach(repo: messengerRepo, account: serverID)      // написанное без связи уйдёт само
     }
 
     /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает
@@ -106,6 +107,7 @@ final class AppSession: ObservableObject {
 
     /// Выход: завершаем этот сеанс на сервере
     func signOutRemote() async {
+        PersistentOutbox.shared.detach()
         if let token = await PushManager.shared.token {          // устройство больше не получает уведомления
             _ = try? await api.request("DELETE", "/v1/me/push", body: ServerAPI.json(["token": token]))
         }

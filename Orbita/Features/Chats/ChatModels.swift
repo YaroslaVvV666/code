@@ -308,6 +308,24 @@ final class ChatModel: ObservableObject {
         // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
         if botCommands.isEmpty { botCommands = BotCommand.resolve([], peerID: peer.id) }
         startParam = BotStartLinks.take(username: self.peer.username)
+        // сообщения, написанные здесь без связи (в том числе до перезапуска приложения), снова в списке «Отправляется…»
+        let queue = PersistentOutbox.shared
+        queue.chatOpened(peer.id)
+        for e in queue.entries(for: peer.id) {
+            pending.append(ChatMessage(key: e.key, id: e.key, mine: true, text: e.text, entities: e.entities,
+                                       createdAt: e.createdAt, editedAt: nil, read: false, reply: nil,
+                                       attachments: e.media.map(queue.placeholder), isPending: true, failed: true))
+            outbox.append((e.key, Outgoing(text: e.text, entities: e.entities, media: e.media.map(queue.outgoing),
+                                           replyID: e.replyID, silent: e.silent, cleanup: nil)))
+        }
+    }
+
+    deinit {
+        let id = peerID
+        Task { @MainActor in
+            PersistentOutbox.shared.chatClosed(id)
+            await PersistentOutbox.shared.flush()       // недоотправленное из закрытого чата уйдёт фоном
+        }
     }
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
@@ -566,17 +584,22 @@ final class ChatModel: ObservableObject {
             sent.key = key
             pending.removeAll { $0.key == key }
             outbox.removeAll { $0.key == key }
+            PersistentOutbox.shared.remove(key)
             if let i = messages.firstIndex(where: { $0.id == sent.id }) { messages[i] = sent } else { messages.append(sent) }
             if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             return true
         } catch {
             if let e = error as? APIError, e == .offline {
                 if !outbox.contains(where: { $0.key == key }) { outbox.append((key, item)) }
+                // сохраняем на диск: уйдёт и после выхода из чата или перезапуска приложения
+                PersistentOutbox.shared.add(key: key, peerID: peerID, text: item.text, entities: item.entities,
+                                            replyID: item.replyID, silent: item.silent, media: item.media)
                 setFailed(key, true)
                 return true
             }
             pending.removeAll { $0.key == key }
             outbox.removeAll { $0.key == key }
+            PersistentOutbox.shared.remove(key)
             if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             if let e = error as? APIError { self.error = e }
             replyTo = restoreReply
