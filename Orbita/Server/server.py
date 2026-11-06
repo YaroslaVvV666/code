@@ -1066,6 +1066,11 @@ def new_session(uid, info):
     run("INSERT INTO sessions(id, user_id, token_hash, info_enc, created_at, last_active) VALUES (?,?,?,?,?,?)",
         (sid, uid, token_hash(token),
          enc(uid, "profile", COL["session"], sid, json.dumps(info, ensure_ascii=False)), now, now))
+    try:
+        if q1("SELECT COUNT(*) c FROM sessions WHERE user_id = ?", (uid,))["c"] > 1:
+            login_alert(uid, sid, info)            # вход с ещё одного устройства — сообщение от «Orbita» и push
+    except Exception as e:                          # уведомление не должно ломать вход
+        sys.stderr.write("login alert failed: %s\n" % e)
     return token, sid
 
 
@@ -4623,6 +4628,50 @@ BOTGOD_COMMANDS = [
 ]
 BOT_COMMANDS[BOTGOD_ID] = BOTGOD_COMMANDS
 
+# Служебный аккаунт «Orbita»: уведомления о входе с нового устройства (как «Telegram» с кодами и входами)
+SERVICE_ID = "0e1b17a0-0000-4000-8000-0000000005e7"
+BUILTIN_BOTS[SERVICE_ID] = {"description": "Служебные уведомления Orbita: входы в аккаунт с новых устройств и важные "
+                                           "сообщения о безопасности. Отвечать сюда не нужно."}
+BOT_COMMANDS[SERVICE_ID] = []
+
+
+def login_alert(uid, sid, info):
+    """Сообщение «Вход с нового устройства» с кнопкой «Это не я» (завершает тот сеанс)"""
+    en = (lang_of(uid) or "ru") != "ru"
+    when = datetime.datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    device = " · ".join(x for x in (info.get("device"), info.get("system"), info.get("app")) if x)
+    if en:
+        text = ("New login to your account\n\nDevice: %s\nIP: %s\nTime: %s\n\n"
+                "If this wasn't you, tap «Not me» — that session will be ended immediately. "
+                "Then turn on two-step verification in Settings → Privacy." % (device or "—", info.get("ip") or "—", when))
+        buttons = [[{"text": "Not me — end session", "callback_data": "kill:" + sid}], [{"text": "It's me", "callback_data": "ok"}]]
+    else:
+        text = ("Вход в ваш аккаунт с нового устройства\n\nУстройство: %s\nIP: %s\nВремя: %s\n\n"
+                "Если это были не вы, нажмите «Это не я» — тот сеанс сразу завершится. "
+                "Затем включите облачный пароль в «Настройки → Конфиденциальность»." % (device or "—", info.get("ip") or "—", when))
+        buttons = [[{"text": "Это не я — завершить сеанс", "callback_data": "kill:" + sid}], [{"text": "Это я", "callback_data": "ok"}]]
+    mark_bot_started(SERVICE_ID, uid)
+    row = deliver_dm(SERVICE_ID, uid, text, [], [], None)
+    set_inline_markup(row["id"], SERVICE_ID, buttons)
+
+
+def service_callback(uid, m, data):
+    """Кнопки в сообщениях «Orbita» обрабатывает сам сервер"""
+    en = (lang_of(uid) or "ru") != "ru"
+    if data.startswith("kill:"):
+        sid = data[5:]
+        gone = q1("SELECT 1 FROM sessions WHERE id = ? AND user_id = ?", (sid, uid)) is not None
+        run("DELETE FROM sessions WHERE id = ? AND user_id = ?", (sid, uid))
+        set_inline_markup(m["id"], SERVICE_ID, None)
+        bot_user_wake(uid)
+        if gone:
+            return {"text": "Session ended. Change your password and turn on two-step verification." if en else
+                    "Сеанс завершён. Смените пароль и включите облачный пароль.", "show_alert": True}
+        return {"text": "This session has already ended." if en else "Этот сеанс уже завершён.", "show_alert": False}
+    set_inline_markup(m["id"], SERVICE_ID, None)
+    bot_user_wake(uid)
+    return {"text": "OK", "show_alert": False}
+
 
 def ensure_system_bot(bot_id, username, display_name):
     if q1("SELECT 1 FROM users WHERE id = ?", (bot_id,)):
@@ -4637,6 +4686,7 @@ def ensure_system_bot(bot_id, username, display_name):
 
 
 ensure_system_bot(BOTGOD_ID, BOTGOD_NAME, "BotGod")
+ensure_system_bot(SERVICE_ID, "orbita", "Orbita")
 
 
 def bot_row(uid):
@@ -4939,13 +4989,15 @@ def bot_callback(req, me, mid):
     m = q1("SELECT * FROM messages WHERE id = ? AND recipient = ? AND del_recipient = 0", (mid, uid))
     if not m:
         raise ApiError(404, "not_found")
-    bot = bot_row(m["sender"])
-    if not bot:
-        raise ApiError(400, "not_a_bot")
     data = str(req.body_json().get("data", ""))
     allowed = {b.get("callback_data") for row in (markup_of(m) or []) for b in row}
     if not data or data not in allowed:
         raise ApiError(400, "bad_callback_data")
+    if m["sender"] == SERVICE_ID:
+        return req.send_json(200, {"answered": True, **service_callback(uid, m, data)})
+    bot = bot_row(m["sender"])
+    if not bot:
+        raise ApiError(400, "not_a_bot")
     qid = uuid.uuid4().hex
     SHARED.cache_set("cbqb:" + qid, json.dumps({"bot": bot["id"], "user": uid}), 600)
     brief = user_brief(uid)

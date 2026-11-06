@@ -97,6 +97,13 @@ struct RootView: View {
         .onOpenURL { router.handle($0) }
         // ссылки внутри текста (посты, чаты): свои открываем внутри приложения, остальные — как обычно
         .environment(\.openURL, OpenURLAction { url in
+            // ссылка, текст которой не совпадает с адресом, — сначала окно с настоящим адресом
+            if let hidden = HiddenLink.parse(url) {
+                HiddenLink.confirm(hidden.url, shown: hidden.shown) { real in
+                    if DeepLink(url: real) != nil { router.handle(real) } else { UIApplication.shared.open(real) }
+                }
+                return .handled
+            }
             if DeepLink(url: url) != nil { router.handle(url); return .handled }
             // чужие ссылки — только http(s)/mailto/tel/sms: shortcuts://, file:// и прочие схемы касанием не запустить
             return SafeLink.isAllowed(url) ? .systemAction : .discarded

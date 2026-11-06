@@ -73,3 +73,63 @@ enum SafeLink {
         return url
     }
 }
+
+/// Скрытая ссылка: текст «sberbank.ru», а ведёт на «sberbank-login.xyz». Такие ссылки открываются только после окна
+/// с настоящим адресом (как в Telegram), а если в тексте написан другой сайт — с предупреждением о подмене.
+enum HiddenLink {
+    static let scheme = "orbita-hidden"
+
+    /// Ссылка, текст которой и есть её адрес, остаётся как есть; остальные — через подтверждение
+    static func wrap(_ url: URL, shown: String) -> URL {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return url }
+        if normalized(shown) == normalized(url.absoluteString) { return url }
+        var c = URLComponents()
+        c.scheme = Self.scheme
+        c.host = "open"
+        c.queryItems = [URLQueryItem(name: "u", value: url.absoluteString),
+                        URLQueryItem(name: "t", value: String(shown.prefix(200)))]
+        return c.url ?? url
+    }
+
+    static func parse(_ url: URL) -> (url: URL, shown: String)? {
+        guard url.scheme == scheme,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let raw = items.first(where: { $0.name == "u" })?.value, let real = SafeLink.url(raw) else { return nil }
+        return (real, items.first { $0.name == "t" }?.value ?? "")
+    }
+
+    /// В тексте ссылки написан один сайт, а ведёт она на другой — явная подмена
+    static func spoofed(shown: String, real: URL) -> Bool {
+        guard let realHost = real.host?.lowercased() else { return false }
+        let text = SafeFileName.display(shown).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidate = text.contains("://") ? text : "https://" + text
+        guard text.contains("."), !text.contains(" "), let shownHost = URL(string: candidate)?.host?.lowercased() else { return false }
+        let a = shownHost.hasPrefix("www.") ? String(shownHost.dropFirst(4)) : shownHost
+        let b = realHost.hasPrefix("www.") ? String(realHost.dropFirst(4)) : realHost
+        return a != b && !b.hasSuffix("." + a)
+    }
+
+    /// Показать окно «Открыть ссылку?» и открыть после подтверждения
+    @MainActor
+    static func confirm(_ url: URL, shown: String, open: @escaping (URL) -> Void) {
+        let lang = AppLanguage(rawValue: UserDefaults.standard.string(forKey: "lang") ?? "") ?? .ru
+        let s = Strings(lang: lang)
+        let address = url.absoluteString.count > 300 ? String(url.absoluteString.prefix(300)) + "…" : url.absoluteString
+        let warn = spoofed(shown: shown, real: url)
+        let host = url.host ?? address
+        let message = warn
+            ? s.t("⚠️ Текст ссылки — «\(shown)», но она ведёт на другой сайт: \(host).\n\nТак часто маскируют мошеннические страницы.\n\n\(address)",
+                  "⚠️ The link says «\(shown)», but it leads to another site: \(host).\n\nThis is a common phishing trick.\n\n\(address)")
+            : address
+        AppAlert.confirm(warn ? s.t("Подозрительная ссылка", "Suspicious link") : s.t("Открыть ссылку?", "Open this link?"),
+                         message, ok: s.t("Открыть", "Open"), cancel: s.t("Отмена", "Cancel")) { open(url) }
+    }
+
+    private static func normalized(_ s: String) -> String {
+        var v = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for p in ["https://", "http://"] where v.hasPrefix(p) { v.removeFirst(p.count) }
+        if v.hasPrefix("www.") { v.removeFirst(4) }
+        while v.hasSuffix("/") { v.removeLast() }
+        return v
+    }
+}

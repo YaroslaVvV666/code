@@ -13,8 +13,9 @@ enum RichTextCodec {
     static func baseFont(_ size: CGFloat) -> UIFont { UIFont.systemFont(ofSize: size) }
 
     /// Из текста и сущностей — в атрибутированную строку для показа
+    /// display: показ (не редактор) — ссылка, текст которой не совпадает с адресом, открывается только после подтверждения
     static func attributed(text: String, entities: [TextEntity], size: CGFloat,
-                           color: UIColor, linkColor: UIColor) -> NSAttributedString {
+                           color: UIColor, linkColor: UIColor, display: Bool = false) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 3
         let result = NSMutableAttributedString(string: text, attributes: [
@@ -46,7 +47,9 @@ enum RichTextCodec {
                     ], range: r)
                 }
             case "link":
-                if let raw = e.url, let url = URL(string: raw) {
+                if let raw = e.url, let real = URL(string: raw) {
+                    let shown = (text as NSString).substring(with: range)
+                    let url = display ? HiddenLink.wrap(real, shown: shown) : real
                     result.addAttributes([.link: url, .foregroundColor: linkColor,
                                           .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
                 }
@@ -257,7 +260,7 @@ struct FormattedText: View {
                 let segment = item.element
                 let label = RichLabel(
                     attributed: RichTextCodec.attributed(text: segment.text, entities: segment.entities, size: size,
-                                                         color: textColor, linkColor: linkTint),
+                                                         color: textColor, linkColor: linkTint, display: true),
                     linkColor: linkTint)
                 if segment.isQuote {
                     label
@@ -296,7 +299,7 @@ struct RichInlineText: View {
                 let segment = item.element
                 let isLast = item.offset == segments.count - 1
                 let base = RichTextCodec.attributed(text: segment.text + (isLast ? filler : ""), entities: segment.entities,
-                                                    size: size, color: UIColor(color), linkColor: UIColor(linkColor))
+                                                    size: size, color: UIColor(color), linkColor: UIColor(linkColor), display: true)
                 let detected = detect ? ChatEntityDetector.annotate(base) : base
                 let ns = commandLinks ? BotCommandLinks.annotate(detected, linkColor: UIColor(linkColor)) : detected
                 let attributed = (try? AttributedString(ns, including: \.uiKit)) ?? AttributedString(segment.text)
