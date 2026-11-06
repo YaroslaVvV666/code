@@ -1393,6 +1393,8 @@ struct ChatScreen: View {
                         } else if model.peer.isGroup {
                             Text("\(model.group?.count ?? model.peer.memberCount) \(s.memberWord(channel: model.peer.isChannel))")
                                 .foregroundStyle(theme.textSecondary)
+                        } else if let bot = model.bot {
+                            Text(botUsersText(bot.users)).foregroundStyle(theme.textSecondary)
                         } else {
                             // «в сети» или «был(а) …» — как разрешил человек в приватности
                             Text(s.lastSeenText(model.lastSeen)).foregroundStyle(theme.textSecondary)
@@ -1443,7 +1445,20 @@ struct ChatScreen: View {
     /// Что сейчас написано под ником — от этого зависит ширина островка
     private var headerStatusKey: String {
         if let action = model.typing { return "typing:\(action)" }
+        if let bot = model.bot { return botUsersText(bot.users) }
         return s.lastSeenText(model.lastSeen)
+    }
+
+    /// «2 687 862 пользователя» / «бот»
+    private func botUsersText(_ n: Int) -> String {
+        guard n > 0 else { return s.t("бот", "bot") }
+        let num = n.formatted(.number.grouping(.automatic))
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let w = (m100 >= 11 && m100 <= 14) ? "пользователей" : (m10 == 1 ? "пользователь" : (m10 >= 2 && m10 <= 4 ? "пользователя" : "пользователей"))
+            return "\(num) \(w)"
+        }
+        return "\(num) user\(n == 1 ? "" : "s")"
     }
 
     // MARK: Запланированные сообщения
@@ -1662,7 +1677,13 @@ struct ChatScreen: View {
                                 topKey = all[max(0, startIdx - 40)].id
                             }
                     }
-                    if list.isEmpty && model.loaded {
+                    // бот: в самом начале переписки — баннер и «Что умеет этот бот?» (видно всегда, если долистать до верха)
+                    if startIdx == 0, let bot = model.bot, bot.hasIntro {
+                        BotIntroCard(info: bot)
+                            .padding(.top, list.isEmpty ? max(24, viewH * 0.16) : 10)
+                            .padding(.bottom, 14)
+                            .transition(.opacity)
+                    } else if list.isEmpty && model.loaded {
                         Text(s.chatStart)
                             .font(.system(size: 15)).foregroundStyle(theme.textTertiary)
                             .padding(.top, 60)

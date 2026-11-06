@@ -388,6 +388,7 @@ struct ChatThread {
     var isPreview = false           // открытый канал/группа просматривается без вступления
     var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
     var botCommands: [BotCommand] = []  // переписка с ботом: его команды (меню «/»)
+    var bot: BotInfo? = nil             // переписка с ботом: приветствие, «Старт», пользователи
 }
 
 struct Sticker: Identifiable, Equatable, Hashable {
@@ -973,6 +974,7 @@ private struct ThreadDTO: Decodable {
     let firstUnread: String?
     let ttl: Int?
     let botCommands: [BotCommand]?
+    let bot: BotInfo?
     let `protected`: Bool?                  // личная переписка: запрещено копирование и пересылка
 }
 
@@ -1061,7 +1063,7 @@ struct RemoteMessengerRepository: MessengerRepository {
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
-                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? [])
+                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot)
     }
 
     func setChatProtected(peerID: String, on: Bool) async throws -> Bool {

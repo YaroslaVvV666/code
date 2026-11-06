@@ -30,6 +30,20 @@ struct BotCommand: Equatable, Hashable, Decodable {
     }
 }
 
+/// Переписка с ботом: «Что умеет этот бот?» (описание + баннер), нажат ли «Старт», сколько пользователей
+struct BotInfo: Equatable, Decodable {
+    let description: String
+    let banner: String?
+    let bannerKind: String?
+    let commands: [BotCommand]
+    var started: Bool
+    let users: Int
+    let owner: Bool?
+
+    var bannerIsVideo: Bool { bannerKind == "video" }
+    var hasIntro: Bool { !description.isEmpty || banner != nil }
+}
+
 // MARK: Окружение: нажимаемые /команды в тексте сообщений
 
 private struct BotCommandLinksKey: EnvironmentKey { static let defaultValue = false }
@@ -148,5 +162,139 @@ struct BotCommandsPanel: View {
         .shadow(color: .black.opacity(0.25), radius: 14, y: -2)
         .padding(.horizontal, 10)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+// MARK: - Приветствие бота: баннер + «Что умеет этот бот?» (в самом начале переписки)
+
+struct BotIntroCard: View {
+    let info: BotInfo
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let banner = info.banner {
+                Group {
+                    if info.bannerIsVideo {
+                        BotBannerVideo(mediaID: banner)
+                    } else {
+                        RemoteImage(id: banner)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 210)
+                .clipped()
+            }
+            if !info.description.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(Strings(lang: lang).t("Что умеет этот бот?", "What can this bot do?"))
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(theme.text)
+                    // /команды в описании нажимаются — как в сообщениях бота
+                    RichInlineText(text: info.description, entities: [], size: 16, color: theme.text,
+                                   linkColor: theme.accentColor, detect: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .background(theme.dark ? Color(white: 0.1).opacity(0.92) : Color.white.opacity(0.95))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+        .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.08), radius: 14, y: 4)
+        .frame(maxWidth: 440)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Видео-баннер: без звука, по кругу, только пока на экране
+struct BotBannerVideo: View {
+    let mediaID: String
+    @StateObject private var box = LoopPlayerBox()
+    @State private var onScreen = false
+
+    var body: some View {
+        ZStack {
+            Color.black
+            PlayerLayerView(player: box.player, gravity: .resizeAspectFill)
+                .allowsHitTesting(false)
+        }
+        .background(GeometryReader { g in
+            let f = g.frame(in: .global)
+            let on = f.height > 0 && f.maxY > -40 && f.minY < UIScreen.main.bounds.height + 40
+            Color.clear
+                .onAppear { setOnScreen(on) }
+                .onChange(of: on) { _, now in setOnScreen(now) }
+        })
+        .onDisappear { setOnScreen(false) }
+    }
+
+    private func setOnScreen(_ now: Bool) {
+        guard now != onScreen else { return }
+        onScreen = now
+        if now { box.start(mediaID) } else { box.stop() }
+    }
+}
+
+// MARK: - «Старт» вместо поля ввода, пока бота не запускали
+
+struct BotStartBar: View {
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var hint = false
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            // подсказка над кнопкой, как в Telegram
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.down.2").font(.system(size: 15, weight: .semibold))
+                    .offset(y: hint ? 2 : -2)
+                Text(s.t("Чтобы использовать бота, нажмите здесь", "Tap here to use this bot"))
+                    .font(.system(size: 16, weight: .medium))
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 16).frame(height: 46)
+            .background(theme.dark ? Color(white: 0.12) : Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(alignment: .bottom) {
+                BotHintTail().fill(theme.dark ? Color(white: 0.12) : Color.white)
+                    .frame(width: 16, height: 8).offset(y: 8)
+            }
+            .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { hint = true }
+            }
+
+            Button {
+                Haptics.impact(.medium)
+                action()
+            } label: {
+                Text(s.t("Старт", "Start"))
+                    .font(.system(size: 19, weight: .bold)).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 56)
+                    .background(theme.accent, in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
+                    .shadow(color: theme.accentColor.opacity(0.45), radius: 12, y: 4)
+            }
+            .buttonStyle(PressStyle())
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8).padding(.bottom, 12)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+private struct BotHintTail: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.midX, y: r.maxY))
+        p.closeSubpath()
+        return p
     }
 }

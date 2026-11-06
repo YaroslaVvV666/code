@@ -4472,9 +4472,533 @@ BOT_HELP = ("Привет! Я помогу сделать свои стикер�
 
 @route("GET", r"/v1/bots/([A-Za-z0-9_\-]+)/commands")
 def bot_commands(req, me, bot_id):
-    if bot_id not in BOT_COMMANDS:
+    cmds = bot_commands_of(bot_id)
+    if cmds is None:
         raise ApiError(404, "not_found")
-    req.send_json(200, {"commands": BOT_COMMANDS[bot_id]})
+    req.send_json(200, {"commands": cmds})
+
+
+# ---------- Боты пользователей и BotGod (как BotFather в Telegram) ----------
+# Бот — обычный пользователь (своя строка в users: имя, @username, аватарка, «о себе»), плюс строка в bots:
+# владелец, токен, «Что умеет этот бот?» (описание + баннер), команды, вебхук. Владелец управляет ботом
+# через @botgod, а код бота работает через Bot API: /bot<токен>/getMe, getUpdates, sendMessage, setMyCommands…
+
+BOTGOD_ID = "b0790d00-0000-4000-8000-00000000b070"
+BOTGOD_NAME = "botgod"
+MAX_USER_BOTS = 20
+BOT_DESCRIPTION_MAX = 512
+BOT_ABOUT_MAX = 120
+
+DB.execute("CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, owner TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, "
+           "token_enc BLOB, description_enc BLOB, banner TEXT, banner_kind TEXT, commands TEXT, webhook TEXT, "
+           "created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner)")
+DB.execute("CREATE TABLE IF NOT EXISTS bot_updates(id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, seq REAL NOT NULL, "
+           "payload TEXT NOT NULL, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_bot_updates ON bot_updates(bot_id, seq)")
+# кто нажал «Старт» (писал боту): счётчик «N пользователей» и право бота писать человеку первым
+DB.execute("CREATE TABLE IF NOT EXISTS bot_starts(bot_id TEXT NOT NULL, user_id TEXT NOT NULL, created_at REAL NOT NULL, "
+           "PRIMARY KEY(bot_id, user_id))")
+
+# Встроенные боты: описание для приветственного экрана «Что умеет этот бот?»
+BUILTIN_BOTS = {
+    STICKER_BOT_ID: {
+        "description": "Создаю ваши собственные стикеры — обычные и анимированные.\n\n"
+                       "• /newpack — новый набор\n• /addsticker — добавить стикер\n• /mypacks — ваши наборы\n\n"
+                       "Пришлите картинку (лучше PNG с прозрачным фоном) или короткое видео — и оно станет стикером.",
+    },
+    BOTGOD_ID: {
+        "description": "Один бот, чтобы править всеми. Создавайте своих ботов и управляйте ими.\n\n"
+                       "• /newbot — создать бота\n• /mybots — ваши боты\n• /setdescription — «Что умеет этот бот?»\n"
+                       "• /setdescriptionpic — баннер\n• /setuserpic — аватарка\n• /setcommands — команды",
+    },
+}
+
+BOTGOD_COMMANDS = [
+    {"command": "newbot", "description": "Создать нового бота"},
+    {"command": "mybots", "description": "Мои боты"},
+    {"command": "setname", "description": "Изменить имя бота"},
+    {"command": "setdescription", "description": "«Что умеет этот бот?»"},
+    {"command": "setdescriptionpic", "description": "Баннер приветствия"},
+    {"command": "setabouttext", "description": "Текст «о себе»"},
+    {"command": "setuserpic", "description": "Аватарка бота"},
+    {"command": "setcommands", "description": "Список команд бота"},
+    {"command": "token", "description": "Показать токен"},
+    {"command": "revoke", "description": "Выпустить новый токен"},
+    {"command": "deletebot", "description": "Удалить бота"},
+    {"command": "cancel", "description": "Отменить действие"},
+    {"command": "help", "description": "Помощь"},
+]
+BOT_COMMANDS[BOTGOD_ID] = BOTGOD_COMMANDS
+
+
+def ensure_system_bot(bot_id, username, display_name):
+    if q1("SELECT 1 FROM users WHERE id = ?", (bot_id,)):
+        return
+    idx = KR.blind_index(username, "username")
+    taken = q1("SELECT 1 FROM users WHERE username_idx = ?", (idx,))
+    run("INSERT INTO users(id, token_hash, name_enc, username_idx, username_enc, created_at) VALUES (?,?,?,?,?,?)",
+        (bot_id, secrets.token_hex(32), enc(bot_id, "profile", COL["name"], bot_id, display_name),
+         None if taken else idx, None if taken else enc(bot_id, "profile", COL["username"], bot_id, username), time.time()))
+    if not taken:
+        reindex_username(bot_id, username)
+
+
+ensure_system_bot(BOTGOD_ID, BOTGOD_NAME, "BotGod")
+
+
+def bot_row(uid):
+    return q1("SELECT * FROM bots WHERE id = ?", (uid,))
+
+
+def is_bot_user(uid):
+    return uid in BUILTIN_BOTS or bot_row(uid) is not None
+
+
+def bot_commands_of(bot_id):
+    """Команды бота (None — это не бот)"""
+    if bot_id in BOT_COMMANDS:
+        return BOT_COMMANDS[bot_id]
+    b = bot_row(bot_id)
+    if not b:
+        return None
+    try:
+        return json.loads(b["commands"] or "[]")
+    except ValueError:
+        return []
+
+
+def bot_thread_fields(peer, uid):
+    info = bot_info_json(peer, uid)
+    return {"bot": info, "bot_commands": info["commands"]} if info else {}
+
+
+def bot_started(bot_id, uid):
+    return q1("SELECT 1 FROM bot_starts WHERE bot_id = ? AND user_id = ?", (bot_id, uid)) is not None
+
+
+def bot_info_json(bot_id, viewer):
+    """Для переписки с ботом: «Что умеет этот бот?», баннер, команды, нажат ли «Старт», сколько пользователей"""
+    b = bot_row(bot_id)
+    if b:
+        desc = dec(bot_id, "profile", "bots.description", bot_id, b["description_enc"]) if b["description_enc"] else ""
+        banner, kind, owner = b["banner"], b["banner_kind"], b["owner"]
+    elif bot_id in BUILTIN_BOTS:
+        desc, banner, kind, owner = BUILTIN_BOTS[bot_id]["description"], None, None, None
+    else:
+        return None
+    # старые переписки (до появления «Старт») тоже считаются начатыми
+    started = bot_started(bot_id, viewer) or q1(
+        "SELECT 1 FROM messages WHERE sender = ? AND recipient = ? LIMIT 1", (viewer, bot_id)) is not None
+    users = q1("SELECT COUNT(*) c FROM bot_starts WHERE bot_id = ?", (bot_id,))["c"]
+    return {"description": desc or "", "banner": banner, "banner_kind": kind or "photo",
+            "commands": bot_commands_of(bot_id) or [], "started": started, "users": users,
+            "owner": owner == viewer}
+
+
+def mark_bot_started(bot_id, uid):
+    run("INSERT OR IGNORE INTO bot_starts(bot_id, user_id, created_at) VALUES (?,?,?)", (bot_id, uid, time.time()))
+
+
+# --- обновления для кода бота (getUpdates / вебхук) ---
+
+_bot_seq_lock = threading.Lock()
+_bot_seq_last = [0.0]
+
+
+def next_bot_seq():
+    with _bot_seq_lock:
+        now = float(int(time.time() * 1_000_000))
+        if now <= _bot_seq_last[0]:
+            now = _bot_seq_last[0] + 1
+        _bot_seq_last[0] = now
+        return now
+
+
+def bot_message_update(row, sender_id, text, atts):
+    brief = user_brief(sender_id)
+    msg = {"message_id": row["id"], "date": int(row["created_at"]),
+           "from": {"id": sender_id, "is_bot": False, "first_name": brief["name"], "username": brief.get("username")},
+           "chat": {"id": sender_id, "type": "private", "first_name": brief["name"], "username": brief.get("username")}}
+    if text:
+        msg["text"] = text
+        if text.startswith("/"):
+            cmd = text.split()[0]
+            msg["entities"] = [{"type": "bot_command", "offset": 0, "length": len(cmd)}]
+    photos = [a for a in atts if a.get("type") == "photo"]
+    if photos:
+        msg["photo"] = [{"file_id": p["media_id"], "width": p.get("width", 0), "height": p.get("height", 0)} for p in photos]
+    others = [a for a in atts if a.get("type") != "photo"]
+    if others:
+        msg["attachments"] = others
+    return {"message": msg}
+
+
+def bot_push_update(bot, update):
+    seq = next_bot_seq()
+    update = dict(update, update_id=int(seq))
+    run("INSERT INTO bot_updates(id, bot_id, seq, payload, created_at) VALUES (?,?,?,?,?)",
+        (uuid.uuid4().hex, bot["id"], seq, json.dumps(update, ensure_ascii=False), time.time()))
+    # копить вечно не даём: держим последние 1000 необработанных
+    old = q1("SELECT seq FROM bot_updates WHERE bot_id = ? ORDER BY seq DESC LIMIT 1 OFFSET 1000", (bot["id"],))
+    if old:
+        run("DELETE FROM bot_updates WHERE bot_id = ? AND seq <= ?", (bot["id"], old["seq"]))
+    SHARED.events_publish("bot:" + bot["id"], "update")
+    if bot["webhook"]:
+        threading.Thread(target=bot_deliver_webhook, args=(bot["id"], bot["webhook"], update, seq), daemon=True).start()
+
+
+def bot_deliver_webhook(bot_id, url, update, seq):
+    """Вебхук: POST JSON на адрес владельца; дошло (2xx) — обновление из очереди убираем"""
+    try:
+        reqw = urllib.request.Request(url, data=json.dumps(update, ensure_ascii=False).encode(),
+                                      headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(reqw, timeout=8) as r:
+            if 200 <= r.status < 300:
+                run("DELETE FROM bot_updates WHERE bot_id = ? AND seq = ?", (bot_id, seq))
+    except Exception as e:
+        print("bot webhook: %s" % e.__class__.__name__)
+
+
+def bot_incoming(bot, uid, row, text, atts):
+    """Человек написал пользовательскому боту — это обновление для кода бота"""
+    bot_push_update(bot, bot_message_update(row, uid, text, atts))
+
+
+# --- Bot API: /bot<токен>/<метод> (как в Telegram) ---
+
+def bot_by_token(token):
+    if not token or len(token) > 200:
+        return None
+    return q1("SELECT * FROM bots WHERE token_hash = ?", (token_hash(token),))
+
+
+def new_bot_token(bot_id):
+    return "%s:%s" % (bot_id.replace("-", "")[:12], secrets.token_urlsafe(30))
+
+
+def bot_params(req):
+    p = dict(req.query())
+    if req.command == "POST":
+        try:
+            body = req.body_json()
+            if isinstance(body, dict):
+                p.update(body)
+        except ApiError:
+            pass
+    return p
+
+
+def bot_api_ok(req, result):
+    req.send_json(200, {"ok": True, "result": result})
+
+
+def bot_api_err(req, code, text):
+    req.send_json(code, {"ok": False, "error_code": code, "description": text})
+
+
+def bot_api(req, me, token, method):
+    bot = bot_by_token(token)
+    if not bot:
+        return bot_api_err(req, 401, "Unauthorized")
+    rate_limit("botapi:" + bot["id"], 1200, 60)
+    p = bot_params(req)
+    m = method.lower()
+    bid = bot["id"]
+    if m == "getme":
+        u = q1("SELECT * FROM users WHERE id = ?", (bid,))
+        return bot_api_ok(req, {"id": bid, "is_bot": True, "first_name": names(u)[2] if u else "",
+                                "username": dec_profile(u, "username_enc", COL["username"]) if u else None})
+    if m == "getupdates":
+        try:
+            offset = float(p.get("offset") or 0)
+            limit = max(1, min(100, int(p.get("limit") or 100)))
+            timeout = max(0, min(50, int(p.get("timeout") or 0)))
+        except (TypeError, ValueError):
+            return bot_api_err(req, 400, "Bad Request: wrong parameters")
+        if offset:
+            run("DELETE FROM bot_updates WHERE bot_id = ? AND seq < ?", (bid, offset))   # подтверждённые
+        rows = q("SELECT * FROM bot_updates WHERE bot_id = ? ORDER BY seq LIMIT ?", (bid, limit))
+        if not rows and timeout:
+            SHARED.events_wait("bot:" + bid, timeout)
+            rows = q("SELECT * FROM bot_updates WHERE bot_id = ? ORDER BY seq LIMIT ?", (bid, limit))
+        return bot_api_ok(req, [json.loads(r["payload"]) for r in rows])
+    if m == "sendmessage":
+        chat = str(p.get("chat_id") or "")
+        text = str(p.get("text") or "")[:4000]
+        if not chat or not text.strip():
+            return bot_api_err(req, 400, "Bad Request: chat_id and text are required")
+        if not bot_started(bid, chat):
+            return bot_api_err(req, 403, "Forbidden: bot can't initiate conversation with a user")
+        if either_blocked(bid, chat):
+            return bot_api_err(req, 403, "Forbidden: bot was blocked by the user")
+        row = deliver_dm(bid, chat, text, [], [], str(p.get("reply_to_message_id") or "") or None)
+        return bot_api_ok(req, {"message_id": row["id"], "date": int(row["created_at"]),
+                                "chat": {"id": chat, "type": "private"}, "text": text})
+    if m == "setmycommands":
+        cmds = p.get("commands")
+        if isinstance(cmds, str):
+            try:
+                cmds = json.loads(cmds)
+            except ValueError:
+                cmds = None
+        clean = clean_bot_commands(cmds if isinstance(cmds, list) else [])
+        run("UPDATE bots SET commands = ? WHERE id = ?", (json.dumps(clean, ensure_ascii=False), bid))
+        return bot_api_ok(req, True)
+    if m == "getmycommands":
+        return bot_api_ok(req, bot_commands_of(bid) or [])
+    if m == "setwebhook":
+        url = str(p.get("url") or "").strip()
+        if url and not re.match(r"^https://", url, re.I):
+            return bot_api_err(req, 400, "Bad Request: webhook must be https")
+        run("UPDATE bots SET webhook = ? WHERE id = ?", (url or None, bid))
+        return bot_api_ok(req, True)
+    if m == "deletewebhook":
+        run("UPDATE bots SET webhook = NULL WHERE id = ?", (bid,))
+        return bot_api_ok(req, True)
+    return bot_api_err(req, 404, "Not Found: method not found")
+
+
+route("GET", r"/bot([A-Za-z0-9_:\-]+)/(\w+)", auth=False)(bot_api)
+route("POST", r"/bot([A-Za-z0-9_:\-]+)/(\w+)", auth=False)(bot_api)
+
+
+def clean_bot_commands(items):
+    out = []
+    for c in items[:100]:
+        if not isinstance(c, dict):
+            continue
+        cmd = str(c.get("command") or "").strip().lstrip("/").lower()
+        desc = " ".join(str(c.get("description") or "").split())[:256]
+        if re.match(r"^[a-z0-9_]{1,32}$", cmd) and desc:
+            out.append({"command": cmd, "description": desc})
+    return out
+
+
+# --- BotGod: диалог владельца ---
+
+BOTGOD_STATE = {}
+
+BOTGOD_HELP = ("Я — BotGod. Помогу создать своих ботов и управлять ими.\n\n"
+               "/newbot — создать нового бота\n"
+               "/mybots — ваши боты\n\n"
+               "Настройка бота:\n"
+               "/setname — имя\n"
+               "/setdescription — «Что умеет этот бот?» (видно при первом входе в чат)\n"
+               "/setdescriptionpic — баннер над описанием (картинка или видео)\n"
+               "/setabouttext — текст «о себе» в профиле\n"
+               "/setuserpic — аватарка\n"
+               "/setcommands — команды (меню «/»)\n\n"
+               "Токен:\n/token — показать\n/revoke — выпустить новый\n\n"
+               "/deletebot — удалить бота\n/cancel — отменить действие\n\n"
+               "Код бота работает через Bot API: https://<ваш сервер>/bot<токен>/getUpdates, sendMessage, setMyCommands…")
+
+
+def botgod_say(uid, text):
+    deliver_dm(BOTGOD_ID, uid, text, [], [], None, silent=True)
+
+
+def owner_bots(uid):
+    rows = q("SELECT * FROM bots WHERE owner = ? ORDER BY created_at", (uid,))
+    out = []
+    for b in rows:
+        u = q1("SELECT * FROM users WHERE id = ?", (b["id"],))
+        if u:
+            out.append((b, names(u)[2], dec_profile(u, "username_enc", COL["username"]) or ""))
+    return out
+
+
+def botgod_pick_prompt(uid, action, title):
+    bots = owner_bots(uid)
+    if not bots:
+        return botgod_say(uid, "У вас пока нет ботов. Создайте первого: /newbot")
+    BOTGOD_STATE[uid] = {"step": "pick", "action": action, "choices": [b[0]["id"] for b in bots]}
+    lines = "\n".join("%d. %s — @%s" % (i + 1, name, un) for i, (b, name, un) in enumerate(bots))
+    return botgod_say(uid, title + " Пришлите номер или @username:\n" + lines)
+
+
+def botgod_pick(uid, st, text):
+    choices = st.get("choices") or []
+    t = text.strip().lstrip("@").lower()
+    if t.isdigit() and 1 <= int(t) <= len(choices):
+        return choices[int(t) - 1]
+    for bid in choices:
+        u = q1("SELECT * FROM users WHERE id = ?", (bid,))
+        if u and (dec_profile(u, "username_enc", COL["username"]) or "").lower() == t:
+            return bid
+    return None
+
+
+def bot_username(bid):
+    u = q1("SELECT * FROM users WHERE id = ?", (bid,))
+    return dec_profile(u, "username_enc", COL["username"]) if u else ""
+
+
+ACTION_PROMPTS = {
+    "setname": "Пришлите новое имя бота.",
+    "setdescription": "Пришлите текст для «Что умеет этот бот?» — его видят все, кто открывает чат с ботом впервые "
+                      "(до %d символов). /empty — убрать." % BOT_DESCRIPTION_MAX,
+    "setdescriptionpic": "Пришлите картинку или короткое видео для баннера над описанием. /empty — убрать баннер.",
+    "setabouttext": "Пришлите короткий текст «о себе» для профиля бота (до %d символов). /empty — убрать." % BOT_ABOUT_MAX,
+    "setuserpic": "Пришлите фото для аватарки бота.",
+    "setcommands": "Пришлите список команд, по одной на строку:\n\nstart - Начать\nhelp - Помощь\n\n/empty — убрать все команды.",
+    "deletebot": "Точно удалить бота? Чат с ним пропадёт у всех. Пришлите @username бота ещё раз, чтобы подтвердить.",
+}
+
+
+def botgod_handle(uid, text, atts):
+    text = (text or "").strip()
+    cmd = text.split()[0].lower() if text.startswith("/") else ""
+    st = BOTGOD_STATE.get(uid, {})
+    step = st.get("step")
+
+    if cmd in ("/start", "/help"):
+        BOTGOD_STATE.pop(uid, None)
+        return botgod_say(uid, BOTGOD_HELP)
+    if cmd == "/cancel":
+        BOTGOD_STATE.pop(uid, None)
+        return botgod_say(uid, "Отменено. /help — все команды.")
+    if cmd == "/newbot":
+        if q1("SELECT COUNT(*) c FROM bots WHERE owner = ?", (uid,))["c"] >= MAX_USER_BOTS:
+            return botgod_say(uid, "У вас уже %d ботов — это максимум. Удалите ненужного: /deletebot" % MAX_USER_BOTS)
+        BOTGOD_STATE[uid] = {"step": "newbot_name"}
+        return botgod_say(uid, "Отлично, новый бот. Как его назовём? Пришлите имя — его увидят в чатах.")
+    if cmd == "/mybots":
+        BOTGOD_STATE.pop(uid, None)
+        bots = owner_bots(uid)
+        if not bots:
+            return botgod_say(uid, "У вас пока нет ботов. Создайте первого: /newbot")
+        lines = "\n".join("• %s — @%s" % (name, un) for b, name, un in bots)
+        return botgod_say(uid, "Ваши боты:\n" + lines + "\n\nНастройка: /setdescription, /setdescriptionpic, /setuserpic, /setcommands")
+    if cmd in ("/setname", "/setdescription", "/setdescriptionpic", "/setabouttext", "/setuserpic", "/setcommands",
+               "/token", "/revoke", "/deletebot"):
+        return botgod_pick_prompt(uid, cmd[1:], "Какого бота настроить?" if cmd != "/deletebot" else "Какого бота удалить?")
+    if cmd and cmd != "/empty":
+        return botgod_say(uid, "Не знаю такой команды. /help — все команды.")
+
+    if step == "newbot_name":
+        name = " ".join(text.split())[:64]
+        if not name:
+            return botgod_say(uid, "Пришлите имя бота текстом.")
+        BOTGOD_STATE[uid] = {"step": "newbot_username", "name": name}
+        return botgod_say(uid, "Хорошо. Теперь выберите @username — он должен заканчиваться на «bot», "
+                               "например tetris_bot или TetrisBot. Латиница, цифры и _, от 5 символов.")
+    if step == "newbot_username":
+        un = text.lstrip("@").strip()
+        if not USERNAME_RE.match(un) or not un.lower().endswith("bot"):
+            return botgod_say(uid, "Не подходит: username должен заканчиваться на «bot» (латиница, цифры, _, 5–32 символа). "
+                                   "Попробуйте ещё раз.")
+        idx = KR.blind_index(un.lower(), "username")
+        if q1("SELECT 1 FROM users WHERE username_idx = ?", (idx,)):
+            return botgod_say(uid, "Этот username уже занят. Придумайте другой.")
+        bid = str(uuid.uuid4())
+        token = new_bot_token(bid)
+        now = time.time()
+        run("INSERT INTO users(id, token_hash, name_enc, username_idx, username_enc, created_at) VALUES (?,?,?,?,?,?)",
+            (bid, secrets.token_hex(32), enc(bid, "profile", COL["name"], bid, st["name"]), idx,
+             enc(bid, "profile", COL["username"], bid, un), now))
+        reindex_username(bid, un.lower())
+        run("INSERT INTO bots(id, owner, token_hash, token_enc, commands, created_at) VALUES (?,?,?,?,?,?)",
+            (bid, uid, token_hash(token), enc(uid, "profile", "bots.token", bid, token), "[]", now))
+        BOTGOD_STATE.pop(uid, None)
+        return botgod_say(uid, "Готово! Бот @%s создан. Найти его можно по username.\n\n"
+                               "Токен доступа к Bot API (храните в секрете — с ним можно управлять ботом):\n%s\n\n"
+                               "Дальше: /setdescription — «Что умеет этот бот?», /setdescriptionpic — баннер, "
+                               "/setuserpic — аватарка, /setcommands — команды." % (un, token))
+    if step == "pick":
+        bid = botgod_pick(uid, st, text)
+        if not bid:
+            return botgod_say(uid, "Не нашёл такого бота. Пришлите номер из списка или @username. /cancel — отмена.")
+        action = st["action"]
+        b = bot_row(bid)
+        if not b or b["owner"] != uid:
+            BOTGOD_STATE.pop(uid, None)
+            return botgod_say(uid, "Это не ваш бот.")
+        if action == "token":
+            BOTGOD_STATE.pop(uid, None)
+            token = dec(uid, "profile", "bots.token", bid, b["token_enc"]) if b["token_enc"] else None
+            return botgod_say(uid, "Токен @%s:\n%s" % (bot_username(bid), token or "не сохранён — выпустите новый: /revoke"))
+        if action == "revoke":
+            BOTGOD_STATE.pop(uid, None)
+            token = new_bot_token(bid)
+            run("UPDATE bots SET token_hash = ?, token_enc = ? WHERE id = ?",
+                (token_hash(token), enc(uid, "profile", "bots.token", bid, token), bid))
+            return botgod_say(uid, "Старый токен @%s больше не работает. Новый:\n%s" % (bot_username(bid), token))
+        BOTGOD_STATE[uid] = {"step": "edit", "action": action, "bot": bid}
+        return botgod_say(uid, "@%s. %s" % (bot_username(bid), ACTION_PROMPTS[action]))
+    if step == "edit":
+        bid, action = st["bot"], st["action"]
+        b = bot_row(bid)
+        if not b or b["owner"] != uid:
+            BOTGOD_STATE.pop(uid, None)
+            return botgod_say(uid, "Бот не найден.")
+        empty = cmd == "/empty"
+        if action == "setname":
+            name = " ".join(text.split())[:64]
+            if not name or empty:
+                return botgod_say(uid, "Пришлите имя текстом.")
+            run("UPDATE users SET name_enc = ? WHERE id = ?", (enc(bid, "profile", COL["name"], bid, name), bid))
+            msg = "Имя бота изменено: %s" % name
+        elif action == "setdescription":
+            desc = "" if empty else text[:BOT_DESCRIPTION_MAX]
+            if not desc and not empty:
+                return botgod_say(uid, "Пришлите текст описания.")
+            run("UPDATE bots SET description_enc = ? WHERE id = ?",
+                (enc(bid, "profile", "bots.description", bid, desc) if desc else None, bid))
+            msg = "Описание обновлено — его видно в начале чата с ботом." if desc else "Описание убрано."
+        elif action == "setabouttext":
+            about = "" if empty else text[:BOT_ABOUT_MAX]
+            run("UPDATE users SET bio_enc = ? WHERE id = ?", (enc(bid, "profile", COL["bio"], bid, about) if about else None, bid))
+            msg = "Текст «о себе» обновлён." if about else "Текст «о себе» убран."
+        elif action == "setdescriptionpic":
+            if empty:
+                run("UPDATE bots SET banner = NULL, banner_kind = NULL WHERE id = ?", (bid,))
+                msg = "Баннер убран."
+            else:
+                media = next((a for a in atts if a.get("type") in ("photo", "video") and a.get("media_id")), None)
+                if not media:
+                    return botgod_say(uid, "Пришлите картинку или видео. /empty — убрать баннер, /cancel — отмена.")
+                if media["type"] == "video" and (media.get("duration") or 0) > 30.5:
+                    return botgod_say(uid, "Видео длиннее 30 секунд — пришлите покороче.")
+                run("UPDATE bots SET banner = ?, banner_kind = ? WHERE id = ?", (media["media_id"], media["type"], bid))
+                msg = "Баннер обновлён — его видно над «Что умеет этот бот?»."
+        elif action == "setuserpic":
+            media = next((a for a in atts if a.get("type") == "photo" and a.get("media_id")), None)
+            if not media:
+                return botgod_say(uid, "Пришлите фото. /cancel — отмена.")
+            run("DELETE FROM avatars WHERE user_id = ?", (bid,))
+            run("INSERT INTO avatars(id, user_id, media_id, position, created_at) VALUES (?,?,?,?,?)",
+                (uuid.uuid4().hex, bid, media["media_id"], 0, time.time()))
+            sync_avatar(bid)
+            msg = "Аватарка бота обновлена."
+        elif action == "setcommands":
+            items = []
+            if not empty:
+                for line in text.splitlines():
+                    if "-" in line:
+                        c, d = line.split("-", 1)
+                        items.append({"command": c.strip(), "description": d.strip()})
+            clean = clean_bot_commands(items)
+            if not clean and not empty:
+                return botgod_say(uid, "Не понял список. Формат — по строке на команду:\nstart - Начать\nhelp - Помощь")
+            run("UPDATE bots SET commands = ? WHERE id = ?", (json.dumps(clean, ensure_ascii=False), bid))
+            msg = ("Команды обновлены: " + ", ".join("/" + c["command"] for c in clean)) if clean else "Команды убраны."
+        elif action == "deletebot":
+            if text.lstrip("@").lower() != (bot_username(bid) or "").lower():
+                return botgod_say(uid, "Username не совпал — бот не удалён. Пришлите @username ещё раз или /cancel.")
+            un = bot_username(bid)
+            run("DELETE FROM bot_updates WHERE bot_id = ?", (bid,))
+            run("DELETE FROM bot_starts WHERE bot_id = ?", (bid,))
+            run("DELETE FROM bots WHERE id = ?", (bid,))
+            run("DELETE FROM username_prefix WHERE user_id = ?", (bid,))
+            run("DELETE FROM users WHERE id = ?", (bid,))
+            msg = "Бот @%s удалён." % un
+        else:
+            msg = "Готово."
+        BOTGOD_STATE.pop(uid, None)
+        SHARED.ver_bump("uver:" + bid)
+        return botgod_say(uid, msg)
+    return botgod_say(uid, BOTGOD_HELP)
 
 
 def bot_say(uid, text, attachments=None):
@@ -5508,7 +6032,7 @@ def chat_messages(req, me, peer):
                         "typing": typing_action(peer, uid),
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
                         "ttl": dm_ttl(dm_key(uid, peer)),
-                        **({"bot_commands": BOT_COMMANDS[peer]} if peer in BOT_COMMANDS else {}),
+                        **bot_thread_fields(peer, uid),
                         "protected": dm_protected(dm_key(uid, peer)),
                         "can_write": not either_blocked(uid, peer)})
 
@@ -5824,7 +6348,16 @@ def send_message(req, me, peer):
             story = {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"]}
     row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")))
     if peer == STICKER_BOT_ID:
+        mark_bot_started(peer, uid)
         sticker_bot_handle(uid, text, attachments)              # бот @stickers отвечает сразу
+    elif peer == BOTGOD_ID:
+        mark_bot_started(peer, uid)
+        botgod_handle(uid, text, attachments)                   # BotGod — создание и настройка ботов
+    elif peer != uid:
+        b = bot_row(peer)
+        if b:
+            mark_bot_started(peer, uid)
+            bot_incoming(b, uid, row, text, attachments)        # пользовательский бот: обновление для его кода
     req.send_json(201, message_json(row, uid))
 
 

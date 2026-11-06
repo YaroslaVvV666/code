@@ -70,12 +70,15 @@ struct ChatInputBar: View {
             banner
             tray
                 .animation(.spring(response: 0.3, dampingFraction: 0.82), value: stickerSuggestions()?.map(\.id))
-            if model.isBot, model.canWrite, let list = visibleCommands {
+            if model.isBot, model.canWrite, !model.needsStart, let list = visibleCommands {
                 BotCommandsPanel(commands: list) { pickCommand($0) }
                     .padding(.bottom, 4)
             }
             if model.isPreview {
                 joinBar
+            } else if model.canWrite && model.needsStart {
+                // бот, которым ещё не пользовались: вместо поля ввода — «Старт» (как в Telegram)
+                BotStartBar { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { model.startBot() } }
             } else if model.canWrite {
                 inputRow
             } else if model.peer.isChannel {

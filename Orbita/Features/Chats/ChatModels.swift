@@ -262,7 +262,11 @@ final class ChatModel: ObservableObject {
     @Published private(set) var ttl = 0            // таймер исчезающих сообщений (секунды), 0 — выкл
     /// Переписка с ботом: его команды (меню «/» слева от скрепки, нажимаемые /команды в тексте)
     @Published private(set) var botCommands: [BotCommand] = []
-    var isBot: Bool { !botCommands.isEmpty }
+    /// Бот: «Что умеет этот бот?», нажат ли «Старт», сколько пользователей
+    @Published private(set) var bot: BotInfo?
+    var isBot: Bool { bot != nil || !botCommands.isEmpty }
+    /// «Старт» ещё не нажимали — вместо поля ввода большая кнопка «Старт»
+    var needsStart: Bool { bot.map { !$0.started } ?? false }
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
@@ -293,6 +297,7 @@ final class ChatModel: ObservableObject {
             isPreview = t.isPreview
             firstUnreadID = t.firstUnread
             botCommands = BotCommand.resolve(t.botCommands, peerID: peer.id)
+            bot = t.bot
             loaded = true
         }
         // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
@@ -340,6 +345,12 @@ final class ChatModel: ObservableObject {
             if ttl != thread.ttl { ttl = thread.ttl }
             let cmds = BotCommand.resolve(thread.botCommands, peerID: peerID)
             if botCommands != cmds { botCommands = cmds }
+            if bot != thread.bot {
+                // нажали «Старт», а сервер ещё не успел это учесть — кнопка не возвращается
+                var fresh = thread.bot
+                if bot?.started == true { fresh?.started = true }
+                bot = fresh
+            }
             if !loaded { firstUnreadID = thread.firstUnread }
             if !loaded { loaded = true }
             refreshedOnce = true
@@ -590,6 +601,12 @@ final class ChatModel: ObservableObject {
                                                         mime: sticker.animated ? "video/mp4" : nil, sticker: sticker.id,
                                                         stickerPack: sticker.packID)])
         }
+    }
+
+    /// «Старт»: кнопка сразу уступает место полю ввода, боту уходит /start
+    func startBot() {
+        bot?.started = true
+        sendCommand("/start")
     }
 
     /// Отправить боту команду («/newpack»): из меню «/» или нажатием на команду в тексте

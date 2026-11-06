@@ -164,3 +164,38 @@ HMAC по секрету), постоянных паролей на диске �
 - `NSLocationWhenInUseUsageDescription` — «Чтобы отправлять геопозицию в чат»;
 - для трансляции со свёрнутым приложением: Signing & Capabilities → Background Modes → **Location updates**
   (без этого трансляция идёт, только пока приложение открыто).
+
+## Боты (BotGod и Bot API)
+
+Свои боты создаются в чате с **@botgod** (как BotFather в Telegram): `/newbot` → имя → @username, оканчивающийся на `bot` →
+токен. Настройка: `/setdescription` («Что умеет этот бот?» — видно в начале чата), `/setdescriptionpic` (баннер — картинка
+или видео до 30 с), `/setuserpic` (аватарка), `/setabouttext` («о себе»), `/setcommands` (меню «/»), `/setname`, `/token`,
+`/revoke`, `/deletebot`. Пока человек не нажал «Старт», в чате с ботом вместо поля ввода — кнопка «Старт» (отправляет `/start`);
+бот не может написать первым.
+
+Код бота работает через Bot API (форма вызовов как в Telegram, GET или POST с JSON):
+
+    https://ваш-сервер/bot<токен>/getMe
+    https://ваш-сервер/bot<токен>/getUpdates?offset=<последний update_id + 1>&timeout=30   # long-poll
+    POST https://ваш-сервер/bot<токен>/sendMessage        {"chat_id": "<id человека>", "text": "Привет"}
+    POST https://ваш-сервер/bot<токен>/setMyCommands      {"commands": [{"command": "start", "description": "Начать"}]}
+    POST https://ваш-сервер/bot<токен>/setWebhook         {"url": "https://..."}   # вместо getUpdates; deleteWebhook — выключить
+
+Простейший бот-эхо на Python:
+
+```python
+import json, time, urllib.request
+API = "https://ваш-сервер/bot<токен>/"
+def call(m, **p):
+    r = urllib.request.Request(API + m, data=json.dumps(p).encode(), headers={"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(r, timeout=60))["result"]
+offset = 0
+while True:
+    for u in call("getUpdates", offset=offset, timeout=30):
+        offset = u["update_id"] + 1
+        msg = u.get("message", {})
+        if "text" in msg:
+            call("sendMessage", chat_id=msg["chat"]["id"], text="Вы написали: " + msg["text"])
+```
+
+Проверка: `python3 tests/test_bots.py`.

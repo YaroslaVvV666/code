@@ -417,8 +417,10 @@ struct ChatInfoView: View {
                     tileLabel("ellipsis", s.t("ещё", "more"))
                 }
             } else {
-                tile("phone.fill", s.t("Звонок", "Call")) { callPeer(video: false) }
-                tile("video.fill", s.t("Видео", "Video")) { callPeer(video: true) }
+                if !model.isBot {                        // боту не звонят
+                    tile("phone.fill", s.t("Звонок", "Call")) { callPeer(video: false) }
+                    tile("video.fill", s.t("Видео", "Video")) { callPeer(video: true) }
+                }
                 let dmMuted = { _ = prefs.muteTick; return prefs.isDMMuted(model.peer.id) }()
                 tile(dmMuted ? "bell.slash.fill" : "bell.fill",
                      dmMuted ? s.t("Без звука", "Muted") : s.t("Звук", "Sound")) {
