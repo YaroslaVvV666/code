@@ -17,6 +17,8 @@ import gzip
 import html as htmllib
 import ipaddress
 import socket
+import ssl
+import http.client
 import urllib.request
 import hashlib
 import hmac
@@ -2183,7 +2185,7 @@ def upload_media(req, me):
     # верхний тип для проверки: image/video даже если прислано как «файл» с image/* или video/*
     top = kind if kind in ("image", "video") else (mime.split("/")[0] if "/" in mime else "")
     # структурная проверка «это и правда картинка/видео, а не замаскированный код» — для стикеров/эмодзи обязательна
-    safety = top in ("image", "video")
+    safety = top in ("image", "video") or kind == "audio"
     scan_mod = moderation.enabled() and kind in ("image", "video")
     # пока файл шифруется, копия открытых байт кладётся во временный файл (для проверки типа и нейросети)
     inspect = safety or scan_mod
@@ -2298,6 +2300,8 @@ def get_media(req, me, mid):
     else:
         req.send_header("Content-Type", row["mime"])
     req.send_header("X-Content-Type-Options", "nosniff")
+    # даже если файл откроют в браузере — никаких скриптов и запросов из него
+    req.send_header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; sandbox")
     req.send_header("Content-Length", str(end - start + 1))
     req.send_header("Accept-Ranges", "bytes")
     req.send_header("Cache-Control", "public, max-age=31536000, immutable")
@@ -2384,22 +2388,88 @@ _LINK_CACHE = {}
 _LINK_TTL = 6 * 3600
 
 
-def _public_host(host):
-    """Только публичные адреса: никаких localhost и локальной сети (защита от SSRF)"""
+def _ip_ok(ip):
+    ip = ipaddress.ip_address(ip)
+    if getattr(ip, "ipv4_mapped", None):                 # ::ffff:127.0.0.1 — тот же localhost
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+def _resolve_public(host, port):
+    """Адрес хоста, если ВСЕ его адреса публичные (никаких localhost, локальной сети, метаданных облака) — иначе None.
+    Подключаемся потом ровно к этому IP: подмена DNS между проверкой и запросом (DNS rebinding) не сработает."""
     try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return False
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            return False
-    return bool(infos)
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
         return None
+    if not infos or not all(_ip_ok(i[4][0]) for i in infos):
+        return None
+    return infos[0][4][0]
+
+
+def _public_host(host):
+    return _resolve_public(host, 443) is not None
+
+
+class _PinnedHTTP(http.client.HTTPConnection):
+    def __init__(self, host, ip, **kw):
+        super().__init__(host, **kw)
+        self._ip = ip
+
+    def connect(self):
+        self.sock = socket.create_connection((self._ip, self.port), self.timeout)
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    def __init__(self, host, ip, **kw):
+        super().__init__(host, context=ssl.create_default_context(), **kw)
+        self._ip = ip
+
+    def connect(self):
+        sock = socket.create_connection((self._ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)   # сертификат проверяется по имени
+
+
+SAFE_FETCH_PORTS = {80, 443, 88, 8080, 8443}
+
+
+def safe_request(url, method="GET", body=None, headers=None, timeout=6, max_bytes=300_000, redirects=0):
+    """Исходящий запрос по адресу, присланному пользователем (превью ссылок, вебхуки ботов) — защита от SSRF:
+    только http(s), стандартные порты, только публичные IP (проверенный адрес закрепляется за соединением),
+    редиректы — вручную, с той же проверкой каждого шага. Возвращает (status, headers, body, final_url) или None."""
+    from urllib.parse import urljoin
+    cur = url
+    for _ in range(redirects + 1):
+        u = urlparse(cur)
+        if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password:
+            return None
+        try:
+            port = u.port or (443 if u.scheme == "https" else 80)
+        except ValueError:
+            return None
+        if port not in SAFE_FETCH_PORTS:
+            return None
+        ip = _resolve_public(u.hostname, port)
+        if not ip:
+            return None
+        cls = _PinnedHTTPS if u.scheme == "https" else _PinnedHTTP
+        conn = cls(u.hostname, ip, port=port, timeout=timeout)
+        try:
+            path = (u.path or "/") + ("?" + u.query if u.query else "")
+            conn.request(method, path, body=body, headers=dict(headers or {}))
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308) and resp.getheader("Location"):
+                cur = urljoin(cur, resp.getheader("Location"))
+                if resp.status == 303:
+                    method, body = "GET", None
+                continue
+            data = resp.read(max_bytes)
+            return resp.status, resp, data, cur
+        except Exception:
+            return None
+        finally:
+            conn.close()
+    return None
 
 
 def parse_og(page, base):
@@ -2425,42 +2495,27 @@ def parse_og(page, base):
 
 
 def fetch_link_preview(url):
-    from urllib.parse import urlparse as _up, urljoin
-    opener = urllib.request.build_opener(_NoRedirect)
-    cur = url
-    for _ in range(4):
-        u = _up(cur)
-        if u.scheme not in ("http", "https") or not u.hostname or not _public_host(u.hostname):
-            return None
-        req = urllib.request.Request(cur, headers={"User-Agent": "Mozilla/5.0 (compatible; OrbitaBot/1.0)",
-                                                   "Accept": "text/html,application/xhtml+xml"})
-        try:
-            resp = opener.open(req, timeout=5)
-        except urllib.error.HTTPError as e:
-            if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
-                cur = urljoin(cur, e.headers["Location"])
-                continue
-            return None
-        except Exception:
-            return None
-        ctype = resp.headers.get("Content-Type", "")
-        if "html" not in ctype.lower():
-            return None
-        raw = resp.read(300_000)
-        charset = "utf-8"
-        m = re.search(r"charset=([\w-]+)", ctype, re.I)
-        if m:
-            charset = m.group(1)
-        try:
-            page = raw.decode(charset, "replace")
-        except LookupError:
-            page = raw.decode("utf-8", "replace")
-        info = parse_og(page, cur)
-        if not info["title"] and not info["description"]:
-            return None
-        info["url"] = cur
-        return info
-    return None
+    got = safe_request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; OrbitaBot/1.0)",
+                                     "Accept": "text/html,application/xhtml+xml"}, timeout=5, redirects=3)
+    if not got:
+        return None
+    status, resp, raw, cur = got
+    ctype = resp.getheader("Content-Type", "") or ""
+    if status != 200 or "html" not in ctype.lower():
+        return None
+    charset = "utf-8"
+    m = re.search(r"charset=([\w-]+)", ctype, re.I)
+    if m:
+        charset = m.group(1)
+    try:
+        page = raw.decode(charset, "replace")
+    except LookupError:
+        page = raw.decode("utf-8", "replace")
+    info = parse_og(page, cur)
+    if not info["title"] and not info["description"]:
+        return None
+    info["url"] = cur
+    return info
 
 
 @route("GET", r"/v1/link_preview")
@@ -4696,11 +4751,11 @@ def bot_push_update(bot, update):
 def bot_deliver_webhook(bot_id, url, update, seq):
     """Вебхук: POST JSON на адрес владельца; дошло (2xx) — обновление из очереди убираем"""
     try:
-        reqw = urllib.request.Request(url, data=json.dumps(update, ensure_ascii=False).encode(),
-                                      headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(reqw, timeout=8) as r:
-            if 200 <= r.status < 300:
-                run("DELETE FROM bot_updates WHERE bot_id = ? AND seq = ?", (bot_id, seq))
+        # адрес задал владелец бота — только публичный https, без редиректов (иначе бот мог бы стучаться во внутреннюю сеть)
+        got = safe_request(url, "POST", json.dumps(update, ensure_ascii=False).encode(),
+                           {"Content-Type": "application/json"}, timeout=8, max_bytes=4096) if url.lower().startswith("https://") else None
+        if got and 200 <= got[0] < 300:
+            run("DELETE FROM bot_updates WHERE bot_id = ? AND seq = ?", (bot_id, seq))
     except Exception as e:
         print("bot webhook: %s" % e.__class__.__name__)
 
@@ -4796,6 +4851,15 @@ def bot_api(req, me, token, method):
         url = str(p.get("url") or "").strip()
         if url and not re.match(r"^https://", url, re.I):
             return bot_api_err(req, 400, "Bad Request: webhook must be https")
+        if url:
+            wu = urlparse(url)
+            try:
+                wport = wu.port or 443
+            except ValueError:
+                wport = 0
+            if len(url) > 500 or not wu.hostname or wu.username or wu.password or wport not in SAFE_FETCH_PORTS \
+                    or not _resolve_public(wu.hostname, wport):
+                return bot_api_err(req, 400, "Bad Request: webhook must point to a public https address")
         run("UPDATE bots SET webhook = ? WHERE id = ?", (url or None, bid))
         return bot_api_ok(req, True)
     if m == "deletewebhook":
@@ -5307,7 +5371,7 @@ def clean_attachments(raw, uid):
         if m["thumb"]:
             item["thumb"] = m["thumb"]
         if t in ("file", "audio"):
-            item["name"] = clean_line(a.get("name"), 120) or "file"
+            item["name"] = clean_filename(a.get("name"))
         if t == "audio":
             item["title"] = clean_line(a.get("title"), 120)
             item["artist"] = clean_line(a.get("artist"), 120)
@@ -8566,6 +8630,21 @@ def add_track_from_sound(req, me):
 
 def clean_line(v, limit):
     return " ".join(str(v or "").split())[:limit]
+
+
+# невидимые символы направления текста: ими подделывают расширение («фото\u202Egnp.exe» выглядит как «фотоexe.png»)
+_BIDI_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\u061c\x00-\x1f\x7f]")
+
+
+def clean_filename(v):
+    """Имя вложенного файла от отправителя: без путей («../»), невидимых/управляющих символов и ведущих точек"""
+    name = _BIDI_RE.sub("", str(v or ""))
+    name = re.sub(r'[/\\:*?"<>|]', "_", name)
+    name = clean_line(name, 1000).lstrip(". ").replace("..", "_")
+    if len(name) > 120:
+        root, dot, ext = name.rpartition(".")
+        name = (root[:119 - len(ext)] + "." + ext) if dot and 0 < len(ext) <= 10 else name[:120]
+    return name or "file"
 
 
 @route("GET", r"/v1/users/([A-Za-z0-9_\-]+)/playlist")

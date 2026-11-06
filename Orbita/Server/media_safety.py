@@ -47,6 +47,17 @@ def _video_ok(head):
     return None
 
 
+def _audio_ok(head):
+    # mp3 (ID3-тег или кадр MPEG), m4a/mp4 (атом ftyp), AAC в потоке ADTS
+    if head.startswith(b"ID3"):
+        return "mp3"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mpeg"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "m4a"
+    return None
+
+
 def sniff(path, top, mime=""):
     """Возвращает (ok, reason). top — 'image' или 'video'. Безопасно по умолчанию: при любой
     неоднозначности отклоняем. reason — короткий машинный код для лога/ответа."""
@@ -77,6 +88,13 @@ def sniff(path, top, mime=""):
         if not _video_ok(head):
             return False, "not_a_video"
         return _verify_video(path)
+
+    if top == "audio":
+        if not _audio_ok(head):
+            return False, "not_audio"
+        if any(m in head.lower() for m in _SCRIPT_MARKERS):
+            return False, "embedded_markup"
+        return True, "ok"
 
     return False, "unsupported_kind"
 

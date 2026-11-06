@@ -269,7 +269,8 @@ enum PreviewThumbs {
     static func image(_ data: Data, maxPixel: CGFloat = 640) -> UIImage? {
         let k = key(data, maxPixel)
         if let img = cache.object(forKey: k) { return img }
-        guard let img = ImageCache.downsample(data, maxPixel: maxPixel) ?? UIImage(data: data) else { return nil }
+        // только через уменьшение: «картинка-бомба» 30000×30000 из чужого сообщения не разожмётся целиком в память
+        guard let img = ImageCache.downsample(data, maxPixel: maxPixel) else { return nil }
         cache.setObject(img, forKey: k)
         return img
     }

@@ -753,7 +753,7 @@ struct ChatInfoView: View {
                         Text(s.t("описание", "description")).font(.system(size: 14)).foregroundStyle(theme.text)
                         RichInlineText(text: about, entities: [], size: 17, color: theme.text, linkColor: theme.accentColor, detect: true)
                             .lineLimit(aboutExpanded ? nil : 3)
-                            .environment(\.openURL, OpenURLAction { url in ChatEntity(url: url) != nil ? .handled : .systemAction })
+                            .environment(\.openURL, OpenURLAction { url in ChatEntity(url: url) != nil ? .handled : SafeLink.isAllowed(url) ? .systemAction : .discarded })
                         if !aboutExpanded && (about.count > 110 || about.filter { $0 == "\n" }.count > 2) {
                             HStack {
                                 Spacer()

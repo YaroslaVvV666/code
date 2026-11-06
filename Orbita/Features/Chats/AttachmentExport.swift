@@ -12,6 +12,7 @@ enum AttachmentExporter {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("export-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let file = dir.appendingPathComponent(fileName(for: a))
+            guard SafeFileName.isInside(file, dir) else { return false }
             try FileManager.default.moveItem(at: tmp, to: file)
             present(file)
             return true
@@ -29,7 +30,7 @@ enum AttachmentExporter {
         } else {
             base = a.kind == .voice ? "voice" : "audio"
         }
-        base = base.components(separatedBy: CharacterSet(charactersIn: "/\\:?*\"<>|")).joined(separator: "_")
+        base = SafeFileName.clean(base, fallback: a.kind == .voice ? "voice" : "audio")
         if (base as NSString).pathExtension.isEmpty {
             let mime = (a.mime ?? "").lowercased()
             let ext = mime.contains("mpeg") || mime.contains("mp3") ? "mp3"

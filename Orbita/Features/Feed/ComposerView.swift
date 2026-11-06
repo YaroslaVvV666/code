@@ -303,7 +303,7 @@ struct ComposerView: View {
         Task { @MainActor in
             preparing = true
             defer { preparing = false }
-            guard let (data, _) = try? await URLSession.shared.data(from: url), let image = UIImage(data: data) else {
+            guard let (data, _) = try? await URLSession.shared.data(from: url), let image = ImageCache.downsample(data, maxPixel: 1024) else {
                 mediaError = s.mediaFailed
                 return
             }

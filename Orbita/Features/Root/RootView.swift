@@ -98,7 +98,8 @@ struct RootView: View {
         // ссылки внутри текста (посты, чаты): свои открываем внутри приложения, остальные — как обычно
         .environment(\.openURL, OpenURLAction { url in
             if DeepLink(url: url) != nil { router.handle(url); return .handled }
-            return .systemAction
+            // чужие ссылки — только http(s)/mailto/tel/sms: shortcuts://, file:// и прочие схемы касанием не запустить
+            return SafeLink.isAllowed(url) ? .systemAction : .discarded
         })
         .onReceive(NotificationCenter.default.publisher(for: .orbitaSessionRevoked)
             .receive(on: DispatchQueue.main)) { _ in

@@ -1120,7 +1120,7 @@ struct ChatInputBar: View {
             if size > 80 * 1024 * 1024 { flash(s.t("Файл больше 80 МБ", "File is over 80 MB")); continue }
             // копия во временную папку: доступ к оригиналу после закрытия окна пропадёт
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            let target = dir.appendingPathComponent(url.lastPathComponent)
+            let target = dir.appendingPathComponent(SafeFileName.clean(url.lastPathComponent))
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 try FileManager.default.copyItem(at: url, to: target)

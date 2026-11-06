@@ -27,7 +27,7 @@ struct LinkPreviewCard: View {
             if let info {
                 Button {
                     guard !MessageMenu.isOpen else { return }       // зажали сообщение ради реакций — превью не открываем
-                    if let u = URL(string: info.url) { UIApplication.shared.open(u) }
+                    if let u = SafeLink.url(info.url) { UIApplication.shared.open(u) }
                 } label: {
                     card(info)
                 }

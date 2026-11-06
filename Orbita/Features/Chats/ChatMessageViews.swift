@@ -1209,7 +1209,7 @@ struct FileBlock: View {
                 }
                 .frame(width: 52, height: 52)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(attachment.name ?? "Файл")
+                    Text(SafeFileName.display(attachment.name ?? "Файл"))
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(fg)
                         .lineLimit(2)
@@ -1469,8 +1469,9 @@ enum FileDownloader {
             let (temp, _) = try await URLSession.shared.download(from: remote, delegate: DownloadProgressDelegate(id: mediaID))
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let safe = name.replacingOccurrences(of: "/", with: "_")
-            let target = folder.appendingPathComponent(safe.isEmpty ? "file" : safe)
+            // имя пришло от отправителя: никаких «../», невидимых символов и подмены расширения
+            let target = folder.appendingPathComponent(SafeFileName.clean(name))
+            guard SafeFileName.isInside(target, folder) else { return nil }
             try FileManager.default.moveItem(at: temp, to: target)
             return target
         } catch {

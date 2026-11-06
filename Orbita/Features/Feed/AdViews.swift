@@ -213,7 +213,7 @@ struct AdCardView: View {
         Task {
             let link = await repo.adClick(id: ad.id)
             let target = link.isEmpty ? ad.link : link
-            if let url = URL(string: target) { await MainActor.run { openURL(url) } }
+            if let url = SafeLink.url(target) { await MainActor.run { openURL(url) } }
         }
     }
 }
