@@ -331,6 +331,13 @@ final class RichComposerController: ObservableObject {
     var plainText: String { textView?.text ?? "" }
     var entities: [TextEntity] { textView.map { RichTextCodec.entities(from: $0.attributedText) } ?? [] }
     var isBlank: Bool { plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Сколько строк сейчас видно в поле (с учётом переносов длинных строк)
+    var visualLines: Int {
+        guard let tv = textView else { return 0 }
+        let h = tv.contentSize.height - tv.textContainerInset.top - tv.textContainerInset.bottom
+        let line = (tv.font ?? RichTextCodec.baseFont(17)).lineHeight
+        return max(1, Int((h / max(line, 1)).rounded()))
+    }
 
     private var pendingLoad: (text: String, entities: [TextEntity], color: UIColor)?
 

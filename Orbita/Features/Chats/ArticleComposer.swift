@@ -8,12 +8,14 @@ import UniformTypeIdentifiers
 /// звук и файлы, геопозиция) и эмодзи. Всё вставляется туда, где стоит курсор. Есть «Отменить» и «Повторить».
 struct ArticleComposer: View {
     @ObservedObject var model: ChatModel
+    /// Вызывается после отправки (поле ввода чата очищается — текст ушёл статьёй)
+    var onSent: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
-    @State private var blocks: [ArticleBlock] = [ArticleBlock(kind: .text)]
+    @State private var blocks: [ArticleBlock]
     @State private var footer: [ArticleButton] = []
     @State private var history: [[ArticleBlock]] = []
     @State private var future: [[ArticleBlock]] = []
@@ -32,6 +34,26 @@ struct ArticleComposer: View {
     @State private var sending = false
     @State private var errorText: String?
     @State private var confirmClose = false
+
+    /// initialText — уже набранный в поле ввода текст: каждый абзац становится текстовым блоком
+    init(model: ChatModel, initialText: String = "", onSent: @escaping () -> Void = {}) {
+        self.model = model
+        self.onSent = onSent
+        _blocks = State(initialValue: Self.blocks(from: initialText))
+    }
+
+    static func blocks(from text: String) -> [ArticleBlock] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [ArticleBlock(kind: .text)] }
+        // абзацы — через пустую строку; если пустых строк нет, абзац — каждая строка
+        var parts = trimmed.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if parts.count == 1 { parts = trimmed.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) } }
+        return parts.filter { !$0.isEmpty }.map { p in
+            var b = ArticleBlock(kind: .text)
+            b.text = p
+            return b
+        }
+    }
 
     private var s: Strings { Strings(lang: lang) }
     private var bg: Color { theme.dark ? Color(white: 0.11) : Color(white: 0.97) }
@@ -77,7 +99,7 @@ struct ArticleComposer: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
         .onAppear {
             history = [blocks]
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { focus = blocks.first?.id }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { focus = blocks.last?.id }
         }
         .onChange(of: blocks) { _, _ in scheduleSnapshot() }
         .photosPicker(isPresented: $showPhotos, selection: $pickerItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
@@ -924,6 +946,7 @@ struct ArticleComposer: View {
                 errorText = s.api(error)
             } else {
                 Haptics.notify(.success)
+                onSent()
                 dismiss()
             }
         }

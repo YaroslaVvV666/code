@@ -48,6 +48,8 @@ struct ChatInputBar: View {
     @State private var kbVisible = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
     @State private var showArticle = false              // редактор статьи (сообщение из блоков)
+    @State private var articleSeed = ""                 // текст из поля, с которым открывается редактор
+    @State private var articleHint = false              // длинный текст: над «Отправить» значок «развернуть в статью»
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
@@ -168,8 +170,11 @@ struct ChatInputBar: View {
                 .presentationBackground(theme.sheet)
         }
         .fullScreenCover(isPresented: $showArticle) {
-            ArticleComposer(model: model)
-                .environment(\.theme, theme).environment(\.lang, lang)
+            ArticleComposer(model: model, initialText: articleSeed) {
+                if !articleSeed.isEmpty { controller.clear() }    // текст из поля ушёл статьёй
+                articleSeed = ""
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
         }
         .sheet(isPresented: $showLocation) {
             LocationShareSheet { point, live in model.sendLocation(point, live: live) }
@@ -183,7 +188,10 @@ struct ChatInputBar: View {
                         onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
                         onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
                         onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
-                        onArticle: model.isBot ? nil : { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showArticle = true } },
+                        onArticle: model.isBot ? nil : {
+                            articleSeed = ""
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showArticle = true }
+                        },
                         onPhoto: { addPhoto($0) },
                         onVideo: { addVideoFile($0) },
                         onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true } })
@@ -397,6 +405,27 @@ struct ChatInputBar: View {
         }.prefix(12))
     }
 
+    // MARK: Статья из длинного текста
+
+    /// Значок появляется, когда в поле есть текст и он занимает 3 абзаца (или 3 строки) — как «развернуть» в Telegram
+    private func updateArticleHint() {
+        let text = controller.plainText
+        let lines = text.components(separatedBy: "\n").count
+        let show = model.editing == nil && drafts.isEmpty && !model.isBot && !model.isPreview
+            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (lines >= 3 || controller.visualLines >= 3)
+        guard show != articleHint else { return }
+        if show { Haptics.impact(.soft) }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) { articleHint = show }
+    }
+
+    private func openArticleFromField() {
+        Haptics.impact(.medium)
+        articleSeed = controller.plainText
+        controller.unfocus()
+        showArticle = true
+    }
+
     // MARK: Основная строка
 
     private var inputRow: some View {
@@ -450,7 +479,14 @@ struct ChatInputBar: View {
                 .transition(.scale.combined(with: .opacity))
             }
 
-            trailingButton
+            VStack(spacing: 8) {
+                if articleHint && !recording {
+                    ArticleExpandButton { openArticleFromField() }
+                        .transition(.asymmetric(insertion: .scale(scale: 0.2, anchor: .bottom).combined(with: .opacity),
+                                                removal: .scale(scale: 0.6, anchor: .bottom).combined(with: .opacity)))
+                }
+                trailingButton
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -461,6 +497,12 @@ struct ChatInputBar: View {
             if showCommands { withAnimation(.easeOut(duration: 0.2)) { showCommands = false } }     // начали печатать — меню команд закрывается
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in kbVisible = false }
+        .onChange(of: controller.length) { _, _ in
+            updateArticleHint()
+            DispatchQueue.main.async { updateArticleHint() }      // высота поля пересчитывается чуть позже
+        }
+        .onChange(of: drafts.count) { _, _ in updateArticleHint() }
+        .onChange(of: model.editing?.id) { _, _ in updateArticleHint() }
         .onChange(of: model.botKeyboard) { _, kb in if kb != nil { botKeysOpen = true } }      // бот прислал новую клавиатуру — показываем
         .animation(.easeOut(duration: 0.18), value: recording)
         .animation(.easeOut(duration: 0.2), value: trashing)

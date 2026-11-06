@@ -591,3 +591,45 @@ struct ArticleLinkButton: View {
         .buttonStyle(PressStyle())
     }
 }
+
+// MARK: - Значок «развернуть в статью» над кнопкой отправки
+
+/// Стеклянный кружок со «страницей» и бегущим по кругу акцентным бликом: длинный текст можно превратить в статью
+struct ArticleExpandButton: View {
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+    @State private var spin = false
+    @State private var pop = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .scaleEffect(pop ? 1 : 0.6)
+                Image(systemName: "sparkle")
+                    .font(.system(size: 8, weight: .black))
+                    .foregroundStyle(theme.accentColor)
+                    .offset(x: 9, y: -9)
+                    .opacity(pop ? 1 : 0)
+            }
+            .frame(width: 38, height: 38)
+            .glassCircle()
+            .overlay(
+                Circle()
+                    .strokeBorder(AngularGradient(colors: [theme.accentColor, theme.accentColor.opacity(0.05),
+                                                           theme.accentColor.opacity(0.05), theme.accentColor],
+                                                  center: .center), lineWidth: 1.6)
+                    .rotationEffect(.degrees(spin ? 360 : 0))
+            )
+            .shadow(color: theme.accentColor.opacity(0.35), radius: 6, y: 2)
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel(Text("Статья"))
+        .onAppear {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.5).delay(0.05)) { pop = true }
+            withAnimation(.linear(duration: 2.6).repeatForever(autoreverses: false)) { spin = true }
+        }
+    }
+}
