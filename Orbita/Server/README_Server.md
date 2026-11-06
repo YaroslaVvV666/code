@@ -233,3 +233,16 @@ while True:
   `/signal` (offer/answer/ice), `/poll` (long-poll). Нужен тот же TURN, что и для личных звонков.
 
 Тесты: `test_login_alert.py`, `test_quiz.py`, `test_uploads.py`, `test_topics.py`, `test_group_calls.py`.
+
+
+## Библиотека для разработчиков ботов (Python)
+
+`SDK/python` — пакет **orbitagram** в духе aiogram: `Bot`, `Dispatcher`/`Router`, фильтры и `F`, FSM,
+клавиатуры, `CallbackData`, middleware, polling и вебхуки. Установка: `pip install ./SDK/python`.
+Документация и примеры — `SDK/python/README_Orbitagram.md`.
+
+Для подсказки в BotGod укажите публичный адрес сервера: `ORBITA_PUBLIC_URL=https://orbita.example.com`.
+Методы Bot API, добавленные для библиотеки: `getFile` (скачивание по `/media/<id>`), `sendChatAction`, `getChat`,
+`setMyDescription`/`getMyDescription`, `getWebhookInfo`, `setWebhook(secret_token, drop_pending_updates)`.
+Входящие сообщения приходят в формате Telegram: `photo`, `document`, `video`, `animation`, `video_note`, `voice`,
+`audio`, `sticker`, `location`, `caption`, `reply_to_message`.

@@ -4721,6 +4721,7 @@ def bot_commands(req, me, bot_id):
 # через @botgod, а код бота работает через Bot API: /bot<токен>/getMe, getUpdates, sendMessage, setMyCommands…
 
 BOTGOD_ID = "b0790d00-0000-4000-8000-00000000b070"
+PUBLIC_BASE = os.environ.get("ORBITA_PUBLIC_URL", "").rstrip("/")     # публичный адрес сервера (для подсказок разработчикам)
 BOTGOD_NAME = "botgod"
 MAX_USER_BOTS = 20
 BOT_DESCRIPTION_MAX = 512
@@ -4935,12 +4936,43 @@ def bot_message_update(row, sender_id, text, atts):
         if text.startswith("/"):
             cmd = text.split()[0]
             msg["entities"] = [{"type": "bot_command", "offset": 0, "length": len(cmd)}]
-    photos = [a for a in atts if a.get("type") == "photo"]
-    if photos:
-        msg["photo"] = [{"file_id": p["media_id"], "width": p.get("width", 0), "height": p.get("height", 0)} for p in photos]
-    others = [a for a in atts if a.get("type") != "photo"]
-    if others:
-        msg["attachments"] = others
+    if row["reply_to"]:
+        r = q1("SELECT * FROM messages WHERE id = ?", (row["reply_to"],))
+        if r:
+            msg["reply_to_message"] = {"message_id": r["id"], "date": int(r["created_at"]),
+                                       "text": dec(r["sender"], "messages", COL["msg_text"], r["id"], r["text_enc"]) or ""}
+    for a in atts:
+        t = a.get("type")
+        fid = a.get("media_id")
+        base = {"file_id": fid, "file_unique_id": fid, "file_size": a.get("size", 0)} if fid else {}
+        if t == "photo":
+            msg.setdefault("photo", []).append({**base, "width": a.get("width", 0), "height": a.get("height", 0)})
+        elif t == "video" and a.get("gif"):
+            msg["animation"] = {**base, "width": a.get("width", 0), "height": a.get("height", 0), "duration": int(a.get("duration") or 0)}
+        elif t == "video":
+            msg["video"] = {**base, "width": a.get("width", 0), "height": a.get("height", 0),
+                            "duration": int(a.get("duration") or 0), "mime_type": a.get("mime")}
+        elif t == "circle":
+            msg["video_note"] = {**base, "length": a.get("width", 0), "duration": int(a.get("duration") or 0)}
+        elif t == "voice":
+            msg["voice"] = {**base, "duration": int(a.get("duration") or 0), "mime_type": a.get("mime")}
+        elif t == "audio":
+            msg["audio"] = {**base, "duration": int(a.get("duration") or 0), "title": a.get("title"),
+                            "performer": a.get("artist"), "file_name": a.get("name"), "mime_type": a.get("mime")}
+        elif t == "file":
+            msg["document"] = {**base, "file_name": a.get("name"), "mime_type": a.get("mime")}
+        elif t == "sticker":
+            msg["sticker"] = {"file_id": a.get("sticker") or fid, "file_unique_id": a.get("sticker") or fid,
+                              "emoji": a.get("emoji"), "set_name": a.get("pack")}
+        elif t == "location":
+            msg["location"] = {"latitude": a.get("lat"), "longitude": a.get("lon"),
+                               **({"live_period": 1} if a.get("live_until") else {})}
+        if t in ("photo", "video", "circle", "voice", "audio", "file") and fid and row["recipient"]:
+            # файл, присланный боту, бот может скачать (getFile) и переслать дальше по file_id
+            run("INSERT OR IGNORE INTO bot_files(bot_id, media_id, created_at) VALUES (?,?,?)", (row["recipient"], fid, time.time()))
+    if atts and text:
+        msg["caption"] = msg.pop("text")
+        msg.pop("entities", None)
     return {"message": msg}
 
 
@@ -4955,15 +4987,19 @@ def bot_push_update(bot, update):
         run("DELETE FROM bot_updates WHERE bot_id = ? AND seq <= ?", (bot["id"], old["seq"]))
     SHARED.events_publish("bot:" + bot["id"], "update")
     if bot["webhook"]:
-        threading.Thread(target=bot_deliver_webhook, args=(bot["id"], bot["webhook"], update, seq), daemon=True).start()
+        secret = bot["webhook_secret"] if "webhook_secret" in bot.keys() else None
+        threading.Thread(target=bot_deliver_webhook, args=(bot["id"], bot["webhook"], update, seq, secret), daemon=True).start()
 
 
-def bot_deliver_webhook(bot_id, url, update, seq):
+def bot_deliver_webhook(bot_id, url, update, seq, secret=None):
     """Вебхук: POST JSON на адрес владельца; дошло (2xx) — обновление из очереди убираем"""
     try:
         # адрес задал владелец бота — только публичный https, без редиректов (иначе бот мог бы стучаться во внутреннюю сеть)
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers["X-Orbita-Bot-Api-Secret-Token"] = secret      # код бота проверяет, что запрос правда от сервера
         got = safe_request(url, "POST", json.dumps(update, ensure_ascii=False).encode(),
-                           {"Content-Type": "application/json"}, timeout=8, max_bytes=4096) if url.lower().startswith("https://") else None
+                           headers, timeout=8, max_bytes=4096) if url.lower().startswith("https://") else None
         if got and 200 <= got[0] < 300:
             run("DELETE FROM bot_updates WHERE bot_id = ? AND seq = ?", (bot_id, seq))
     except Exception as e:
@@ -5022,6 +5058,12 @@ DB.execute("CREATE TABLE IF NOT EXISTS bot_keyboards(bot_id TEXT NOT NULL, user_
            "updated_at REAL NOT NULL, PRIMARY KEY(bot_id, user_id))")
 
 BOT_FILE_MAX = 50 * 1024 * 1024
+DB.execute("CREATE TABLE IF NOT EXISTS bot_files(bot_id TEXT NOT NULL, media_id TEXT NOT NULL, created_at REAL NOT NULL, "
+           "PRIMARY KEY(bot_id, media_id))")
+ensure_column("bots", "webhook_secret", "webhook_secret TEXT")
+BOT_CHAT_ACTIONS = {"typing": "typing", "upload_photo": "photo", "record_voice": "voice", "upload_voice": "voice",
+                    "record_video": "video", "upload_video": "video", "record_video_note": "video",
+                    "upload_video_note": "video", "upload_document": "file"}
 CALLBACK_WAIT = 6.0
 
 
@@ -5241,9 +5283,15 @@ def bot_media(bid, kind, value, files, field, p):
         name, ctype, data = files[field]
     elif isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value):
         m = q1("SELECT * FROM media WHERE id = ? AND owner = ? AND kind = ?", (value, bid, kind))
-        if not m:
-            raise ApiError(400, "Bad Request: wrong file identifier")
-        return m["id"], None
+        if m:
+            return m["id"], None
+        # файл, который боту прислали: делаем свою копию (оригинал человек может удалить)
+        if q1("SELECT 1 FROM bot_files WHERE bot_id = ? AND media_id = ?", (bid, value)) and \
+                q1("SELECT 1 FROM media WHERE id = ? AND kind = ?", (value, kind)):
+            nid = clone_media(value, bid)
+            if nid:
+                return nid, None
+        raise ApiError(400, "Bad Request: wrong file identifier")
     elif isinstance(value, str) and value.lower().startswith(("http://", "https://")):
         got = safe_request(value, timeout=15, max_bytes=BOT_FILE_MAX + 1, redirects=3)
         if not got or got[0] != 200 or len(got[2]) > BOT_FILE_MAX:
@@ -5307,6 +5355,40 @@ def bot_own_message(bid, p):
 def bot_api_extra(req, bot, m, p, files):
     """Методы Bot API сверх базовых: кнопки, медиа, изменение и удаление. None — метод не отсюда."""
     bid = bot["id"]
+    if m == "getfile":
+        fid = str(p.get("file_id") or "")
+        md = q1("SELECT * FROM media WHERE id = ?", (fid,)) if re.fullmatch(r"[a-f0-9]{32}", fid) else None
+        if not md or not (md["owner"] == bid or q1("SELECT 1 FROM bot_files WHERE bot_id = ? AND media_id = ?", (bid, fid))):
+            return bot_api_err(req, 400, "Bad Request: wrong file_id or the file is temporarily unavailable")
+        return bot_api_ok(req, {"file_id": fid, "file_unique_id": fid, "file_size": md["size"], "file_path": "media/" + fid,
+                                "mime_type": md["mime"]})
+    if m == "sendchataction":
+        chat = str(p.get("chat_id") or "")
+        action = BOT_CHAT_ACTIONS.get(str(p.get("action") or ""))
+        if not action:
+            return bot_api_err(req, 400, "Bad Request: wrong parameter action in request")
+        if not bot_started(bid, chat):
+            return bot_api_err(req, 403, "Forbidden: bot can't initiate conversation with a user")
+        SHARED.typing_set(bid, chat, action, TYPING_TTL)
+        SHARED.events_publish(chat, "typing")
+        return bot_api_ok(req, True)
+    if m == "getchat":
+        chat = str(p.get("chat_id") or "")
+        if not bot_started(bid, chat):
+            return bot_api_err(req, 400, "Bad Request: chat not found")
+        brief = user_brief(chat)
+        return bot_api_ok(req, {"id": chat, "type": "private", "first_name": brief["name"], "username": brief.get("username")})
+    if m == "getwebhookinfo":
+        n = q1("SELECT COUNT(*) c FROM bot_updates WHERE bot_id = ?", (bid,))["c"]
+        return bot_api_ok(req, {"url": bot["webhook"] or "", "has_custom_certificate": False, "pending_update_count": n})
+    if m in ("setmydescription", "setmyshortdescription"):
+        desc = str(p.get("description") or p.get("short_description") or "")[:BOT_DESCRIPTION_MAX]
+        run("UPDATE bots SET description_enc = ? WHERE id = ?",
+            (enc(bid, "profile", "bots.description", bid, desc) if desc else None, bid))
+        return bot_api_ok(req, True)
+    if m in ("getmydescription", "getmyshortdescription"):
+        desc = dec(bid, "profile", "bots.description", bid, bot["description_enc"]) if bot["description_enc"] else ""
+        return bot_api_ok(req, {"description": desc, "short_description": desc})
     if m == "answercallbackquery":
         qid = str(p.get("callback_query_id") or "")
         meta = SHARED.cache_get("cbqb:" + qid)
@@ -5460,10 +5542,17 @@ def bot_api(req, me, token, method):
             if len(url) > 500 or not wu.hostname or wu.username or wu.password or wport not in SAFE_FETCH_PORTS \
                     or not _resolve_public(wu.hostname, wport):
                 return bot_api_err(req, 400, "Bad Request: webhook must point to a public https address")
-        run("UPDATE bots SET webhook = ? WHERE id = ?", (url or None, bid))
+        secret = str(p.get("secret_token") or "")
+        if secret and not re.fullmatch(r"[A-Za-z0-9_\-]{1,256}", secret):
+            return bot_api_err(req, 400, "Bad Request: wrong secret_token")
+        run("UPDATE bots SET webhook = ?, webhook_secret = ? WHERE id = ?", (url or None, secret or None, bid))
+        if p.get("drop_pending_updates") in (True, "true", "1", 1):
+            run("DELETE FROM bot_updates WHERE bot_id = ?", (bid,))
         return bot_api_ok(req, True)
     if m == "deletewebhook":
-        run("UPDATE bots SET webhook = NULL WHERE id = ?", (bid,))
+        run("UPDATE bots SET webhook = NULL, webhook_secret = NULL WHERE id = ?", (bid,))
+        if p.get("drop_pending_updates") in (True, "true", "1", 1):
+            run("DELETE FROM bot_updates WHERE bot_id = ?", (bid,))
         return bot_api_ok(req, True)
     return bot_api_err(req, 404, "Not Found: method not found")
 
@@ -5614,7 +5703,10 @@ def botgod_handle(uid, text, atts):
         return botgod_say(uid, "Готово! Бот @%s создан. Найти его можно по username.\n\n"
                                "Токен доступа к Bot API (храните в секрете — с ним можно управлять ботом):\n%s\n\n"
                                "Дальше: /setdescription — «Что умеет этот бот?», /setdescriptionpic — баннер, "
-                               "/setuserpic — аватарка, /setcommands — команды." % (un, token))
+                               "/setuserpic — аватарка, /setcommands — команды.\n\n"
+                               "Код бота пишется на Python с библиотекой orbitagram (как aiogram):\n"
+                               "pip install ./SDK/python, затем Bot(\"токен\", server=\"%s\") — "
+                               "примеры в SDK/python/README_Orbitagram.md." % (un, token, PUBLIC_BASE or "https://ваш-сервер"))
     if step == "pick":
         bid = botgod_pick(uid, st, text)
         if not bid:
