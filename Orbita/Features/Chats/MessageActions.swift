@@ -157,6 +157,8 @@ struct MessageActionOverlay: View {
         if canEdit && message.poll == nil && !message.isArticle { n += 1 }
         if canTranslate { n += 1 }
         if canNote { n += 1 }
+        if onReactions != nil, message.reactions.contains(where: { $0.count > 0 }) { n += 1 }                 // кто отреагировал
+        if onReport != nil, !message.mine, message.system == nil, !message.text.hasPrefix("\u{200B}call:") { n += 1 }   // пожаловаться
         return n
     }
     private var listHeight: CGFloat {
@@ -168,7 +170,8 @@ struct MessageActionOverlay: View {
         GeometryReader { g in
             let screen = g.size
             let top = TopInset.value + 8
-            let bottom = screen.height - max(BottomInset.value, 12) - 8
+            // кнопки не стелются по низу экрана: отступ над полоской «домой»
+            let bottom = screen.height - max(BottomInset.value, 12) - 24
             let f = sourceFrame ?? CGRect(x: 0, y: screen.height * 0.35, width: screen.width, height: 80)
             // одно медиа без текста (видео, фото, кружок) не влезает по высоте — показываем целиком, уменьшив с сохранением
             // пропорций; ряд реакций ложится поверх его верха. Остальное (длинный текст) — как раньше, в прокрутке
