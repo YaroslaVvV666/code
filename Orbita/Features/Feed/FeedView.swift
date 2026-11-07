@@ -80,6 +80,7 @@ struct FeedView: View {
                     if !searching {
                         // истории: только друзья и те, кто добавил вас в контакты; нет историй — нет и кружков
                         StoryTray(store: stories, pull: pull)
+                        if vm.authorFilter == nil { composeCard }       // «Что у вас нового?» — пост, как в ВК
                         feedModeSwitch
                         Divider().overlay(theme.stroke)
                     }
@@ -278,6 +279,37 @@ struct FeedView: View {
     }
 
     // MARK: Шапка
+
+    /// Приглашение написать пост: вместо большой «+» в нижней панели — тем, кто хочет постить, она тут, остальным не мешает
+    private var composeCard: some View {
+        let me = session.profile.profile
+        return Button {
+            Haptics.impact(.light)
+            onCompose()
+        } label: {
+            HStack(spacing: 12) {
+                AvatarView(name: me?.name ?? "", size: 40, avatarID: me?.avatarID)
+                Text(s.wallWhatsNew)
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .frame(height: 40)
+                    .background(theme.text.opacity(theme.dark ? 0.07 : 0.05), in: Capsule())
+                HStack(spacing: 14) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                    Image(systemName: "square.and.pencil")
+                }
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(theme.accentColor)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+    }
 
     private var header: some View {
         HStack(spacing: 12) {

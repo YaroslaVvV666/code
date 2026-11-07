@@ -1251,17 +1251,40 @@ enum OrbitStage {
 enum OrbitTone {
     private static var cache: [String: UIColor] = [:]
     private static let lock = NSLock()
+    /// Оттенки по аватарке запоминаются на диске: без интернета свечение орбиты то же, что и с ним
+    private static let storeKey = "orbit.tones.v1"
+    private static var saved: [String: Double] = (UserDefaults.standard.dictionary(forKey: storeKey) as? [String: Double]) ?? [:]
 
-    static func cached(_ id: String) -> UIColor? { lock.lock(); defer { lock.unlock() }; return cache[id] }
+    private static func color(_ hue: CGFloat) -> UIColor { UIColor(hue: hue, saturation: 0.78, brightness: 0.88, alpha: 1) }
 
-    static func load(_ f: OrbitFriend) async -> UIColor {
-        if let hit = cached(f.id) { return hit }
+    static func cached(_ id: String) -> UIColor? {
+        lock.lock(); defer { lock.unlock() }
+        if let c = cache[id] { return c }
+        if let h = saved[id] { let c = color(CGFloat(h)); cache[id] = c; return c }
+        return nil
+    }
+
+    /// offline: нет сети — не ждём загрузку, берём сохранённое или оттенок по имени
+    static func load(_ f: OrbitFriend, offline: Bool = false) async -> UIColor {
+        let key = f.id + "|" + (f.avatarID ?? "")
+        if let hit = cached(key) { return hit }
         var hue: CGFloat = CGFloat(f.name.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % 360) / 360     // нет фото — оттенок по имени
-        if let id = f.avatarID, let url = ServerConfig.mediaURL(id),
-           let image = await ImageCache.shared.load(url, maxPixel: 160), let h = dominantHue(image) { hue = h }
-        let color = UIColor(hue: hue, saturation: 0.78, brightness: 0.88, alpha: 1)
-        lock.lock(); cache[f.id] = color; lock.unlock()
-        return color
+        var fromPhoto = false
+        if let id = f.avatarID, let url = ServerConfig.mediaURL(id), !offline || AvatarStore.has(id),
+           let image = await ImageCache.shared.load(url, maxPixel: 160, persistKey: id), let h = dominantHue(image) {
+            hue = h
+            fromPhoto = true
+        }
+        let c = color(hue)
+        lock.lock()
+        cache[key] = c
+        if fromPhoto {
+            saved[key] = Double(hue)
+            if saved.count > 300 { saved = Dictionary(uniqueKeysWithValues: saved.suffix(200).map { ($0.key, $0.value) }) }
+            UserDefaults.standard.set(saved, forKey: storeKey)
+        }
+        lock.unlock()
+        return c
     }
 
     private static func dominantHue(_ image: UIImage) -> CGFloat? {
@@ -1329,11 +1352,13 @@ struct OrbitRing: View {
             if Task.isCancelled { return }
         }
         var last = Date().timeIntervalSinceReferenceDate
+        // без интернета аватарки берутся из постоянного кэша на диске: орбита встаёт и кружится сразу, без ожидания сети
+        let offline = await MainActor.run { NetworkState.shared.offline }
         for f in pending {
-            if let id = f.avatarID, let url = ServerConfig.mediaURL(id) {
+            if let id = f.avatarID, let url = ServerConfig.mediaURL(id), !offline || AvatarStore.has(id) {
                 _ = await ImageCache.shared.load(url, maxPixel: AvatarView.pixelBucket(bubbleBase), persistKey: id)
             }
-            _ = await OrbitTone.load(f)                                 // цвет свечения (тоже в фоне, с кэшем)
+            _ = await OrbitTone.load(f, offline: offline)              // цвет свечения (тоже в фоне, с кэшем)
             if Task.isCancelled { return }
             let now = Date().timeIntervalSinceReferenceDate
             let at = max(now, last + 0.3)                               // по одной, не чаще чем раз в 0.3 с
@@ -1441,7 +1466,7 @@ struct OrbitRing: View {
     }
 
     private func bubble(_ f: OrbitFriend, z: Double, t: TimeInterval, active: Bool) -> some View {
-        let ui = OrbitTone.cached(f.id) ?? UIColor(hue: 0.85, saturation: 0.7, brightness: 0.88, alpha: 1)
+        let ui = OrbitTone.cached(f.id + "|" + (f.avatarID ?? "")) ?? UIColor(hue: 0.85, saturation: 0.7, brightness: 0.88, alpha: 1)
         let neon = Color(ui)
         let k = 0.80 + 0.30 * (z + 1) / 2                        // дальше — меньше
         let d = bubbleBase                                        // рисуем в постоянном размере, глубину даёт scaleEffect ниже

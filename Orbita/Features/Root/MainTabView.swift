@@ -119,7 +119,7 @@ struct MainTabView: View {
         .overlay(alignment: .bottom) {
             TabBarHost(chats: session.chats, selection: Binding(
                 get: { tab },
-                set: { new in tab = new })) { showComposer = true }
+                set: { new in tab = new }))
                 .background(GeometryReader { g in
                     Color.clear.preference(key: TabBarHeightKey.self, value: g.size.height)
                 })
@@ -266,7 +266,6 @@ extension EnvironmentValues {
 struct TabBarHost: View {
     @ObservedObject var chats: ChatsModel
     @Binding var selection: MainTab
-    let onCompose: () -> Void
 
     /// Панель на экране. Отстаёт от chatOpen при выходе из чата: вышли и сразу зашли обратно — панель не успевает
     /// выехать и не мелькает. При входе в чат прячется сразу
@@ -281,7 +280,7 @@ struct TabBarHost: View {
         // Внутри переписки панель прячется — как в Telegram
         Group {
         if shown {
-            OrbitaTabBar(selection: $selection, chatsBadge: chats.unread, onCompose: onCompose)
+            OrbitaTabBar(selection: $selection, chatsBadge: chats.unread)
                 // вся полоса под панелью «съедает» касания: посты и фото позади не нажимаются
                 .background(Color.black.opacity(0.001).ignoresSafeArea(edges: .bottom))
                 .contentShape(Rectangle())
@@ -308,11 +307,10 @@ struct TabBarHost: View {
 struct OrbitaTabBar: View {
     @Binding var selection: MainTab
     var chatsBadge = 0
-    let onCompose: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    /// Положение пузыря в «слотах» панели (0…5, кнопка «+» — слот 2)
+    /// Положение пузыря в «слотах» панели (0…4). Кнопки «+» нет: пост создаётся с «Главной» и из профиля, как в ВК
     @State private var pillSlot: CGFloat
     /// Перемотка шортса жестом по панели вкладок: с какого места начали
     @State private var scrubStart: Double = 0
@@ -322,10 +320,9 @@ struct OrbitaTabBar: View {
     @State private var sliding = false
     @State private var suppressTapUntil = Date.distantPast
 
-    init(selection: Binding<MainTab>, chatsBadge: Int = 0, onCompose: @escaping () -> Void) {
+    init(selection: Binding<MainTab>, chatsBadge: Int = 0) {
         _selection = selection
         self.chatsBadge = chatsBadge
-        self.onCompose = onCompose
         _pillSlot = State(initialValue: Self.slot(selection.wrappedValue))
     }
 
@@ -333,11 +330,13 @@ struct OrbitaTabBar: View {
         switch tab {
         case .home: return 0
         case .reels: return 1
-        case .chats: return 3
-        case .communities: return 4
-        case .profile: return 5
+        case .chats: return 2
+        case .communities: return 3
+        case .profile: return 4
         }
     }
+
+    private static let slots: CGFloat = 5
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -345,19 +344,6 @@ struct OrbitaTabBar: View {
         HStack(alignment: .center, spacing: 0) {
             item(.home, icon: "house.fill", label: s.tabHome)
             item(.reels, icon: "play.rectangle.on.rectangle.fill", label: s.t("Шортс", "Shorts"))
-            Button {
-                Haptics.impact(.light)
-                onCompose()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Color.white)
-                    .frame(width: 50, height: 46)
-                    .glass(Capsule(), tint: theme.accentColor, interactive: true)
-            }
-            .buttonStyle(PressStyle())
-            .frame(maxWidth: .infinity)
-
             item(.chats, icon: "bubble.left.and.bubble.right.fill", label: s.tabChats, badge: chatsBadge)
 
             item(.communities, icon: "person.3.fill", label: s.tabCommunities)
@@ -411,29 +397,28 @@ struct OrbitaTabBar: View {
     /// Позиция пузыря (в слотах) под пальцем — центр пузыря следует за точкой касания
     private func slideSlot(_ x: CGFloat) -> CGFloat {
         guard barWidth > 0 else { return pillSlot }
-        let w = barWidth / 6
-        return min(5, max(0, x / w - 0.5))
+        let w = barWidth / Self.slots
+        return min(Self.slots - 1, max(0, x / w - 0.5))
     }
 
-    /// Какая вкладка под пальцем при отпускании (ячейка «+» не выбирается — берём ближайшую вкладку)
+    /// Какая вкладка под пальцем при отпускании
     private func tabAt(_ x: CGFloat) -> MainTab {
         guard barWidth > 0 else { return selection }
-        let w = barWidth / 6
-        let cell = min(5, max(0, Int((x / w).rounded(.down))))
+        let w = barWidth / Self.slots
+        let cell = min(Int(Self.slots) - 1, max(0, Int((x / w).rounded(.down))))
         switch cell {
         case 0: return .home
         case 1: return .reels
-        case 3: return .chats
-        case 4: return .communities
-        case 5: return .profile
-        default: return (x / w - 2) < 0.5 ? .reels : .chats      // ячейка «+»
+        case 2: return .chats
+        case 3: return .communities
+        default: return .profile
         }
     }
 
     /// Один пузырь на всю панель: катится от слота к слоту, к середине пути «раздувается» и возвращается с мягким отскоком
     private var pillView: some View {
         GeometryReader { geo in
-            let w = geo.size.width / 6
+            let w = geo.size.width / Self.slots
             Capsule().fill(theme.accentColor.opacity(0.16))
                 .frame(width: w, height: geo.size.height)
                 .keyframeAnimator(initialValue: 1.0, trigger: selection) { content, k in

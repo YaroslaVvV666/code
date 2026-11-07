@@ -32,6 +32,15 @@ final class ProfileStore: ObservableObject {
                 Task.detached(priority: .userInitiated) { _ = await ImageCache.shared.load(url, maxPixel: 1280, persistKey: id) }
             }
             for id in ids.dropFirst(3) { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
+            // лучшие друзья с орбиты: их аватарки и цвет свечения — в постоянный кэш, чтобы без интернета орбита
+            // кружилась вокруг аватарки так же, как с ним
+            let friends = Array(p.orbit.prefix(8))
+            Task.detached(priority: .utility) {
+                for f in friends {
+                    if let id = f.avatarID { await AvatarStore.pin(id) }
+                    _ = await OrbitTone.load(f)
+                }
+            }
         }
     }
 
