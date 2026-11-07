@@ -121,7 +121,11 @@ struct ArticleComposer: View {
             .presentationDetents([.large])
         }
         .sheet(isPresented: $showEmoji) {
-            ArticleEmojiPicker { appendText($0) }
+            // выбрали эмодзи — выбор закрывается, эмодзи сразу в статье
+            ArticleEmojiPicker { e in
+                showEmoji = false
+                insertInline(e)
+            }
                 .environment(\.theme, theme)
                 .presentationDetents([.height(320)])
         }
@@ -921,10 +925,13 @@ struct ArticleComposer: View {
             insert(b)
             return
         }
-        let piece = MathText.inline(value)
-        if let i = focusedIndex, ([.text, .heading, .quote, .pullquote, .collapse, .list] as [ArticleBlock.Kind]).contains(blocks[i].kind) {
-            appendText(piece)
-        } else if let i = blocks.lastIndex(where: { $0.kind == .text }) {
+        insertInline(MathText.inline(value))
+    }
+
+    /// Кусочек текста (эмодзи, формула) — в поле, где был курсор; если такого нет — в последний текстовый блок или в новый
+    private func insertInline(_ piece: String) {
+        if appendText(piece) { return }
+        if let i = blocks.lastIndex(where: { $0.kind == .text }) {
             blocks[i].text += piece
             let id = blocks[i].id
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { focus = id }
@@ -935,8 +942,10 @@ struct ArticleComposer: View {
         }
     }
 
-    private func appendText(_ e: String) {
-        guard let f = focus ?? lastFocus, let i = focusedIndex else { return }
+    /// Дописать в поле, где стоит (или стоял) курсор. false — подходящего поля нет
+    @discardableResult
+    private func appendText(_ e: String) -> Bool {
+        guard let f = focus ?? lastFocus, let i = focusedIndex else { return false }
         let id = blocks[i].id
         if f == id {
             blocks[i].text += e
@@ -950,8 +959,11 @@ struct ArticleComposer: View {
             blocks[i].caption += e
         } else if f.hasPrefix(id + "#i"), let k = Int(f.dropFirst(id.count + 2)), k < blocks[i].items.count {
             blocks[i].items[k].text += e
+        } else {
+            return false                     // курсор был в ячейке таблицы и т.п.
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { focus = f }
+        return true
     }
 
     // MARK: Отменить / повторить
