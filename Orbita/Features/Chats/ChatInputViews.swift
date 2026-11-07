@@ -47,6 +47,10 @@ struct ChatInputBar: View {
     @State private var showSchedule = false
     @State private var showCapsule = false               // капсула времени: когда откроется
     @State private var showChain = false                 // фото-цепочка: тема дня
+    @State private var showChecklist = false             // «Список»: чек-лист с галочками
+    @State private var showMusic = false                 // «Звук»: недавняя музыка, плейлист, загрузка
+    @State private var showContactPick = false           // «Контакт»
+    @State private var audioOnlyImport = false           // файл-пикер только для музыки
     @State private var showSecretPlace = false           // секрет: где откроется
     @State private var showStickerCreator = false
     @State private var kbVisible = false
@@ -166,6 +170,38 @@ struct ChatInputBar: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showChecklist) {
+            ChecklistCreateSheet { title, items, othersAdd in
+                Task { _ = await model.sendChecklist(title: title, items: items, othersAdd: othersAdd) }
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showMusic) {
+            MusicPickerSheet(onPick: { copies in
+                Task {
+                    _ = await model.sendReady(copies.map {
+                        OutgoingAttachment(type: "audio", mediaID: $0.mediaId, name: $0.name.isEmpty ? nil : $0.name,
+                                           title: $0.title, artist: $0.artist, thumb: $0.thumb)
+                    })
+                }
+            }, onUpload: {
+                audioOnlyImport = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true }
+            })
+            .environmentObject(session)
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.large])
+            .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showContactPick) {
+            ContactPickerSheet(repo: model.repo) { c in
+                Task { _ = await model.sendReady([OutgoingAttachment(type: "contact", name: c.name, userID: c.id, phone: c.phone)]) }
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.medium, .large])
+            .presentationBackground(theme.sheet)
+        }
         .sheet(isPresented: $showCapsule) {
             CapsuleSheet { date in sendLocked(OutgoingLock(openAt: date)) }
                 .environment(\.theme, theme).environment(\.lang, lang)
@@ -193,6 +229,7 @@ struct ChatInputBar: View {
                 if !articleSeed.isEmpty { controller.clear() }    // текст из поля ушёл статьёй
                 articleSeed = ""
             }
+            .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
         }
         .sheet(isPresented: $showLocation) {
@@ -204,11 +241,18 @@ struct ChatInputBar: View {
         .sheet(isPresented: $showAttach) {
             AttachSheet(canPoll: !model.peer.isChannel || model.group?.isAdmin == true,
                         onAssets: { addAssets($0) },
-                        onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
+                        onFiles: { audioOnlyImport = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
                         onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
                         onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
+                        onAudio: model.isBot ? nil : { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showMusic = true } },
                         onChain: model.isBot || (model.peer.isChannel && model.group?.isAdmin != true) ? nil : {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showChain = true }
+                        },
+                        onChecklist: model.isBot || (model.peer.isChannel && model.group?.isAdmin != true) ? nil : {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showChecklist = true }
+                        },
+                        onContact: model.isBot ? nil : {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showContactPick = true }
                         },
                         onArticle: model.isBot ? nil : {
                             articleSeed = ""
@@ -224,7 +268,8 @@ struct ChatInputBar: View {
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems, maxSelectionCount: 10,
                       matching: .any(of: [.images, .videos]))
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: audioOnlyImport ? [.audio] : [.item],
+                      allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { importFiles(urls) }
         }
         .onChange(of: pickerItems) { _, items in
@@ -344,6 +389,7 @@ struct ChatInputBar: View {
         case .file: return a.name ?? s.fileLabel
         case .audio: return a.displayTitle
         case .location: return a.geo?.isLive == true ? s.t("📍 Трансляция геопозиции", "📍 Live location") : s.t("📍 Геопозиция", "📍 Location")
+        case .contact: return "👤 " + (a.name ?? s.t("Контакт", "Contact"))
         }
     }
 

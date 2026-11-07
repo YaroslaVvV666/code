@@ -603,6 +603,9 @@ struct MessageRow: View {
             }
             if let imp = message.imported { ImportedBadge(info: imp, mine: mine) }        // перенесено из Telegram / WhatsApp
             if let chain = message.chain { PhotoChainBlock(message: message, chain: chain, mine: mine) }   // фото-цепочка
+            if let list = message.checklist {                                                             // список с галочками
+                ChecklistBlock(message: message, list: list, mine: mine)     // время — общей строкой внизу
+            }
             // капсула времени / секрет на месте: у получателя — запечатано, у отправителя и после открытия — пометка
             if let lock = message.lock {
                 if message.sealed {
@@ -702,7 +705,8 @@ struct MessageRow: View {
             }
 
             ForEach(message.attachments.filter { $0.kind == .voice || $0.kind == .file || $0.kind == .circle
-                                                  || $0.kind == .sticker || $0.kind == .audio || $0.kind == .location }) { a in
+                                                  || $0.kind == .sticker || $0.kind == .audio || $0.kind == .location
+                                                  || $0.kind == .contact }) { a in
                 Group {
                     switch a.kind {
                     case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
@@ -719,6 +723,8 @@ struct MessageRow: View {
                             LocationBlock(geo: geo, messageID: message.id, mine: mine, pending: message.isPending)
                                 .allowsHitTesting(!blocked)
                         }
+                    case .contact:
+                        ContactCard(attachment: a, mine: mine) { id in if !blocked { onOpenProfile?(id) } }
                     default: StickerImage(sticker: a.asSticker, size: 120)
                     }
                 }
@@ -736,7 +742,7 @@ struct MessageRow: View {
 
             if message.isArticle {
                 EmptyView()
-            } else if hasText && message.poll == nil && message.chain == nil {
+            } else if hasText && message.poll == nil && message.chain == nil && message.checklist == nil {
                 // перевод прямо в пузыре: «Показать оригинал» в меню возвращает текст
                 let translated = translator.translation(message.id)
                 if translated != nil {

@@ -6508,6 +6508,19 @@ def clean_attachments(raw, uid):
             if item:
                 out.append(item)
             continue
+        if t == "contact":
+            # карточка контакта: человек из Orbita (имя и аватарка — с сервера), номер — тот, что знает отправитель
+            cu = q1("SELECT * FROM users WHERE id = ?", (str(a.get("user_id", "")),))
+            if not cu:
+                raise ApiError(400, "contact_not_found")
+            phone = str(a.get("phone") or "")
+            phone = phone[:20] if re.match(r"^\+?\d{6,18}$", phone) else ""
+            if not phone:
+                phone = profile_json(cu, uid).get("phone") or ""          # номер, который отправителю и так виден
+            b = user_brief(cu["id"], uid, cu)
+            out.append({"type": "contact", "user_id": cu["id"], "name": clean_line(a.get("name"), 64) or b["name"],
+                        "username": b.get("username"), "avatar": b.get("avatar"), "phone": phone})
+            continue
         kind = ATT_KINDS.get(t)
         if not kind:
             continue
@@ -6652,6 +6665,8 @@ def attachment_label(att):
         return "%s Стикер" % (att.get("emoji") or STICKER_IDS.get(att.get("sticker"), ""))
     if t == "location":
         return "📍 Трансляция геопозиции" if att.get("live_until") else "📍 " + (att.get("title") or "Геопозиция")
+    if t == "contact":
+        return "👤 " + (att.get("name") or "Контакт")
     return att.get("name") or "Файл"
 
 
@@ -6900,6 +6915,7 @@ def _message_json(m, me_id):
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
         **({"chain": chain_json(mid, me_id)} if m["kind"] == "chain" else {}),
+        **({"checklist": checklist_json(mid, me_id)} if m["kind"] == "checklist" else {}),
         **({"expires_at": m["expires_at"]} if m["expires_at"] else {}),
         **({"markup": mk} if (mk := markup_of(m)) else {}),
         **article_fields(m),
@@ -7157,6 +7173,153 @@ def clean_poll(raw):
             raise ApiError(400, "bad_quiz")
         out.update(quiz=1, multiple=0, correct=correct, explanation=clean_line(raw.get("explanation"), 200))
     return out
+
+
+# ---------- чек-лист (список с галочками) ----------
+# Заголовок и пункты; любой в чате отмечает сделанное (видно, кто и когда). Можно разрешить другим добавлять пункты.
+
+DB.execute("CREATE TABLE IF NOT EXISTS checklists(message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, others_add INTEGER NOT NULL DEFAULT 1, "
+           "created_at REAL NOT NULL)")
+DB.execute("CREATE TABLE IF NOT EXISTS checklist_items(id TEXT PRIMARY KEY, message_id TEXT NOT NULL, position INTEGER NOT NULL, "
+           "text_enc BLOB NOT NULL, added_by TEXT NOT NULL, done_by TEXT, done_at REAL)")
+CHECKLIST_MAX = 50
+
+
+def clean_checklist(raw):
+    if not isinstance(raw, dict):
+        return None
+    title = clean_line(raw.get("title"), 120)
+    items = [clean_line(x, 200) for x in (raw.get("items") or []) if isinstance(x, str)]
+    items = [x for x in items if x][:CHECKLIST_MAX]
+    if not title or not items:
+        raise ApiError(400, "bad_checklist")
+    return {"title": title, "items": items, "others_add": 0 if raw.get("others_add") is False else 1}
+
+
+def create_checklist(mid, uid, cl):
+    run("INSERT INTO checklists(message_id, owner, others_add, created_at) VALUES (?,?,?,?)", (mid, uid, cl["others_add"], time.time()))
+    for i, text in enumerate(cl["items"]):
+        iid = uuid.uuid4().hex
+        run("INSERT INTO checklist_items(id, message_id, position, text_enc, added_by) VALUES (?,?,?,?,?)",
+            (iid, mid, i, enc(uid, "messages", COL["msg_text"], iid, text), uid))
+
+
+def checklist_json(mid, me_id):
+    c = q1("SELECT * FROM checklists WHERE message_id = ?", (mid,))
+    if not c:
+        return None
+    items = []
+    for r in q("SELECT * FROM checklist_items WHERE message_id = ? ORDER BY position", (mid,)):
+        it = {"id": r["id"], "text": dec(r["added_by"], "messages", COL["msg_text"], r["id"], r["text_enc"]) or "", "done": bool(r["done_by"])}
+        if r["done_by"]:
+            b = user_brief(r["done_by"], me_id)
+            it["done_by"] = {"id": r["done_by"], "name": b["name"], "avatar": b.get("avatar"), "me": r["done_by"] == me_id}
+            it["done_at"] = r["done_at"]
+        items.append(it)
+    return {"owner": c["owner"] == me_id, "others_add": bool(c["others_add"]), "items": items}
+
+
+def checklist_ctx(mid, uid):
+    m, grp, _ = find_message(mid, uid)
+    c = q1("SELECT * FROM checklists WHERE message_id = ?", (mid,))
+    if not c:
+        raise ApiError(404, "not_found")
+    return m, grp, c
+
+
+@route("POST", r"/v1/checklists/([a-f0-9]+)/items/([a-f0-9]+)/toggle")
+def checklist_toggle(req, me, mid, iid):
+    uid = me["id"]
+    m, grp, c = checklist_ctx(mid, uid)
+    r = q1("SELECT * FROM checklist_items WHERE id = ? AND message_id = ?", (iid, mid))
+    if not r:
+        raise ApiError(404, "not_found")
+    if r["done_by"]:
+        run("UPDATE checklist_items SET done_by = NULL, done_at = NULL WHERE id = ?", (iid,))
+    else:
+        run("UPDATE checklist_items SET done_by = ?, done_at = ? WHERE id = ?", (uid, time.time(), iid))
+    chain_wake(m, grp)
+    req.send_json(200, {"checklist": checklist_json(mid, uid)})
+
+
+@route("POST", r"/v1/checklists/([a-f0-9]+)/items")
+def checklist_add(req, me, mid):
+    uid = me["id"]
+    m, grp, c = checklist_ctx(mid, uid)
+    if not c["others_add"] and c["owner"] != uid:
+        raise ApiError(403, "forbidden")
+    text = clean_line(req.body_json().get("text"), 200)
+    if not text:
+        raise ApiError(400, "bad_value")
+    n = q1("SELECT COUNT(*) n, COALESCE(MAX(position), -1) p FROM checklist_items WHERE message_id = ?", (mid,))
+    if n["n"] >= CHECKLIST_MAX:
+        raise ApiError(409, "too_many")
+    iid = uuid.uuid4().hex
+    run("INSERT INTO checklist_items(id, message_id, position, text_enc, added_by) VALUES (?,?,?,?,?)",
+        (iid, mid, n["p"] + 1, enc(uid, "messages", COL["msg_text"], iid, text), uid))
+    chain_wake(m, grp)
+    req.send_json(200, {"checklist": checklist_json(mid, uid)})
+
+
+# ---------- «Звук» в скрепке: недавняя музыка ----------
+
+@route("GET", r"/v1/me/recent-audio")
+def recent_audio(req, me):
+    """Музыка, которую человек видел: из своих переписок и групп (свежие сверху) — для вкладки «Звук», как в Telegram"""
+    uid = me["id"]
+    out, seen = [], set()
+    rows = q("SELECT * FROM messages WHERE attachments_enc IS NOT NULL AND ((sender = ? AND del_sender = 0) OR (recipient = ? AND del_recipient = 0)) "
+             "ORDER BY created_at DESC LIMIT 400", (uid, uid))
+    rows += q("SELECT gm.* FROM group_messages gm JOIN group_members mb ON mb.group_id = gm.group_id AND mb.user_id = ? "
+              "WHERE gm.attachments_enc IS NOT NULL ORDER BY gm.created_at DESC LIMIT 400", (uid,))
+    rows.sort(key=lambda r: r["created_at"], reverse=True)
+    for m in rows:
+        for a in attachments_of(m):
+            is_music = a.get("type") == "audio" or (a.get("type") == "file" and str(a.get("mime", "")).startswith("audio"))
+            if not is_music or a.get("media_id") in seen:
+                continue
+            seen.add(a["media_id"])
+            out.append({"message_id": m["id"], "media_id": a["media_id"], "title": a.get("title") or a.get("name") or "",
+                        "artist": a.get("artist") or "", "duration": a.get("duration") or 0, "thumb": a.get("thumb"),
+                        "at": m["created_at"]})
+            if len(out) >= 60:
+                break
+        if len(out) >= 60:
+            break
+    req.send_json(200, {"audio": out})
+
+
+@route("POST", r"/v1/messages/([a-f0-9]+)/audio-copy")
+def audio_copy(req, me, mid):
+    """Своя копия трека из сообщения, которое человек видит — чтобы отправить его дальше как свой"""
+    uid = me["id"]
+    m, grp, _ = find_message(mid, uid)
+    media_id = str(req.body_json().get("media_id", ""))
+    att = next((a for a in attachments_of(m) if a.get("media_id") == media_id), None)
+    if not att:
+        raise ApiError(404, "not_found")
+    nid = clone_media(media_id, uid)
+    if not nid:
+        raise ApiError(404, "not_found")
+    cover = clone_media(att["thumb"], uid) if att.get("thumb") else None
+    req.send_json(200, {"media_id": nid, "thumb": cover, "title": att.get("title") or "", "artist": att.get("artist") or "",
+                        "name": att.get("name") or "", "duration": att.get("duration") or 0})
+
+
+@route("POST", r"/v1/me/playlist/([a-f0-9]+)/copy")
+def playlist_track_copy(req, me, tid):
+    """Копия трека из своего плейлиста для отправки: удалят сообщение — песня в плейлисте останется"""
+    uid = me["id"]
+    t = q1("SELECT * FROM tracks WHERE id = ? AND user_id = ?", (tid, uid))
+    if not t:
+        raise ApiError(404, "not_found")
+    j = track_json(t)
+    nid = clone_media(t["media_id"], uid)
+    if not nid:
+        raise ApiError(404, "not_found")
+    cover = clone_media(j["cover"], uid) if j.get("cover") else None
+    req.send_json(200, {"media_id": nid, "thumb": cover, "title": j["title"], "artist": j["artist"],
+                        "name": j["title"], "duration": j["duration"]})
 
 
 # ---------- фото-цепочка ----------
@@ -8136,9 +8299,12 @@ def send_message(req, me, peer):
             raise ApiError(403, "blocked")
     poll = clean_poll(d.get("poll"))
     chain = None if poll else clean_chain(d.get("chain"))                 # фото-цепочка
-    blocks = None if poll or chain else clean_blocks(d.get("blocks"), uid)          # статья из блоков
+    checklist = None if poll or chain else clean_checklist(d.get("checklist"))   # список с галочками
+    blocks = None if poll or chain or checklist else clean_blocks(d.get("blocks"), uid)          # статья из блоков
     buttons = clean_user_buttons(d.get("buttons"))                         # кнопки-ссылки под сообщением
     text = poll["question"] if poll else ("📸 " + chain["theme"] if chain else str(d.get("text", "")).strip())
+    if checklist:
+        text, send_at = "☑️ " + checklist["title"], None
     if blocks:
         text = (text or blocks_summary(blocks))[:MAX_MSG]
         send_at = None                                                     # статьи уходят сразу
@@ -8179,6 +8345,10 @@ def send_message(req, me, peer):
     if chain:
         run("UPDATE messages SET kind = 'chain' WHERE id = ?", (row["id"],))
         create_chain(row["id"], uid, chain)
+        row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
+    if checklist:
+        run("UPDATE messages SET kind = 'checklist' WHERE id = ?", (row["id"],))
+        create_checklist(row["id"], uid, checklist)
         row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
     if blocks or buttons:
         store_article("messages", row["id"], uid, blocks, buttons)
@@ -9165,7 +9335,8 @@ def list_contacts(req, me):
         u = q1("SELECT * FROM users WHERE id = ?", (r["contact_id"],))
         if not u:
             continue
-        out.append({**user_brief(u["id"], uid), "real_name": names(u)[2]})
+        out.append({**user_brief(u["id"], uid), "real_name": names(u)[2],
+                    **({"phone": ph} if (ph := profile_json(u, uid).get("phone")) else {})})
     out.sort(key=lambda c: c["name"].lower())
     req.send_json(200, {"contacts": out})
 
@@ -9586,6 +9757,8 @@ def gmsg_json(m, me_id, channel=None):
         out["poll"] = poll_json(mid, me_id)
     if "kind" in m.keys() and m["kind"] == "chain":
         out["chain"] = chain_json(mid, me_id)
+    if "kind" in m.keys() and m["kind"] == "checklist":
+        out["checklist"] = checklist_json(mid, me_id)
     if channel:
         out["views"] = max(1, pf_group_views(m))
         cg = group_row(m["group_id"])
@@ -10084,9 +10257,12 @@ def group_send(req, me, gid):
     d = req.body_json()
     poll = clean_poll(d.get("poll"))
     chain = None if poll else clean_chain(d.get("chain"))                 # фото-цепочка
-    blocks = None if poll or chain else clean_blocks(d.get("blocks"), uid)
+    checklist = None if poll or chain else clean_checklist(d.get("checklist"))
+    blocks = None if poll or chain or checklist else clean_blocks(d.get("blocks"), uid)
     buttons = clean_user_buttons(d.get("buttons"))
     text = poll["question"] if poll else ("📸 " + chain["theme"] if chain else str(d.get("text", "")).strip())
+    if checklist:
+        text = "☑️ " + checklist["title"]
     if blocks:
         text = (text or blocks_summary(blocks))[:MAX_MSG]
     attachments = [] if poll else clean_attachments(d.get("attachments"), uid)
@@ -10120,13 +10296,15 @@ def group_send(req, me, gid):
         (mid, gid, uid, enc(uid, "messages", COL["msg_text"], mid, text),
          enc(uid, "messages", COL["msg_entities"], mid, json.dumps(entities, ensure_ascii=False)),
          enc(uid, "messages", COL["msg_attach"], mid, json.dumps(attachments)) if attachments else None,
-         reply_to, now, "poll" if poll else ("chain" if chain else None)))
+         reply_to, now, "poll" if poll else ("chain" if chain else ("checklist" if checklist else None))))
     if topic_id:
         run("UPDATE group_messages SET topic_id = ? WHERE id = ?", (topic_id, mid))
     if blocks or buttons:
         store_article("group_messages", mid, uid, blocks, buttons)
     if chain:
         create_chain(mid, uid, chain)
+    if checklist:
+        create_checklist(mid, uid, checklist)
     if poll:
         create_poll(mid, uid, poll)
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, gid, uid))

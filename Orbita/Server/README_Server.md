@@ -308,3 +308,14 @@ while True:
   `/items/<item>/approve`, `DELETE /items/<item>`, `/settings` (`moderated`, `closed`), `/reel` — коллаж в шортсы.
   С проверкой новые фото видит только владелец, пока не одобрит. Проверка: `python3 tests/test_photo_chain.py`.
 
+
+## Скрепка: список, звук, контакт
+
+- **Список** (чек-лист): сообщение с `"checklist": {"title", "items": [...], "others_add": true}` (личка и группы, до 50 пунктов).
+  `POST /v1/checklists/<id>/items/<item>/toggle` — отметить/снять (видно кто и когда), `POST /v1/checklists/<id>/items {"text"}` —
+  добавить пункт (если владелец разрешил другим). В сообщении — `checklist: {owner, others_add, items: [{id, text, done, done_by, done_at}]}`.
+- **Контакт**: вложение `{"type": "contact", "user_id", "phone"?}` — сервер подставляет имя, @username, аватарку и номер
+  (если человек его показывает). Изменить нельзя — только удалить. `GET /v1/contacts` теперь отдаёт и `phone`.
+- **Звук**: `GET /v1/me/recent-audio` — музыка из своих переписок и групп (до 60, свежие сверху);
+  `POST /v1/messages/<id>/audio-copy {"media_id"}` и `POST /v1/me/playlist/<track>/copy` — своя копия трека для отправки
+  (удалят сообщение — оригинал останется). Проверка: `python3 tests/test_attach_extras.py`.

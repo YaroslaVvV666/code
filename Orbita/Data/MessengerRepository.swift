@@ -219,6 +219,7 @@ struct Contact: Identifiable, Equatable {
     var realName: String
     var username: String?
     var avatarID: String?
+    var phone: String? = nil        // номер, если человек его показывает
 }
 
 struct ChatSummary: Identifiable, Equatable {
@@ -250,7 +251,7 @@ struct ReplyRef: Equatable {
 
 /// Вложение сообщения: фото, видео, кружок, голосовое, файл или стикер
 struct ChatAttachment: Identifiable, Equatable {
-    enum Kind: String { case photo, video, circle, voice, file, sticker, audio, location }
+    enum Kind: String { case photo, video, circle, voice, file, sticker, audio, location, contact }
 
     let kind: Kind
     var mediaID: String? = nil
@@ -269,8 +270,12 @@ struct ChatAttachment: Identifiable, Equatable {
     var stickerPack: String? = nil          // свой стикер: из какого набора (нажатие — «Добавить набор»)
     var gif = false                         // видео без звука, отправленное как GIF: крутится по кругу
     var geo: GeoPoint? = nil                // геопозиция: точка или трансляция
+    var userID: String? = nil               // контакт: чей аккаунт
+    var phone: String? = nil
+    var username: String? = nil
+    var avatarID: String? = nil
 
-    var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? name ?? "local") }
+    var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? userID ?? name ?? "local") }
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
 
     /// Для просмотрщика фото и видео
@@ -376,6 +381,60 @@ struct PhotoChainDTO: Decodable {
     }
 }
 
+/// Список с галочками: пункты отмечают все участники чата
+struct Checklist: Equatable {
+    struct Item: Identifiable, Equatable {
+        let id: String
+        var text: String
+        var done: Bool
+        var doneByID: String?
+        var doneByName: String?
+        var doneByAvatar: String?
+        var doneByMe: Bool
+        var doneAt: Date?
+    }
+    var owner: Bool
+    var othersAdd: Bool
+    var items: [Item]
+    var doneCount: Int { items.filter(\.done).count }
+}
+
+struct ChecklistDTO: Decodable {
+    struct ItemDTO: Decodable {
+        struct By: Decodable { let id: String; let name: String; let avatar: String?; let me: Bool? }
+        let id: String; let text: String; let done: Bool; let doneBy: By?; let doneAt: Double?
+        var model: Checklist.Item {
+            Checklist.Item(id: id, text: text, done: done, doneByID: doneBy?.id, doneByName: doneBy?.name,
+                           doneByAvatar: doneBy?.avatar, doneByMe: doneBy?.me ?? false,
+                           doneAt: doneAt.map { Date(timeIntervalSince1970: $0) })
+        }
+    }
+    let owner: Bool; let othersAdd: Bool; let items: [ItemDTO]
+    var model: Checklist { Checklist(owner: owner, othersAdd: othersAdd, items: items.map(\.model)) }
+}
+
+/// Трек, который человек видел в переписках — для вкладки «Звук»
+struct RecentAudio: Identifiable, Equatable, Decodable {
+    var id: String { mediaId }
+    let messageId: String
+    let mediaId: String
+    let title: String
+    let artist: String
+    let duration: Double
+    let thumb: String?
+    let at: Double
+}
+
+/// Своя копия трека из чужого сообщения
+struct AudioCopy: Decodable {
+    let mediaId: String
+    let thumb: String?
+    let title: String
+    let artist: String
+    let name: String
+    let duration: Double
+}
+
 /// Сообщение перенесено из другого мессенджера
 struct ImportedInfo: Equatable {
     var source: String              // Telegram / WhatsApp
@@ -439,12 +498,15 @@ struct ChatMessage: Identifiable, Equatable {
     var sealed = false              // замок ещё закрыт: содержимое сервер не прислал
     var imported: ImportedInfo? = nil   // перенесено из Telegram / WhatsApp
     var chain: PhotoChain? = nil        // фото-цепочка
+    var checklist: Checklist? = nil     // список с галочками
+    var contact: ChatAttachment? { attachments.first { $0.kind == .contact } }
     var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
         if system != nil { return "" }
         if sealed, let lock { return lock.place != nil && lock.timeOK ? "📍 Секрет" : "⏳ Капсула времени" }
         if poll != nil { return "📊 " + text }
+        if checklist != nil { return text }
         if text.hasPrefix("\u{200B}call:") { return "Звонок" }
         if !text.isEmpty { return text }
         guard let first = attachments.first else { return "" }
@@ -457,6 +519,7 @@ struct ChatMessage: Identifiable, Equatable {
         case .file: return first.name ?? "Файл"
         case .audio: return first.title ?? first.name ?? "Музыка"
         case .location: return first.geo?.isLive == true ? "📍 Трансляция геопозиции" : "📍 " + (first.geo?.title ?? "Геопозиция")
+        case .contact: return "👤 " + (first.name ?? "Контакт")
         }
     }
 }
@@ -554,9 +617,13 @@ struct OutgoingAttachment {
     var gif = false
     var geo: GeoPoint? = nil
     var live = 0
+    var userID: String? = nil           // контакт
+    var phone: String? = nil
 
     var json: [String: Any] {
         var d: [String: Any] = ["type": type]
+        if let userID { d["user_id"] = userID }
+        if let phone { d["phone"] = phone }
         if let geo {
             d["lat"] = geo.lat
             d["lon"] = geo.lon
@@ -624,6 +691,14 @@ protocol MessengerRepository: Sendable {
     func chainRemove(messageID: String, itemID: String) async throws -> PhotoChain
     func chainSettings(messageID: String, moderated: Bool?, closed: Bool?) async throws -> PhotoChain
     func chainReel(messageID: String) async throws
+    // список с галочками
+    func sendChecklist(peerID: String, title: String, items: [String], othersAdd: Bool) async throws -> ChatMessage
+    func checklistToggle(messageID: String, itemID: String) async throws -> Checklist
+    func checklistAdd(messageID: String, text: String) async throws -> Checklist
+    // «Звук»: недавняя музыка из переписок и своя копия трека
+    func recentAudio() async throws -> [RecentAudio]
+    func audioCopy(messageID: String, mediaID: String) async throws -> AudioCopy
+    func playlistCopy(trackID: String) async throws -> AudioCopy
     // темы в группах
     func topics(groupID: String) async throws -> ForumTopicList
     func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
@@ -797,6 +872,10 @@ private struct AttachmentDTO: Decodable {
     let liveUntil: Double?
     let updatedAt: Double?
     let stopped: Bool?
+    let userId: String?
+    let phone: String?
+    let username: String?
+    let avatar: String?
 
     var model: ChatAttachment? {
         guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
@@ -810,7 +889,8 @@ private struct AttachmentDTO: Decodable {
         return ChatAttachment(kind: kind, mediaID: mediaId, thumbID: thumb, width: width ?? 0, height: height ?? 0,
                               duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
                               waveform: waveform ?? [], sticker: sticker, title: kind == .location ? nil : title, artist: artist,
-                              stickerPack: pack, gif: gif ?? false, geo: geo)
+                              stickerPack: pack, gif: gif ?? false, geo: geo,
+                              userID: userId, phone: phone, username: username, avatarID: avatar)
     }
 }
 
@@ -881,6 +961,7 @@ private struct MessageDTO: Decodable {
     let imported: ImportedDTO?
     struct ImportedDTO: Decodable { let source: String; let name: String? }
     let chain: PhotoChainDTO?
+    let checklist: ChecklistDTO?
 
     struct LockDTO: Decodable {
         struct Place: Decodable { let lat: Double; let lon: Double; let title: String? }
@@ -911,7 +992,7 @@ private struct MessageDTO: Decodable {
                     markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model),
                     lock: lock?.model, sealed: sealed ?? false,
                     imported: imported.map { ImportedInfo(source: $0.source, name: $0.name ?? "") },
-                    chain: chain?.model)
+                    chain: chain?.model, checklist: checklist?.model)
     }
 }
 
@@ -1156,7 +1237,8 @@ private struct ContactDTO: Decodable {
     let realName: String
     let username: String?
     let avatar: String?
-    var model: Contact { Contact(id: id, name: name, realName: realName, username: username, avatarID: avatar) }
+    let phone: String?
+    var model: Contact { Contact(id: id, name: name, realName: realName, username: username, avatarID: avatar, phone: phone) }
 }
 
 private struct ContactListDTO: Decodable { let contacts: [ContactDTO] }
@@ -1397,6 +1479,37 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func chainReel(messageID: String) async throws {
         _ = try await api.request("POST", "/v1/chains/\(messageID)/reel")
+    }
+
+    func sendChecklist(peerID: String, title: String, items: [String], othersAdd: Bool) async throws -> ChatMessage {
+        let body: [String: Any] = ["checklist": ["title": title, "items": items, "others_add": othersAdd]]
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    private struct ChecklistBox: Decodable { let checklist: ChecklistDTO }
+
+    func checklistToggle(messageID: String, itemID: String) async throws -> Checklist {
+        try decodeAPI(ChecklistBox.self, from: try await api.request("POST", "/v1/checklists/\(messageID)/items/\(itemID)/toggle")).checklist.model
+    }
+
+    func checklistAdd(messageID: String, text: String) async throws -> Checklist {
+        try decodeAPI(ChecklistBox.self, from: try await api.request("POST", "/v1/checklists/\(messageID)/items",
+                                                                     body: ServerAPI.json(["text": text]))).checklist.model
+    }
+
+    func recentAudio() async throws -> [RecentAudio] {
+        struct Box: Decodable { let audio: [RecentAudio] }
+        return try decodeAPI(Box.self, from: try await api.request("GET", "/v1/me/recent-audio")).audio
+    }
+
+    func audioCopy(messageID: String, mediaID: String) async throws -> AudioCopy {
+        try decodeAPI(AudioCopy.self, from: try await api.request("POST", "/v1/messages/\(messageID)/audio-copy",
+                                                                  body: ServerAPI.json(["media_id": mediaID])))
+    }
+
+    func playlistCopy(trackID: String) async throws -> AudioCopy {
+        try decodeAPI(AudioCopy.self, from: try await api.request("POST", "/v1/me/playlist/\(trackID)/copy"))
     }
 
     func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int {

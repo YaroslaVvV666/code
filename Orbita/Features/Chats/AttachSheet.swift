@@ -17,6 +17,8 @@ struct AttachSheet: View {
     var onAudio: (() -> Void)? = nil
     /// «Цепочка»: фото-цепочка на тему дня
     var onChain: (() -> Void)? = nil
+    var onChecklist: (() -> Void)? = nil        // «Список»: чек-лист с галочками
+    var onContact: (() -> Void)? = nil          // «Контакт»: карточка человека из Orbita
     var onArticle: (() -> Void)? = nil          // «Статья»: сообщение из блоков (заголовки, цитаты, таблицы, медиа…)
     var onPhoto: (Data) -> Void = { _ in }
     var onVideo: (URL) -> Void = { _ in }
@@ -186,15 +188,16 @@ struct AttachSheet: View {
             .buttonStyle(PressStyle())
             .padding(.horizontal, 16).padding(.bottom, 14)
             .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else if onFiles != nil || onLocation != nil || onAudio != nil || canPoll || onArticle != nil || onChain != nil {
-            HStack(spacing: 0) {
-                tab("gallery", "photo.on.rectangle.fill", s.t("Галерея", "Gallery")) { }
-                if let onAudio { tab("audio", "play.circle.fill", s.t("Звук", "Audio")) { onAudio() } }
-                if let onFiles { tab("file", "doc.fill", s.attachFile) { onFiles() } }
-                if let onLocation { tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location")) { onLocation() } }
-                if canPoll { tab("poll", "chart.bar.fill", s.t("Опрос", "Poll")) { onPoll() } }
-                if let onChain { tab("chain", "photo.stack.fill", s.t("Цепочка", "Chain")) { onChain() } }
-                if let onArticle { tab("article", "doc.richtext.fill", s.t("Статья", "Article")) { onArticle() } }
+        } else if tabCount > 1 {
+            // мало вкладок — растянуты на всю ширину; много — листаются вбок
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 0) { tabs(wide: true) }
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 0) { tabs(wide: false) }
+                    }
+                    .onChange(of: activeTab) { _, id in withAnimation { proxy.scrollTo(id, anchor: .center) } }
+                }
             }
             .padding(6)
             .glass(Capsule())
@@ -203,9 +206,28 @@ struct AttachSheet: View {
         }
     }
 
+    private var tabCount: Int {
+        1 + [onFiles != nil, onLocation != nil, onChecklist != nil, onAudio != nil, onContact != nil, onArticle != nil,
+             canPoll, onChain != nil].filter { $0 }.count
+    }
+
+    /// Порядок: Галерея, Файл, Геопозиция, Список, Звук, Контакт, Статья — потом Опрос и Цепочка
+    @ViewBuilder
+    private func tabs(wide: Bool) -> some View {
+        tab("gallery", "photo.on.rectangle.fill", s.t("Галерея", "Gallery"), wide: wide) { }
+        if let onFiles { tab("file", "doc.fill", s.attachFile, wide: wide) { onFiles() } }
+        if let onLocation { tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location"), wide: wide) { onLocation() } }
+        if let onChecklist { tab("checklist", "checklist", s.t("Список", "Checklist"), wide: wide) { onChecklist() } }
+        if let onAudio { tab("audio", "music.note", s.t("Звук", "Audio"), wide: wide) { onAudio() } }
+        if let onContact { tab("contact", "person.crop.circle.fill", s.t("Контакт", "Contact"), wide: wide) { onContact() } }
+        if let onArticle { tab("article", "doc.richtext.fill", s.t("Статья", "Article"), wide: wide) { onArticle() } }
+        if canPoll { tab("poll", "chart.bar.fill", s.t("Опрос", "Poll"), wide: wide) { onPoll() } }
+        if let onChain { tab("chain", "photo.stack.fill", s.t("Цепочка", "Chain"), wide: wide) { onChain() } }
+    }
+
     /// Вкладка как в меню: подсветка-капсула переезжает на нажатую (с пружинкой), значок подпрыгивает,
     /// и только потом шторка закрывается и открывается выбранное
-    private func tab(_ id: String, _ icon: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+    private func tab(_ id: String, _ icon: String, _ title: String, wide: Bool = true, _ action: @escaping () -> Void) -> some View {
         let on = activeTab == id
         return Button {
             guard id != "gallery" else {
@@ -225,7 +247,8 @@ struct AttachSheet: View {
                 Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
             }
             .foregroundStyle(on ? theme.accentColor : theme.textSecondary)
-            .frame(maxWidth: .infinity).frame(height: 56)
+            .frame(minWidth: 62, maxWidth: wide ? .infinity : nil).frame(height: 56)
+            .padding(.horizontal, wide ? 0 : 6)
             .background {
                 if on {
                     Capsule().fill(theme.accentColor.opacity(0.16))

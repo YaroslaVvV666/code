@@ -30,6 +30,7 @@ struct ArticleComposer: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
+    @State private var showMusic = false
     @State private var importTypes: [UTType] = [.item]       // «Звук» — только аудио, «Файл» — любые
     @State private var showAttach = false                     // скрепка: галерея и вкладки, как в чате
     @State private var showLocation = false
@@ -127,7 +128,7 @@ struct ArticleComposer: View {
                         onFiles: { importTypes = [.item]; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFiles = true } },
                         onPoll: {},
                         onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
-                        onAudio: { importTypes = [.audio]; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFiles = true } },
+                        onAudio: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showMusic = true } },
                         onPhoto: { addCameraPhoto($0) },
                         onVideo: { addVideoFile($0) },
                         onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotos = true } })
@@ -135,6 +136,22 @@ struct ArticleComposer: View {
                 .presentationDetents([.fraction(0.62), .large])
                 .presentationDragIndicator(.visible)
                 .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showMusic) {
+            MusicPickerSheet(onPick: { copies in
+                for copy in copies {
+                    var b = ArticleBlock(kind: .media)
+                    b.media = ChatAttachment(kind: .audio, mediaID: copy.mediaId, thumbID: copy.thumb, duration: copy.duration,
+                                             name: copy.name, title: copy.title, artist: copy.artist)
+                    insert(b)
+                }
+            }, onUpload: {
+                importTypes = [.audio]
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFiles = true }
+            })
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.large])
+            .presentationBackground(theme.sheet)
         }
         .sheet(isPresented: $showLocation) {
             LocationShareSheet { point, _ in
@@ -751,6 +768,28 @@ struct ArticleComposer: View {
                 .background(theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .padding(.horizontal, 16).padding(.top, 50)
             }
+        } else if let a = b.media, a.kind == .audio {
+            // трек из «Недавних»: уже на сервере
+            HStack(spacing: 12) {
+                ZStack {
+                    if let cover = a.thumbID {
+                        RemoteImage(id: cover)
+                    } else {
+                        theme.accent
+                        Image(systemName: "music.note").font(.system(size: 22)).foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 48, height: 48).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(a.displayTitle).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(2)
+                    Text(((a.artist ?? "").isEmpty ? "" : (a.artist ?? "") + " · ") + MusicPickerSheet.time(a.duration))
+                        .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(14)
+            .background(theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 16).padding(.top, 50)
         }
     }
 

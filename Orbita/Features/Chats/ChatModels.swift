@@ -244,7 +244,7 @@ final class ChatModel: ObservableObject {
     @Published var freezing: Set<String> = []
     /// Экран чата подсказывает, где сообщение стоит на экране: оттуда оно и рассыпается
     var frameOf: ((String) -> CGRect?)?
-    @Published private(set) var messages: [ChatMessage] = []
+    @Published var messages: [ChatMessage] = []          // меняют и расширения из других файлов (цепочка, список, капсула)
     @Published private(set) var pending: [ChatMessage] = []
     @Published private(set) var typing: String?
     @Published private(set) var lastSeen: Date?
@@ -711,7 +711,11 @@ final class ChatModel: ObservableObject {
             var out: [[String: Any]] = []
             for b in blocks {
                 var d = b.json
-                if b.kind == .media {
+                if b.kind == .media, b.local == nil, let a = b.media, let mid = a.mediaID {
+                    // уже на сервере (трек из «Недавних»): отправляем как есть
+                    d["media"] = OutgoingAttachment(type: a.kind.rawValue, mediaID: mid, name: a.name, title: a.title,
+                                                    artist: a.artist, thumb: a.thumbID).json
+                } else if b.kind == .media {
                     guard let local = b.local else { continue }
                     switch local.source {
                     case .prepared(let m): ping(m.isVideo ? "video" : "photo")

@@ -109,7 +109,8 @@ struct MessageActionOverlay: View {
 
     private var canEdit: Bool {
         message.mine && (!message.text.isEmpty || !message.attachments.isEmpty)
-            && message.attachments.allSatisfy { $0.kind != .sticker }
+            && message.attachments.allSatisfy { $0.kind != .sticker && $0.kind != .contact }   // контакт — только удалить
+            && message.checklist == nil && message.chain == nil
     }
 
     /// Меню на экране: появилось и ещё не закрывается
