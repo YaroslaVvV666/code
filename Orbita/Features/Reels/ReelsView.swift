@@ -1027,8 +1027,9 @@ struct ReelPage: View {
                     Spacer(minLength: 30)
                     rail
                 }
-                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, 6)
-                progressBar(hitHeight: 48)                       // широкая зона перемотки: промазать по полоске трудно
+                // без подписи имя и кнопки опускаются ближе к полосе — пустого места под ними не остаётся
+                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, post.text.isEmpty ? -8 : 6)
+                progressBar(hitHeight: post.text.isEmpty ? 34 : 48)   // широкая зона перемотки: промазать по полоске трудно
                     .opacity(collage && soundID == nil ? 0 : 1)     // коллаж без звука — перематывать нечего
                     .padding(.horizontal, 14)
                 // кнопки/подпись/полоса прижаты ближе к панели вкладок (как в TikTok): оставляем место ровно под панель, без лишнего зазора
@@ -1291,7 +1292,8 @@ struct ReelPage: View {
                             Button(action: { exitThen(onAuthor) }) {
                                 HStack(spacing: 8) {
                                     AvatarView(name: post.author.name, size: 28, avatarID: post.author.avatarID).clipShape(Circle())
-                                    Text(post.author.username ?? post.author.name)
+                                    Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
+                                         ? (post.author.username.map { "@" + $0 } ?? "") : post.author.name)
                                         .font(.system(size: 15, weight: .bold)).foregroundStyle(.white).lineLimit(1)
                                 }
                                 .padding(.leading, 4).padding(.trailing, 12).frame(height: 36)
@@ -1623,7 +1625,10 @@ struct ReelPage: View {
         VStack(alignment: .leading, spacing: 7) {
             repostBadge
             Button(action: onAuthor) {
-                Text(post.author.username.map { "@" + $0 } ?? post.author.name)
+                // как в TikTok: имя человека; нет имени — @username
+                Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
+                     ? (post.author.username.map { "@" + $0 } ?? "")
+                     : post.author.name)
                     .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
                     .lineLimit(1)
             }
