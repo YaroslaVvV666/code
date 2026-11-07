@@ -172,6 +172,7 @@ final class ChatsModel: ObservableObject {
     }
 
     func clear(_ peerID: String, forEveryone: Bool = false) async {
+        LiveLocationManager.shared.forgetChat(peerID)          // удалили переписку — трансляция геопозиции в ней прекращается
         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) { chats.removeAll { $0.id == peerID } }
         do { try await repo.clear(peerID: peerID, forEveryone: forEveryone) } catch let e as APIError { error = e } catch {}
         await refresh()
@@ -826,6 +827,7 @@ final class ChatModel: ObservableObject {
     /// Несколько выбранных: рассыпаются и уходят из списка разом, запросы на сервер — уже после
     func deleteMany(_ list: [ChatMessage]) async {
         let ids = Set(list.map(\.id))
+        LiveLocationManager.shared.forget(Array(ids))          // удалённая трансляция геопозиции сразу прекращается
         // немного — частицами; много — лёгкое исчезновение без частиц, чтобы анимация не перегружала телефон
         if ids.count <= Self.dustLimit { await dissolve(Array(ids)) } else { Haptics.impact(.soft) }
         withAnimation(ids.count <= Self.dustLimit ? Self.closeGap : .easeOut(duration: 0.25)) {
@@ -841,6 +843,7 @@ final class ChatModel: ObservableObject {
     }
 
     func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
+        LiveLocationManager.shared.forget([message.id])        // удалили сообщение с трансляцией — она прекращается
         if animated { await dissolve([message.id]) }
         withAnimation(Self.closeGap) {
             messages.removeAll { $0.id == message.id }

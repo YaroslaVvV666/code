@@ -4,6 +4,67 @@ import MapKit
 import CoreLocation
 import UIKit
 
+// MARK: - Аватарки на карте трансляции
+
+struct LiveAvatars {
+    var mine: String? = nil
+    var myName = ""
+    var peer: String? = nil
+    var peerName = ""
+}
+
+private struct LiveAvatarsKey: EnvironmentKey { static let defaultValue = LiveAvatars() }
+
+extension EnvironmentValues {
+    var liveAvatars: LiveAvatars {
+        get { self[LiveAvatarsKey.self] }
+        set { self[LiveAvatarsKey.self] = newValue }
+    }
+}
+
+/// Пин трансляции: аватарка в кружочке с цветным ободком, снизу — хвостик, сбоку — стрелка направления
+struct LiveAvatarPin: View {
+    let avatarID: String?
+    let name: String
+    let active: Bool
+    var heading: Double? = nil
+    var size: CGFloat = 40
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: -3) {
+                AvatarView(name: name, size: size, avatarID: avatarID)
+                    .clipShape(Circle())
+                    .padding(3)
+                    .background(Circle().fill(active ? theme.accentColor : Color.gray))
+                    .background { if active { PulseRing(color: theme.accentColor) } }     // «живая» — расходятся волны
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                Triangle().fill(active ? theme.accentColor : Color.gray).frame(width: 12, height: 8)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if let heading, active {
+                    Image(systemName: "location.north.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                        .rotationEffect(.degrees(heading))
+                        .frame(width: 18, height: 18).background(theme.accentColor, in: Circle())
+                        .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                        .offset(x: 4, y: -6)
+                }
+        }
+    }
+
+    /// Высота пина: чтобы кончик хвостика стоял ровно в точке, сдвигаем вверх на половину
+    static func tipOffset(_ size: CGFloat) -> CGFloat { -(size + 6 + 5) / 2 }
+
+    private struct Triangle: Shape {
+        func path(in r: CGRect) -> Path {
+            var p = Path()
+            p.move(to: CGPoint(x: r.minX, y: r.minY)); p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+            p.addLine(to: CGPoint(x: r.midX, y: r.maxY)); p.closeSubpath()
+            return p
+        }
+    }
+}
+
 // MARK: - Трансляция своей геопозиции: шлёт точки на сервер, пока трансляция идёт
 
 @MainActor
@@ -66,6 +127,22 @@ final class LiveLocationManager: NSObject, ObservableObject, CLLocationManagerDe
         updateRunning()
         if let repo { Task { try? await repo.stopLiveLocation(messageID: messageID) } }
     }
+
+    /// Сообщение с трансляцией удалено — трансляция прекращается сама (сервер её уже не примет)
+    func forget(_ messageIDs: [String]) {
+        let ids = Set(messageIDs)
+        guard sessions.contains(where: { ids.contains($0.messageID) }) else { return }
+        sessions.removeAll { ids.contains($0.messageID) }
+        for id in ids { lastSent[id] = nil }
+        save()
+        updateRunning()
+    }
+
+    /// Переписка удалена — все трансляции в ней прекращаются
+    func forgetChat(_ chatID: String) { forget(sessions.filter { $0.chatID == chatID }.map(\.messageID)) }
+
+    /// «Навсегда»: до остановки вручную или удаления сообщения
+    static let forever = 10 * 365 * 86400
 
     func stopAll(in chatID: String) {
         for s in active(in: chatID) { stop(s.messageID) }
@@ -276,13 +353,14 @@ struct LocationShareSheet: View {
                 }
             }
             .confirmationDialog(s.t("Транслировать геопозицию", "Share live location"), isPresented: $askLive, titleVisibility: .visible) {
-                ForEach([(900, s.t("15 минут", "15 minutes")), (3600, s.t("1 час", "1 hour")), (8 * 3600, s.t("8 часов", "8 hours"))], id: \.0) { sec, label in
+                ForEach([(900, s.t("15 минут", "15 minutes")), (3600, s.t("1 час", "1 hour")),
+                         (LiveLocationManager.forever, s.t("Навсегда", "Until I stop"))], id: \.0) { sec, label in
                     Button(label) { sendLive(sec) }
                 }
                 Button(s.t("Отмена", "Cancel"), role: .cancel) {}
             } message: {
-                Text(s.t("Пока идёт трансляция, собеседник видит ваше местоположение на карте. Её можно остановить в любой момент.",
-                         "While sharing, they see where you are on a map. You can stop at any time."))
+                Text(s.t("Собеседник видит вас на карте — с вашей аватаркой. Остановить можно в любой момент: в сообщении или на карте. Удалите сообщение — трансляция тоже прекратится.",
+                         "They see you on a map with your avatar. Stop anytime from the message or the map. Deleting the message stops it too."))
             }
         }
         .onAppear { fetcher.start() }
@@ -447,23 +525,21 @@ struct LocationBlock: View {
             withAnimation(.easeOut(duration: 0.2)) { snapshot = img ?? snapshot }
         }
         .fullScreenCover(isPresented: $showMap) {
-            LocationMapView(geo: geo, messageID: messageID, mine: mine)
+            LocationMapView(geo: geo, messageID: messageID, mine: mine, avatarID: pinAvatar, name: pinName)
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
     }
 
+    @Environment(\.liveAvatars) private var avatars
+    private var pinAvatar: String? { avatarID ?? (mine ? avatars.mine : avatars.peer) }
+    private var pinName: String { mine ? avatars.myName : avatars.peerName }
+
     @ViewBuilder
     private func pin(active: Bool) -> some View {
         if geo.isLive {
-            ZStack {
-                if active {
-                    PulseRing(color: theme.accentColor)
-                }
-                Circle().fill(.white).frame(width: 30, height: 30).shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-                Circle().fill(active ? theme.accentColor : Color.gray).frame(width: 22, height: 22)
-                Image(systemName: "location.north.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                    .rotationEffect(.degrees(geo.heading ?? 0))
-            }
+            // трансляция: аватарка того, кто транслирует, в кружочке
+            LiveAvatarPin(avatarID: pinAvatar, name: pinName, active: active, heading: geo.heading, size: 34)
+                .offset(y: LiveAvatarPin.tipOffset(34))
         } else {
             Image(systemName: "mappin.circle.fill")
                 .font(.system(size: 30))
@@ -480,6 +556,9 @@ struct LocationBlock: View {
 
     private func subtitle(active: Bool, now: Date) -> String {
         if geo.isLive {
+            if active, let until = geo.liveUntil, until.timeIntervalSince(now) > 300 * 86400 {
+                return s.t("без ограничения", "until stopped") + " · " + updated(now: now)
+            }
             if active, let until = geo.liveUntil {
                 let left = max(1, Int(until.timeIntervalSince(now) / 60))
                 let leftText = left >= 60 ? s.t("осталось \(left / 60) ч \(left % 60) мин", "\(left / 60) h \(left % 60) min left")
@@ -522,6 +601,8 @@ struct LocationMapView: View {
     let geo: GeoPoint
     let messageID: String
     let mine: Bool
+    var avatarID: String? = nil
+    var name = ""
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -536,14 +617,11 @@ struct LocationMapView: View {
         ZStack(alignment: .top) {
             Map(position: $camera) {
                 UserAnnotation()
-                Annotation(geo.title ?? "", coordinate: coordinate) {
+                Annotation(geo.title ?? "", coordinate: coordinate, anchor: geo.isLive ? .bottom : .center) {
                     ZStack {
-                        if geo.active() { PulseRing(color: theme.accentColor) }
                         if geo.isLive {
-                            Circle().fill(.white).frame(width: 34, height: 34).shadow(radius: 3)
-                            Circle().fill(geo.active() ? theme.accentColor : .gray).frame(width: 26, height: 26)
-                            Image(systemName: "location.north.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
-                                .rotationEffect(.degrees(geo.heading ?? 0))
+                            // аватарка в кружочке — того, кто транслирует
+                            LiveAvatarPin(avatarID: avatarID, name: name, active: geo.active(), heading: geo.heading, size: 44)
                         } else {
                             Image(systemName: "mappin.circle.fill").font(.system(size: 36))
                                 .symbolRenderingMode(.palette)

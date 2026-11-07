@@ -882,6 +882,9 @@ struct ChatScreen: View {
                 .environment(\.theme, theme)
         } else {
             chatSheets(chatLifecycle(chatChrome(chatMain)))
+                // аватарки для трансляции геопозиции: в кружочке на карте — тот, кто транслирует
+                .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
+                                                         peer: model.peer.avatarID, peerName: model.peer.name))
                 .overlay {
                     if let route = reactionWho {
                         ReactionWhoOverlay(route: route, onClose: { reactionWho = nil },

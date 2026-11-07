@@ -6381,7 +6381,8 @@ def get_sticker(req, me, pack, name):
 ATT_KINDS = {"photo": "image", "video": "video", "circle": "video", "voice": "audio", "audio": "audio", "file": "file"}
 
 
-LIVE_PERIODS = {900, 3600, 8 * 3600}          # трансляция геопозиции: 15 минут, час, 8 часов
+LIVE_FOREVER = 10 * 365 * 86400                # «Навсегда» — пока не остановят или не удалят сообщение
+LIVE_PERIODS = {900, 3600, 8 * 3600, LIVE_FOREVER}  # трансляция геопозиции: 15 минут, час, 8 часов, навсегда
 
 
 def clean_coords(a):
@@ -6477,7 +6478,12 @@ def with_live(atts, mid):
     if not any(a.get("type") == "location" and a.get("live_until") for a in atts):
         return atts
     r = q1("SELECT * FROM live_locations WHERE message_id = ?", (mid,))
+    stop = q1("SELECT at FROM live_stops WHERE message_id = ?", (mid,))
     if not r:
+        if stop:
+            # остановлена удалением раньше первой новой точки
+            return [dict(a, stopped=True, live_until=min(a["live_until"], stop["at"]))
+                    if a.get("type") == "location" and a.get("live_until") else a for a in atts]
         return atts
     out = []
     for a in atts:
@@ -6527,7 +6533,7 @@ def live_location_update(req, me, mid):
     att, chat, wake = live_target(mid, uid)
     now = time.time()
     r = q1("SELECT stopped, live_until FROM live_locations WHERE message_id = ?", (mid,))
-    if (r and r["stopped"]) or now > att["live_until"]:
+    if (r and r["stopped"]) or now > att["live_until"] or q1("SELECT 1 FROM live_stops WHERE message_id = ?", (mid,)):
         raise ApiError(410, "live_ended")
     blob = enc(uid, "messages", LIVE_COL, mid, json.dumps(pos))
     run("INSERT INTO live_locations(message_id, owner, chat, pos_enc, updated_at, live_until, stopped) VALUES (?,?,?,?,?,?,0) "
@@ -7578,9 +7584,29 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     return row
 
 
+DB.execute("CREATE TABLE IF NOT EXISTS live_stops(message_id TEXT PRIMARY KEY, at REAL NOT NULL)")
+
+
+def stop_live_of(message_ids):
+    """Удалили сообщение с трансляцией геопозиции — трансляция прекращается сразу (у собеседника тоже),
+    даже если ни одной новой точки ещё не приходило"""
+    ids = [i for i in message_ids if i]
+    if not ids:
+        return
+    now = time.time()
+    for i in ids:
+        run("INSERT OR IGNORE INTO live_stops(message_id, at) VALUES (?,?)", (i, now))
+    try:
+        run("UPDATE live_locations SET stopped = 1, live_until = MIN(live_until, ?) WHERE message_id IN (%s)" % _in(ids),
+            [now] + ids)
+    except Exception:
+        pass
+
+
 def retained_delete_dm(mid):
     """Удаление личного сообщения с учётом комплаенс-ретеншна.
     При RETAIN_FOREVER строка не стирается, а прячется от обоих собеседников (виден только админ-выгрузке)."""
+    stop_live_of([mid])
     if RETAIN_FOREVER:
         run("UPDATE messages SET purged = 1, del_sender = 1, del_recipient = 1, expires_at = NULL WHERE id = ?", (mid,))
     else:
@@ -8249,6 +8275,8 @@ def delete_message(req, me, mid):
         run("DELETE FROM pins WHERE message_id = ?", (mid,))
     elif m["sender"] == uid:
         run("UPDATE messages SET del_sender = 1 WHERE id = ?", (mid,))
+        stop_live_of([mid])                                         # своя трансляция, удалённая «у себя», тоже прекращается
+        SHARED.events_publish(m["recipient"], "dm")
     else:
         run("UPDATE messages SET del_recipient = 1 WHERE id = ?", (mid,))
     req.send_json(200, {"ok": True})
@@ -8631,6 +8659,7 @@ def clear_chat(req, me, peer):
             run("DELETE FROM pins WHERE message_id IN (%s)" % marks, [m["id"] for m in rows])
         SHARED.events_publish(peer, "dm")            # у собеседника переписка пропадёт сразу
         return req.send_json(200, {"ok": True, "deleted": len(rows)})
+    stop_live_of([r["id"] for r in q("SELECT id FROM messages WHERE sender = ? AND recipient = ?", (uid, peer))])
     run("UPDATE messages SET del_sender = 1 WHERE sender = ? AND recipient = ?", (uid, peer))
     run("UPDATE messages SET del_recipient = 1 WHERE sender = ? AND recipient = ?", (peer, uid))
     req.send_json(200, {"ok": True})

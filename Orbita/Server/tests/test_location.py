@@ -1,5 +1,6 @@
 """Геопозиция: точка, трансляция, обновление, остановка, чужие не могут двигать. Сервер должен быть запущен."""
 import sys
+import time
 
 from smoke import jbody, req, session
 
@@ -75,6 +76,18 @@ def main():
     s, body, _ = req("POST", "/v1/chats/%s/forward" % c, ta, {"from": gid, "ids": [gmid]})
     m, at = last_loc(tc, a)
     check("пересланная — без трансляции", at and "live_until" not in at and at["lat"] == 59.94, (s, body[:200], at))
+    # «навсегда» и остановка при удалении сообщения
+    d, td = session("Дима")
+    s, body, _ = req("POST", "/v1/chats/%s/messages" % d, ta,
+                     {"text": "", "attachments": [{"type": "location", "lat": 55.7, "lon": 37.6, "live": 10 * 365 * 86400}]})
+    m, at = last_loc(td, a)
+    check("трансляция «навсегда»", at and at.get("live_until", 0) > time.time() + 300 * 86400, at)
+    fmid = m["id"] if m else None
+    check("удаление у себя", req("DELETE", "/v1/messages/%s" % fmid, ta)[0] == 200)
+    m, at = last_loc(td, a)
+    check("у собеседника трансляция остановилась", at and at.get("stopped"), at)
+    s, _, _ = req("PUT", "/v1/live-location/%s" % fmid, ta, {"lat": 55.71, "lon": 37.61})
+    check("новые точки не принимаются", s in (404, 410), s)
     print("FAILS:", fails)
     sys.exit(1 if fails else 0)
 
