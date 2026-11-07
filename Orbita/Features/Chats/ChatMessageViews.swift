@@ -367,12 +367,12 @@ struct MessageRow: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 18)
                 .onChanged { value in
-                    guard !MessageMenu.isOpen else { if dragX != 0 { dragX = 0 }; return }      // меню открыто — свайп-ответа нет
+                    guard !MessageMenu.isOpen, !VoiceScrub.active else { if dragX != 0 { dragX = 0 }; return }   // меню / перемотка голосового — свайп-ответа нет
                     guard abs(value.translation.width) > abs(value.translation.height) * 1.6 else { return }
                     dragX = max(-80, min(0, value.translation.width))
                 }
                 .onEnded { value in
-                    if dragX <= -56 && !MessageMenu.isOpen {
+                    if dragX <= -56 && !MessageMenu.isOpen && !VoiceScrub.active {
                         Haptics.impact(.medium)
                         onReply()
                     }
@@ -1080,6 +1080,58 @@ struct VoiceBlock: View {
     private var playing: Bool { isCurrent && player.isPlaying }
     /// Только у играющего голосового часы настоящие; остальные пузыри подписаны на «вечно стоящие» и не перерисовываются
     private var clock: PlaybackClock { isCurrent ? player.clock : .idle }
+    /// Палец ведёт по волне — перемотка
+    @State private var scrubbing = false
+    @State private var lastTick = -1
+
+    /// Перемотка пальцем по волне (как в Telegram): ведёшь — звук перескакивает, отпустил — играет с этого места.
+    /// Не играющее голосовое включается сразу с нужного места
+    private var scrubArea: some View {
+        GeometryReader { g in
+            Color.clear
+                .contentShape(Rectangle().inset(by: -10))
+                .gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { v in
+                            guard !pending, !MessageMenu.isOpen, let mediaID = attachment.mediaID else { return }
+                            // вертикальный жест — это прокрутка переписки, не перемотка
+                            if !scrubbing && abs(v.translation.height) > abs(v.translation.width) { return }
+                            let f = max(0, min(1, v.location.x / max(1, g.size.width)))
+                            if !scrubbing {
+                                scrubbing = true
+                                VoiceScrub.active = true
+                                Haptics.select()
+                                if !isCurrent {
+                                    player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { player.seek(toFraction: f) }
+                                    return
+                                }
+                            }
+                            guard isCurrent else { return }
+                            player.seek(toFraction: f)
+                            let tick = Int(f * 20)                        // лёгкие щелчки по ходу, как у колёсика
+                            if tick != lastTick { lastTick = tick; Haptics.impact(.light) }
+                        }
+                        .onEnded { v in
+                            guard scrubbing else { return }
+                            let f = max(0, min(1, v.location.x / max(1, g.size.width)))
+                            if isCurrent {
+                                player.seek(toFraction: f)
+                                if !player.isPlaying { player.resume() }
+                            }
+                            scrubbing = false
+                            lastTick = -1
+                            DispatchQueue.main.async { VoiceScrub.active = false }
+                        }
+                )
+                .onTapGesture { loc in
+                    // нажатие по волне у играющего голосового — прыжок в это место
+                    guard isCurrent, !pending else { return }
+                    Haptics.select()
+                    player.seek(toFraction: max(0, min(1, loc.x / max(1, g.size.width))))
+                }
+        }
+    }
 
     var body: some View {
         let tint = mine ? Color.white : theme.accentColor
@@ -1143,6 +1195,9 @@ struct VoiceBlock: View {
                              inactive: tint.opacity(mine ? 0.42 : 0.28))
                     .frame(maxWidth: .infinity)
                     .frame(height: 20)
+                    .scaleEffect(y: scrubbing ? 1.25 : 1, anchor: .center)
+                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: scrubbing)
+                    .overlay { scrubArea }
                 HStack(spacing: 6) {
                     LiveVoiceTime(clock: clock, duration: attachment.duration,
                                   color: mine ? Color.white.opacity(0.8) : theme.textTertiary)
@@ -1179,6 +1234,10 @@ struct VoiceBlock: View {
         }
     }
 }
+
+/// Идёт перемотка голосового пальцем — свайп «ответить» по пузырю в это время не срабатывает
+@MainActor
+enum VoiceScrub { static var active = false }
 
 /// Волна, подписанная на часы плеера: на каждом тике перерисовывается только она
 struct LiveWaveform: View {
