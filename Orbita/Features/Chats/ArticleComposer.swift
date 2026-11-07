@@ -332,6 +332,18 @@ struct ArticleComposer: View {
     }
 
     @ViewBuilder
+    /// Поле, которое по ширине «обнимает» свой текст: невидимая надпись задаёт размер, поле лежит поверх.
+    /// Короткий текст — узко, длинный — переносится и занимает всю доступную ширину
+    private func hugging<F: View>(_ text: String, placeholder: String, font: Font, @ViewBuilder field: () -> F) -> some View {
+        Text((text.isEmpty ? placeholder : text) + "  ")
+            .font(font)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .hidden()
+            .frame(minWidth: 40)
+            .overlay { field() }
+    }
+
     private func editor(_ block: Binding<ArticleBlock>) -> some View {
         let b = block.wrappedValue
         switch b.kind {
@@ -359,19 +371,27 @@ struct ArticleComposer: View {
             VStack(spacing: 4) {
                 HStack(alignment: .top, spacing: 6) {
                     Text("“").font(.system(size: 30, weight: .black, design: .serif)).foregroundStyle(theme.accentColor)
-                    TextField(s.t("Выносная цитата", "Pull quote"), text: block.text, axis: .vertical)
-                        .font(.system(size: 18, weight: .medium).italic()).multilineTextAlignment(.center)
-                        .foregroundStyle(theme.text)
-                        .focused($focus, equals: b.id)
+                    // ширина поля — по введённому тексту: короткая цитата — небольшая плашка, длинная — до краёв
+                    hugging(block.text.wrappedValue, placeholder: s.t("Выносная цитата", "Pull quote"),
+                            font: .system(size: 18, weight: .medium).italic()) {
+                        TextField(s.t("Выносная цитата", "Pull quote"), text: block.text, axis: .vertical)
+                            .font(.system(size: 18, weight: .medium).italic()).multilineTextAlignment(.center)
+                            .foregroundStyle(theme.text)
+                            .focused($focus, equals: b.id)
+                    }
                     Text("”").font(.system(size: 30, weight: .black, design: .serif)).foregroundStyle(theme.accentColor)
                 }
-                TextField(s.t("Автор", "Author"), text: block.author)
-                    .font(.system(size: 16, weight: .bold).italic()).multilineTextAlignment(.center)
-                    .foregroundStyle(theme.accentColor)
-                    .focused($focus, equals: b.id + "#a")
+                hugging(block.author.wrappedValue, placeholder: s.t("Автор", "Author"),
+                        font: .system(size: 16, weight: .bold).italic()) {
+                    TextField(s.t("Автор", "Author"), text: block.author)
+                        .font(.system(size: 16, weight: .bold).italic()).multilineTextAlignment(.center)
+                        .foregroundStyle(theme.accentColor)
+                        .focused($focus, equals: b.id + "#a")
+                }
             }
             .padding(12)
             .background(theme.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(maxWidth: .infinity)                      // сама плашка — по центру строки
         case .code:
             VStack(alignment: .leading, spacing: 6) {
                 TextField(s.t("язык (python, swift…)", "language (python, swift…)"), text: block.lang)

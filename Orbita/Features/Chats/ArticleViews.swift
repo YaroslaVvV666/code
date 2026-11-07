@@ -408,6 +408,7 @@ struct PullQuoteView: View {
                 Text("”").font(.system(size: 30, weight: .black, design: .serif)).foregroundStyle(accent)
                     .frame(maxHeight: .infinity, alignment: .bottom).offset(y: 6)
             }
+            .fixedSize(horizontal: false, vertical: true)       // высота — ровно по тексту, кавычка не растягивает блок
             if !author.isEmpty {
                 Text(author).font(.system(size: 16, weight: .bold).italic()).foregroundStyle(accent)
             }
