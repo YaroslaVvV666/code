@@ -374,8 +374,8 @@ struct ArticleBody: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16)
         case .code:
+            // код — полосой во всю ширину статьи
             CodeBlockView(code: b.text, lang: b.lang, textColor: textColor, secondary: secondary, mine: mine)
-                .padding(.horizontal, 10)
         case .formula:
             FormulaView(latex: b.text, size: 24, color: textColor)
                 .frame(maxWidth: .infinity)
@@ -483,12 +483,14 @@ struct CodeBlockView: View {
     let mine: Bool
     @State private var copied = false
     @Environment(\.lang) private var appLang
+    @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(lang.isEmpty ? "code" : lang).font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(secondary)
+                // язык сверху — жирно и цветом, как «C++» в редакторе кода
+                Text((lang.isEmpty ? "code" : lang).uppercased()).font(.system(size: 13, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(mine ? Color.white.opacity(0.7) : theme.accentColor.opacity(0.75))
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
@@ -504,12 +506,14 @@ struct CodeBlockView: View {
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code).font(.system(size: 14, design: .monospaced)).foregroundStyle(textColor)
+                    .lineSpacing(3)
                     .fixedSize(horizontal: true, vertical: true)
                     .textSelection(.enabled)
             }
         }
-        .padding(10)
-        .background(Color.black.opacity(mine ? 0.22 : 0.18), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 12).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(mine ? 0.22 : 0.2))
     }
 }
 

@@ -292,6 +292,9 @@ struct ArticleComposer: View {
                 editor(block)
             }
             .padding(.horizontal, 16)
+            // код — на тёмной полосе во всю ширину экрана, как в редакторе кода
+            .padding(.vertical, b.kind == .code ? 14 : 0)
+            .background { if b.kind == .code { theme.dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05) } }
         }
     }
 
@@ -410,18 +413,24 @@ struct ArticleComposer: View {
             .background(theme.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .frame(maxWidth: .infinity)                      // сама плашка — по центру строки
         case .code:
-            VStack(alignment: .leading, spacing: 6) {
-                TextField(s.t("язык (python, swift…)", "language (python, swift…)"), text: block.lang)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(theme.textSecondary)
+            VStack(alignment: .leading, spacing: 8) {
+                TextField(s.t("язык (c++, python…)", "language (c++, python…)"), text: block.lang)
+                    .font(.system(size: 15, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(theme.accentColor.opacity(0.7))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .focused($focus, equals: b.id + "#a")
+                    .onSubmit { focus = b.id }
+                // Enter — новая строка; Enter два раза подряд (пустая строка) — выход из кода в обычный текст
                 TextField(s.t("Код", "Code"), text: block.text, axis: .vertical)
-                    .font(.system(size: 15, design: .monospaced)).foregroundStyle(theme.text)
+                    .font(.system(size: 16, design: .monospaced)).foregroundStyle(theme.text)
+                    .lineSpacing(4)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .focused($focus, equals: b.id)
+                    .onChange(of: block.wrappedValue.text) { old, new in
+                        if new.count > old.count, new.hasSuffix("\n\n") { leaveCode(b.id) }
+                    }
             }
-            .padding(10)
-            .background(Color.black.opacity(theme.dark ? 0.35 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .leading)
         case .formula:
             // в статье — уже готовая формула; нажатие открывает её LaTeX для правки
             Button { formulaDraft = FormulaDraft(inline: false, latex: b.text, blockID: b.id) } label: {
@@ -926,6 +935,23 @@ struct ArticleComposer: View {
             return
         }
         insertInline(MathText.inline(value))
+    }
+
+    /// Двойной Enter в коде: пустые строки в конце убираются, курсор — в текст под кодом (нет его — новый абзац)
+    private func leaveCode(_ id: String) {
+        guard let i = blocks.firstIndex(where: { $0.id == id }) else { return }
+        var t = blocks[i].text
+        while t.hasSuffix("\n") { t.removeLast() }
+        blocks[i].text = t
+        let nextID: String
+        if i + 1 < blocks.count, blocks[i + 1].kind == .text {
+            nextID = blocks[i + 1].id
+        } else {
+            let b = ArticleBlock(kind: .text)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { blocks.insert(b, at: i + 1) }
+            nextID = b.id
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focus = nextID }
     }
 
     /// Кусочек текста (эмодзи, формула) — в поле, где был курсор; если такого нет — в последний текстовый блок или в новый
