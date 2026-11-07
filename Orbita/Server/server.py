@@ -6883,6 +6883,7 @@ def _message_json(m, me_id):
         **({"markup": mk} if (mk := markup_of(m)) else {}),
         **article_fields(m),
         **fwd_fields(m, me_id),
+        **imported_field(m),
     }
 
 
@@ -7519,6 +7520,100 @@ def search_messages(req, me):
                              "created_at": m["created_at"]})
     hits.sort(key=lambda h: h["created_at"], reverse=True)
     req.send_json(200, {"hits": hits[:60]})
+
+
+# ---------- экспорт и импорт переписки (из Telegram и WhatsApp) ----------
+# Экспорт: вся история личного чата постранично — телефон собирает из неё файлы (JSON как у Telegram и TXT как у WhatsApp).
+# Импорт: телефон разбирает выгрузку Telegram (result.json) или WhatsApp (_chat.txt) и присылает сообщения пачками.
+# Они встают в переписку со своими исходными датами и пометкой «Импортировано из …» — у обоих собеседников.
+
+ensure_column("messages", "imported_enc", "imported_enc BLOB")
+IMPORT_MAX_BATCH = 500
+IMPORT_SOURCES = {"telegram": "Telegram", "whatsapp": "WhatsApp", "orbita": "Orbita"}
+
+
+@route("GET", r"/v1/chats/([A-Za-z0-9_\-]+)/export")
+def export_chat(req, me, peer):
+    uid = me["id"]
+    if is_group(peer) or not q1("SELECT 1 FROM users WHERE id = ?", (peer,)):
+        raise ApiError(404, "not_found")
+    rate_limit("export:" + uid, 120, 60)
+    try:
+        before = float(req.query().get("before") or time.time() + 1)
+        limit = max(1, min(1000, int(req.query().get("limit", "500"))))
+    except ValueError:
+        raise ApiError(400, "bad_value")
+    rows = q("SELECT * FROM messages WHERE ((sender = ? AND recipient = ? AND del_sender = 0) "
+             "OR (sender = ? AND recipient = ? AND del_recipient = 0)) AND created_at < ? ORDER BY created_at DESC LIMIT ?",
+             (uid, peer, peer, uid, before, limit))
+    items = [message_json(m, uid) for m in rows]
+    items.reverse()
+    req.send_json(200, {"messages": items, "more": len(rows) == limit,
+                        "before": rows[-1]["created_at"] if rows else None})
+
+
+@route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/import")
+def import_chat(req, me, peer):
+    """Пачка импортированных сообщений: [{mine, text, date, name, attachments}] — встают с исходными датами"""
+    uid = me["id"]
+    if is_group(peer) or peer == uid or not q1("SELECT 1 FROM users WHERE id = ?", (peer,)):
+        raise ApiError(404, "not_found")
+    if either_blocked(uid, peer):
+        raise ApiError(403, "blocked")
+    rate_limit("import:" + uid, 400, 3600)
+    d = req.body_json()
+    source = d.get("source") if d.get("source") in IMPORT_SOURCES else "telegram"
+    items = d.get("messages")
+    if not isinstance(items, list) or not items or len(items) > IMPORT_MAX_BATCH:
+        raise ApiError(400, "bad_value")
+    now = time.time()
+    added = 0
+    with LOCK:
+        run("BEGIN")
+        try:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                text = str(it.get("text") or "")[:MAX_MSG]
+                atts = clean_attachments(it.get("attachments"), uid) if it.get("attachments") else []
+                if not text.strip() and not atts:
+                    continue
+                try:
+                    date = float(it.get("date"))
+                except (TypeError, ValueError):
+                    continue
+                if not 946684800 <= date <= now:                     # с 2000 года и не из будущего
+                    continue
+                sender, recipient = (uid, peer) if it.get("mine") else (peer, uid)
+                mid = uuid.uuid4().hex
+                meta = {"source": source, "name": clean_line(it.get("name"), 64), "by": uid}
+                run("INSERT INTO messages(id, sender, recipient, text_enc, entities_enc, created_at, read_at, attachments_enc, imported_enc) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (mid, sender, recipient, enc(sender, "messages", COL["msg_text"], mid, text),
+                     enc(sender, "messages", COL["msg_entities"], mid, "[]"), date, now,
+                     enc(sender, "messages", COL["msg_attach"], mid, json.dumps(atts)) if atts else None,
+                     enc(sender, "messages", COL["msg_entities"], mid + ":imp", json.dumps(meta, ensure_ascii=False))))
+                added += 1
+            run("COMMIT")
+        except Exception:
+            run("ROLLBACK")
+            raise
+    SHARED.ver_bump("uver:" + peer)
+    SHARED.ver_bump("uver:" + uid)
+    SHARED.events_publish(peer, "dm")
+    req.send_json(200, {"ok": True, "added": added})
+
+
+def imported_field(m):
+    if not ("imported_enc" in m.keys() and m["imported_enc"]):
+        return {}
+    try:
+        meta = json.loads(dec(m["sender"], "messages", COL["msg_entities"], m["id"] + ":imp", m["imported_enc"]) or "null")
+    except ValueError:
+        meta = None
+    if not meta:
+        return {}
+    return {"imported": {"source": IMPORT_SOURCES.get(meta.get("source"), "Telegram"), "name": meta.get("name") or ""}}
 
 
 @route("GET", r"/v1/chats/([A-Za-z0-9_\-]+)/messages")

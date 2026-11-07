@@ -537,7 +537,7 @@ struct ProfileView: View {
                 .preferredColorScheme(theme.dark ? .dark : .light)
         }
         .sheet(isPresented: $showActivity) {
-            ActivitySheet(current: store.profile?.activity.flatMap { $0.active ? $0 : nil }) { value in
+            ActivityStatusSheet(current: store.profile?.activity.flatMap { $0.active ? $0 : nil }) { value in
                 await store.setActivity(value)
             }
             .environment(\.theme, theme).environment(\.lang, lang)

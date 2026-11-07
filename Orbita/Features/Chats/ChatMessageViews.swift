@@ -601,6 +601,7 @@ struct MessageRow: View {
                 }
                 .buttonStyle(.plain)
             }
+            if let imp = message.imported { ImportedBadge(info: imp, mine: mine) }        // перенесено из Telegram / WhatsApp
             // капсула времени / секрет на месте: у получателя — запечатано, у отправителя и после открытия — пометка
             if let lock = message.lock {
                 if message.sealed {

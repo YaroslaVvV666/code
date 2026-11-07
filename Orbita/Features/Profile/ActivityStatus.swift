@@ -44,7 +44,7 @@ struct ActivityBadge: View {
     }
 }
 
-struct ActivitySheet: View {
+struct ActivityStatusSheet: View {
     let current: UserActivity?
     let onSave: ((emoji: String, text: String, hours: Double)?) async -> Bool
 

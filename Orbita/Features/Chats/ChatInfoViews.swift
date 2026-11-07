@@ -51,6 +51,7 @@ struct ChatInfoView: View {
     @State private var ttlDays = 1
     @State private var showAppearance = false           // «Обои и цвет» этого чата
     @State private var confirmDeleteChat = false        // «Ещё» → «Удалить переписку»
+    @State private var showTransfer = false             // «Ещё» → экспорт / импорт из Telegram и WhatsApp
     @State private var avatarRoute: AvatarViewerRoute?
     @State private var pagerIndex = 0
     // три положения аватарки, как на странице человека: 0 — кружок, 1 — фото на всю ширину, 2 — на весь экран
@@ -439,6 +440,13 @@ struct ChatInfoView: View {
         }
         .padding(.horizontal, 16)
         .sheet(isPresented: $showTTLPicker) { ttlDaysPicker }
+        .sheet(isPresented: $showTransfer) {
+            ChatTransferSheet(peer: model.peer, myName: session.profile.profile?.name ?? "",
+                              repo: session.messengerRepo) { Task { await model.refresh() } }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
+                .presentationBackground(theme.sheet)
+        }
         .sheet(isPresented: $showAppearance) {
             ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
                 .environment(\.theme, theme).environment(\.lang, lang)
@@ -485,6 +493,12 @@ struct ChatInfoView: View {
             }
             Toggle(isOn: Binding(get: { model.isProtected }, set: { on in Task { await model.setProtected(on) } })) {
                 Label(s.t("Запретить копирование", "Restrict copying"), systemImage: "lock.fill")
+            }
+            if !model.peer.isGroup && model.peer.id != session.serverID {
+                // экспорт этой переписки и импорт истории из Telegram / WhatsApp
+                Button { showTransfer = true } label: {
+                    Label(s.t("Экспорт и импорт переписки", "Export & import chat"), systemImage: "arrow.up.arrow.down.square")
+                }
             }
             Divider()
             Button(role: .destructive) { confirmDeleteChat = true } label: {

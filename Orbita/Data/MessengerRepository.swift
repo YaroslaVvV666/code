@@ -339,6 +339,12 @@ struct MessageInfo: Equatable {
     var sentAt: Date
 }
 
+/// Сообщение перенесено из другого мессенджера
+struct ImportedInfo: Equatable {
+    var source: String              // Telegram / WhatsApp
+    var name: String                // как звали отправителя там
+}
+
 /// Замок на сообщении: капсула времени (openAt) и/или секрет на расстоянии (place + radius)
 struct MessageLock: Equatable {
     var openAt: Date?
@@ -394,6 +400,7 @@ struct ChatMessage: Identifiable, Equatable {
     var blocks: [ArticleBlock] = [] // статья: заголовки, текст, цитаты, таблицы, медиа — по порядку
     var lock: MessageLock? = nil    // капсула времени / секрет на расстоянии
     var sealed = false              // замок ещё закрыт: содержимое сервер не прислал
+    var imported: ImportedInfo? = nil   // перенесено из Telegram / WhatsApp
     var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
@@ -568,6 +575,10 @@ protocol MessengerRepository: Sendable {
     func sendLocked(peerID: String, text: String, entities: [TextEntity], lock: OutgoingLock) async throws -> ChatMessage
     /// Получатель на месте — открыть секрет. Далеко — ошибка с расстоянием
     func unlock(messageID: String, point: GeoPoint) async throws -> ChatMessage
+    /// Экспорт: страница истории до момента `before` (старые → новые), есть ли ещё и откуда продолжать
+    func exportPage(peerID: String, before: Double?) async throws -> (messages: [ChatMessage], more: Bool, before: Double?)
+    /// Импорт: пачка сообщений из Telegram / WhatsApp, возвращает сколько добавлено
+    func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int
     // темы в группах
     func topics(groupID: String) async throws -> ForumTopicList
     func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
@@ -822,6 +833,8 @@ private struct MessageDTO: Decodable {
     let blocks: [ArticleBlockDTO]?
     let lock: LockDTO?
     let sealed: Bool?
+    let imported: ImportedDTO?
+    struct ImportedDTO: Decodable { let source: String; let name: String? }
 
     struct LockDTO: Decodable {
         struct Place: Decodable { let lat: Double; let lon: Double; let title: String? }
@@ -850,7 +863,8 @@ private struct MessageDTO: Decodable {
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
                     comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
                     markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model),
-                    lock: lock?.model, sealed: sealed ?? false)
+                    lock: lock?.model, sealed: sealed ?? false,
+                    imported: imported.map { ImportedInfo(source: $0.source, name: $0.name ?? "") })
     }
 }
 
@@ -1295,6 +1309,21 @@ struct RemoteMessengerRepository: MessengerRepository {
         let body: [String: Any] = ["text": text, "entities": Self.entityJSON(entities), "lock": lock.json]
         let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
         return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func exportPage(peerID: String, before: Double?) async throws -> (messages: [ChatMessage], more: Bool, before: Double?) {
+        struct Page: Decodable { let messages: [MessageDTO]; let more: Bool; let before: Double? }
+        var path = "/v1/chats/\(peerID)/export?limit=500"
+        if let before { path += "&before=\(before)" }
+        let page = try decodeAPI(Page.self, from: try await api.request("GET", path))
+        return (page.messages.map(\.model), page.more, page.before)
+    }
+
+    func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int {
+        struct R: Decodable { let added: Int }
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/import",
+                                         body: ServerAPI.json(["source": source, "messages": messages]))
+        return try decodeAPI(R.self, from: data).added
     }
 
     func unlock(messageID: String, point: GeoPoint) async throws -> ChatMessage {
