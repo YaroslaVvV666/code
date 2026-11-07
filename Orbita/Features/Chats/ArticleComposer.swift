@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import Combine
 
 /// Редактор статьи — сообщение из блоков, как статьи в Telegram:
 /// «+» — заголовок (H1–H6), текст, цитата, выносная цитата, код, формула, кнопка, разделитель;

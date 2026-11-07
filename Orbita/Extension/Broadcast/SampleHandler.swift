@@ -1,7 +1,11 @@
 import ReplayKit
+import Combine
 import CoreImage
 import UIKit
 import Darwin
+import AVFoundation
+import ImageIO
+import CoreMedia
 
 /// Broadcast Upload Extension: снимает ВЕСЬ экран телефона (и когда приложение свёрнуто) и по локальному сокету
 /// в общей папке App Group отдаёт кадры (JPEG) основному приложению, а оно кладёт их в видеодорожку звонка.

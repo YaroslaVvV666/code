@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Контейнер подэкрана (своя шапка со стрелкой «назад»)
 

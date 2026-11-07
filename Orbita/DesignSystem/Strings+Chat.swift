@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Тексты мессенджера
 extension Strings {

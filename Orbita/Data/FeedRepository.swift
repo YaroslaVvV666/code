@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 protocol FeedRepository: Sendable {
     func loadFeed(forYou: Bool) async throws -> FeedPage

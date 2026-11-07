@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import AVFoundation
+import CoreMedia
 
 // MARK: - Групповые звонки и видеочаты
 //

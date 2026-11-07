@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Тексты ленты, редактора, профиля и ошибок сервера
 extension Strings {

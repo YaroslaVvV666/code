@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Исправление раскладки клавиатуры (ЙЦУКЕН ↔ QWERTY)
 enum LayoutFix {

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 /// Редактор фото перед отправкой: рисование, текст, поворот и обрезка (как в Telegram)

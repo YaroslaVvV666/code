@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Открытие базы: путь, защита файлов iOS, миграции схемы.
 enum Database {

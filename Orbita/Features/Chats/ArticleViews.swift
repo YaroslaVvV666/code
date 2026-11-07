@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 // MARK: - Статья в сообщении: модель

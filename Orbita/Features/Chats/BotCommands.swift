@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import Combine
+import AVFoundation
 
 // MARK: - Команды ботов (как в Telegram)
 

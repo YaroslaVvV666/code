@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Combine
 
 // MARK: - Новая публикация: форматирование, несколько фото и видео
 

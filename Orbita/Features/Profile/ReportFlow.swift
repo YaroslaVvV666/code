@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Причины жалобы — совпадают с набором на сервере (REPORT_REASONS).
 enum ReportReasons {

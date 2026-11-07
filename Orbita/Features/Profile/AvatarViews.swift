@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Combine
 
 /// Круглая кнопка «+» у аватарки: добавить фото (или первое)
 struct AddPhotoBadge: View {

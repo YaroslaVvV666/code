@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Экран «Техподдержка»: список обращений + кнопка нового. Открывает переписку с поддержкой.
 struct SupportView: View {

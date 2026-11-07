@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Конфиденциальность (по образцу Telegram)
 

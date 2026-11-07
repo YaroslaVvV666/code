@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 // MARK: - Откуда «вылетает» фото (как в Telegram)

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 /// Эффект реакции на весь экран: крупная анимированная эмодзи по центру,

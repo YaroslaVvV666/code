@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Combine
 
 // MARK: - Раздел-заглушка (Чаты, Сообщества)
 

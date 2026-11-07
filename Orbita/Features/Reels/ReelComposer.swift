@@ -1,6 +1,8 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
+import Combine
+import UniformTypeIdentifiers
 
 /// Публикация шортса — отдельно от обычных постов: одно вертикальное видео (момент до 1 минуты) и подпись
 struct ReelComposerView: View {

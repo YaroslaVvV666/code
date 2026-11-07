@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Тексты: стена, приватность, чёрный список, плейлист
 extension Strings {

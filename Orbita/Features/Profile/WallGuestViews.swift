@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import PhotosUI
 
 // MARK: - Записи гостей на стене: текст, фото или рисунок от руки

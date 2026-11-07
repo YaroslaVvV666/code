@@ -1,8 +1,11 @@
 import SwiftUI
+import Combine
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import UIKit
+import CoreMedia
+import CoreVideo
 
 /// Фильтры шортса (CoreImage) — одинаково работают в предпросмотре и при сохранении
 enum ReelFilter: String, CaseIterable, Identifiable {

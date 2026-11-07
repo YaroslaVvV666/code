@@ -1,7 +1,9 @@
 import SwiftUI
+import Combine
 import ImageIO
 #if canImport(Lottie)
 import Lottie
+import AVFoundation
 #endif
 
 #if canImport(Lottie)

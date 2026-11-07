@@ -5,6 +5,7 @@ import Photos
 import UniformTypeIdentifiers
 import UIKit
 import AVFoundation
+import CoreMedia
 
 /// Строка ввода как в Telegram:
 /// [скрепка] [поле с форматированием и смайлом] [отправить | микрофон ↔ камера]

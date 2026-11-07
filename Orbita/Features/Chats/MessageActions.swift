@@ -1,7 +1,8 @@
 import SwiftUI
+import Combine
+import NaturalLanguage
 #if canImport(Translation)
 import Translation
-import NaturalLanguage
 #endif
 
 /// Открыто ли меню зажатого сообщения. Обычный флаг без подписки: строки чата проверяют его только в обработчиках

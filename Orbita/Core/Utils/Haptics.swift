@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 /// Вибрации приложения. Один общий выключатель: Профиль → «Вибрация».
 enum Haptics {

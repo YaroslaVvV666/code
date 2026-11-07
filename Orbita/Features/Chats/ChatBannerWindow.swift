@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 // MARK: - Окно поверх всего приложения (баннер «новое сообщение»)
 

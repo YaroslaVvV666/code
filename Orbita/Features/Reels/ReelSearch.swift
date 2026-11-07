@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Поиск по шортсам: история и популярное, результаты по два в ряд, как в TikTok
 

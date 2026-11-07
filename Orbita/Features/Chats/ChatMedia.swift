@@ -2,6 +2,8 @@ import SwiftUI
 import AVFoundation
 import Combine
 import UIKit
+import CoreMedia
+import CoreVideo
 
 // MARK: - Запись голосового
 

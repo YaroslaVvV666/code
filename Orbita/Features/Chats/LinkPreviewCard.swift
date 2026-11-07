@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Карточка ссылки под сообщением: картинка, заголовок и описание страницы (как в Telegram)
 struct LinkPreviewCard: View {

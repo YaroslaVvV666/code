@@ -1,6 +1,8 @@
 import SwiftUI
 import PhotosUI
 import AVFoundation
+import Combine
+import CoreMedia
 
 /// Окно предпросмотра: показывает AVPlayer в кадре 9:16
 struct ReelPlayerLayer: UIViewRepresentable {

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 // MARK: - Положение прокрутки внешнего ScrollView (для «потяни вниз — открыть аватарку»)

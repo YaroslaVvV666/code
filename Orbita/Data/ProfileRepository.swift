@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Изменение профиля: заполняются только те поля, которые нужно поменять
 struct ProfilePatch {

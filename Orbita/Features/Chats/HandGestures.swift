@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import CoreML
 import Vision
+import CoreMedia
 
 /// Жесты рукой, которые ловим во время записи кружка, и эмодзи-эффект, который «вылетает».
 enum HandGesture: String {

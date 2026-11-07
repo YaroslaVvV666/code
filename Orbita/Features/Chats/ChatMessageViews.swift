@@ -3,6 +3,7 @@ import AVFoundation
 import QuickLook
 import UIKit
 import Combine
+import CoreMedia
 
 // MARK: - Палитра переписки
 

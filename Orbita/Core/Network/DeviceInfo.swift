@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 /// Название и версия устройства для списка сеансов
 enum DeviceInfo {

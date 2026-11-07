@@ -2,6 +2,8 @@ import SwiftUI
 import Photos
 import AVKit
 import AVFoundation
+import Combine
+import CoreMedia
 
 // MARK: - Загрузка картинок с сервера
 

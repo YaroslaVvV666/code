@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import CoreMedia
 
 // MARK: - Модель ленты коротких видео
 

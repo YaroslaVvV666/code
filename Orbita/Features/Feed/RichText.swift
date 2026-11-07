@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 import UIKit
 import ContactsUI
+import Contacts
 
 // MARK: - Кодек: текст + сущности <-> NSAttributedString
 

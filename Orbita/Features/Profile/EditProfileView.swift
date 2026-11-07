@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Изменить профиль (как в Telegram)
 

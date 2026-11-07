@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 private struct InfoViewerItem: Identifiable {
     let id = UUID()

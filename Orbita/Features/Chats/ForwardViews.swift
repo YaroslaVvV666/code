@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Открыть профиль по id (общий способ для чатов, групп, участников)
 

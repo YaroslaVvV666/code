@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Реакция: обычный эмодзи или своё («u:<id>»)
 

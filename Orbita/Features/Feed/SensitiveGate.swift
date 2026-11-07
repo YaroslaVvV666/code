@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Глобальная настройка устройства: показывать ли чувствительный контент без размытия.
 enum SensitiveContent {

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import CoreImage.CIFilterBuiltins
+import Combine
 
 // MARK: - Матрица QR-кода
 

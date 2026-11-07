@@ -3,6 +3,7 @@ import Combine
 import AVFoundation
 import MediaPlayer
 import UniformTypeIdentifiers
+import CoreMedia
 
 // MARK: - Бегущая строка
 

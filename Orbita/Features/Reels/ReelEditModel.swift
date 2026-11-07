@@ -1,6 +1,8 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import CoreImage
+import CoreMedia
 
 /// Состояние редактора шортса: исходник, обрезка, фильтр, текст, фото, музыка и громкости.
 /// Предпросмотр играет исходный файл с тем же фильтром, что потом будет в готовом ролике.

@@ -2,6 +2,8 @@ import Combine
 import SwiftUI
 import AVFoundation
 import ReplayKit
+import CoreMedia
+import CoreVideo
 
 // Движок звонка поверх WebRTC. Пакет подключается в Xcode: File ▸ Add Package Dependencies ▸
 // https://github.com/stasel/WebRTC  (продукт WebRTC). Пока пакета нет, приложение собирается

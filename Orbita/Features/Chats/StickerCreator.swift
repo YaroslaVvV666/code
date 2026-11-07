@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Combine
 
 /// Создание своих стикеров прямо в приложении: набор + картинки/короткие видео (анимированные), без бота.
 struct StickerCreatorSheet: View {

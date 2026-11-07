@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Статистика шортса (видна только автору)
 

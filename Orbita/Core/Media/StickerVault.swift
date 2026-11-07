@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import UIKit
 
 /// Стикеры установленных наборов — постоянно на телефоне.

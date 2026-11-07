@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Скелетоны: серые заглушки с бегущим бликом вместо крутилки
 
