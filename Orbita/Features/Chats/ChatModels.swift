@@ -683,7 +683,7 @@ final class ChatModel: ObservableObject {
             if let text = answer.text, !text.isEmpty {
                 if answer.showAlert == true { AppAlert.info(peer.name, text) } else { AppToast.show(text) }
             }
-            if let raw = answer.url, let url = SafeLink.url(raw) { UIApplication.shared.open(url) }
+            if let raw = answer.url, let url = SafeLink.url(raw) { await UIApplication.shared.open(url) }
             await refresh()                     // бот мог сразу изменить сообщение или кнопки
         }
     }
