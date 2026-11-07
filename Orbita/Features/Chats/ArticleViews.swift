@@ -337,6 +337,8 @@ struct ArticleBody: View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.element.id) { index, b in
                 block(b, index: index)
+                    // первый блок не прилипает к верхнему краю сообщения (у заголовка и медиа свои отступы)
+                    .padding(.top, index == 0 && b.kind != .heading && b.kind != .media ? 10 : 0)
             }
         }
         .frame(width: Self.width, alignment: .leading)
@@ -382,7 +384,8 @@ struct ArticleBody: View {
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 .textSelection(.enabled)
         case .button:
-            ArticleLinkButton(text: b.text, url: b.url, color: b.color, mine: mine, fullWidth: true)
+            // кнопка в тексте — небольшая, по размеру надписи
+            ArticleLinkButton(text: b.text, url: b.url, color: b.color, mine: mine)
                 .padding(.horizontal, 10)
                 .allowsHitTesting(!blocked)
         case .list:
@@ -625,6 +628,8 @@ struct ArticleLinkButton: View {
     let color: String
     let mine: Bool
     var fullWidth = false
+    /// Крупная кнопка (под сообщением): выше и во всю ширину своего места в ряду
+    var large = false
 
     @Environment(\.theme) private var theme
 
@@ -637,12 +642,13 @@ struct ArticleLinkButton: View {
             HiddenLink.confirm(u, shown: text) { UIApplication.shared.open($0) }
         } label: {
             HStack(spacing: 6) {
-                Text(text).font(.system(size: 16, weight: .semibold)).lineLimit(2)
-                Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .bold))
+                Text(text).font(.system(size: large ? 17 : 15, weight: .semibold)).lineLimit(2)
+                    .multilineTextAlignment(.center)
+                Image(systemName: "arrow.up.right").font(.system(size: large ? 13 : 11, weight: .bold))
             }
             .foregroundStyle(label)
-            .padding(.horizontal, 16).frame(minHeight: 40)
-            .frame(maxWidth: fullWidth ? .infinity : nil)
+            .padding(.horizontal, large ? 18 : 14).frame(minHeight: large ? 48 : 36)
+            .frame(maxWidth: fullWidth || large ? .infinity : nil)
             .background {
                 if let fill {
                     Capsule().fill(fill)

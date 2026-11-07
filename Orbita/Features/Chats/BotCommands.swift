@@ -363,17 +363,17 @@ struct BotInlineButtons: View {
 
     var body: some View {
         if message.markup.joined().contains(where: { $0.color != nil }) {
-            // кнопки-ссылки от человека: цветные капсулы под сообщением
-            VStack(alignment: message.mine ? .trailing : .leading, spacing: 6) {
+            // кнопки-ссылки от человека: крупные цветные капсулы под сообщением, рядами (в ряду — поровну места)
+            VStack(spacing: 6) {
                 ForEach(Array(message.markup.enumerated()), id: \.offset) { _, row in
                     HStack(spacing: 6) {
                         ForEach(Array(row.enumerated()), id: \.offset) { _, b in
-                            ArticleLinkButton(text: b.text, url: b.url ?? "", color: b.color ?? "default", mine: false)
+                            ArticleLinkButton(text: b.text, url: b.url ?? "", color: b.color ?? "default", mine: false, large: true)
                         }
                     }
                 }
             }
-            .frame(maxWidth: 340, alignment: message.mine ? .trailing : .leading)
+            .frame(width: min(ArticleBody.width, 360))
         } else {
             botButtons
         }

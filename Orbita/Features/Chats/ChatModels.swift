@@ -691,7 +691,7 @@ final class ChatModel: ObservableObject {
 
     /// Статья: сначала загружаются файлы из блоков (по порядку), потом уходит само сообщение.
     /// nil — отправлено; иначе — ошибка (редактор остаётся открытым, ничего не теряется)
-    func sendArticle(blocks: [ArticleBlock], buttons: [ArticleButton]) async -> APIError? {
+    func sendArticle(blocks: [ArticleBlock], buttons: [[ArticleButton]]) async -> APIError? {
         do {
             var out: [[String: Any]] = []
             for b in blocks {
@@ -708,7 +708,7 @@ final class ChatModel: ObservableObject {
                 out.append(d)
             }
             let reply = replyTo
-            var sent = try await repo.sendArticle(peerID: peerID, blocks: out, buttons: buttons.map(\.json),
+            var sent = try await repo.sendArticle(peerID: peerID, blocks: out, buttons: buttons.filter { !$0.isEmpty }.map { $0.map(\.json) },
                                                   replyTo: reply?.id, topic: topic?.id)
             replyTo = nil
             sent.key = sent.id

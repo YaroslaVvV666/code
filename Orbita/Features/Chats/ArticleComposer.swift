@@ -17,7 +17,8 @@ struct ArticleComposer: View {
     @Environment(\.lang) private var lang
 
     @State private var blocks: [ArticleBlock]
-    @State private var footer: [ArticleButton] = []
+    /// Кнопки под сообщением — рядами, в ряду одна или две
+    @State private var footer: [[ArticleButton]] = []
     @State private var history: [[ArticleBlock]] = []
     @State private var future: [[ArticleBlock]] = []
     @State private var applying = false
@@ -136,7 +137,7 @@ struct ArticleComposer: View {
                 .presentationBackground(theme.dark ? Color.black : Color(white: 0.97))
         }
         .sheet(item: $buttonDraft) { draft in
-            ArticleButtonSheet(draft: draft) { result in applyButton(result) }
+            ArticleButtonSheet(draft: draft, lastRowHasRoom: footer.last?.count == 1) { result in applyButton(result) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
         }
@@ -447,9 +448,11 @@ struct ArticleComposer: View {
             }
             .buttonStyle(.plain)
         case .button:
+            // кнопка в тексте — небольшая, по размеру надписи
             ArticleLinkButton(text: b.text.isEmpty ? s.t("Кнопка", "Button") : b.text, url: b.url, color: b.color,
-                              mine: false, fullWidth: true)
+                              mine: false)
                 .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .onTapGesture { editInlineButton(b) }
                 .overlay { Color.clear.contentShape(Rectangle()).onTapGesture { editInlineButton(b) } }
         case .list:
@@ -756,22 +759,96 @@ struct ArticleComposer: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(s.t("КНОПКИ ПОД СООБЩЕНИЕМ", "BUTTONS BELOW THE MESSAGE"))
                     .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
-                ForEach(footer) { btn in
-                    HStack {
-                        ArticleLinkButton(text: btn.text, url: btn.url, color: btn.color, mine: false)
-                            .allowsHitTesting(false)
-                        Spacer()
-                        Button { buttonDraft = ArticleButtonDraft(button: btn, inline: false, footerID: btn.id) } label: {
-                            Image(systemName: "pencil").foregroundStyle(theme.accentColor)
+                ForEach(Array(footer.enumerated()), id: \.offset) { r, row in
+                    HStack(spacing: 8) {
+                        ForEach(row) { btn in
+                            // нажатие — меню: изменить, перенести в другой ряд, удалить
+                            Menu { footerMenu(btn, row: r) } label: {
+                                ZStack {
+                                    ArticleLinkButton(text: btn.text, url: btn.url, color: btn.color, mine: false, large: true)
+                                        .allowsHitTesting(false)
+                                    Color.clear.contentShape(Capsule())     // касание ловит меню, а не сама кнопка
+                                }
+                            }
                         }
-                        Button { withAnimation { footer.removeAll { $0.id == btn.id } } } label: {
-                            Image(systemName: "trash").foregroundStyle(theme.danger)
+                        if row.count < 2 {
+                            // в ряду одна кнопка — рядом можно добавить вторую
+                            Button { buttonDraft = ArticleButtonDraft(button: ArticleButton(), inline: false, row: r, placementLocked: true) } label: {
+                                Image(systemName: "plus").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.accentColor)
+                                    .frame(width: 48, height: 48)
+                                    .background(theme.accentColor.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(PressStyle())
+                            .accessibilityLabel(s.t("Кнопка в этот ряд", "Button in this row"))
                         }
                     }
-                    .buttonStyle(.plain)
+                }
+                if footerCount < 8 {
+                    Button { buttonDraft = ArticleButtonDraft(button: ArticleButton(), inline: false, placementLocked: true) } label: {
+                        Label(s.t("Новый ряд", "New row"), systemImage: "plus")
+                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
+                            .frame(maxWidth: .infinity).frame(height: 40)
+                            .overlay(Capsule().strokeBorder(theme.accentColor.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+                    }
+                    .buttonStyle(PressStyle())
                 }
             }
             .padding(.horizontal, 20).padding(.top, 8)
+        }
+    }
+
+    private var footerCount: Int { footer.reduce(0) { $0 + $1.count } }
+
+    @ViewBuilder
+    private func footerMenu(_ btn: ArticleButton, row r: Int) -> some View {
+        Button { buttonDraft = ArticleButtonDraft(button: btn, inline: false, footerID: btn.id) } label: {
+            Label(s.t("Изменить", "Edit"), systemImage: "pencil")
+        }
+        if footer[r].count == 2 {
+            Button { moveButton(btn.id, toNewRowAfter: r) } label: {
+                Label(s.t("Отдельным рядом", "Own row"), systemImage: "rectangle.split.1x2")
+            }
+        }
+        if footer[r].count == 1, r > 0, footer[r - 1].count == 1 {
+            Button { moveButton(btn.id, intoRow: r - 1) } label: {
+                Label(s.t("В ряд выше", "Into the row above"), systemImage: "arrow.up")
+            }
+        }
+        if footer[r].count == 1, r + 1 < footer.count, footer[r + 1].count == 1 {
+            Button { moveButton(btn.id, intoRow: r + 1) } label: {
+                Label(s.t("В ряд ниже", "Into the row below"), systemImage: "arrow.down")
+            }
+        }
+        Button(role: .destructive) { removeFooter(btn.id) } label: { Label(s.t("Удалить", "Delete"), systemImage: "trash") }
+    }
+
+    private func removeFooter(_ id: String) {
+        withAnimation {
+            for r in footer.indices { footer[r].removeAll { $0.id == id } }
+            footer.removeAll { $0.isEmpty }
+        }
+    }
+
+    private func takeFooter(_ id: String) -> ArticleButton? {
+        for r in footer.indices { if let i = footer[r].firstIndex(where: { $0.id == id }) { return footer[r].remove(at: i) } }
+        return nil
+    }
+
+    private func moveButton(_ id: String, toNewRowAfter r: Int) {
+        withAnimation {
+            guard let b = takeFooter(id) else { return }
+            footer.insert([b], at: min(r + 1, footer.count))
+            footer.removeAll { $0.isEmpty }
+        }
+    }
+
+    private func moveButton(_ id: String, intoRow target: Int) {
+        withAnimation {
+            let targetID = footer[target].first?.id
+            guard let b = takeFooter(id) else { return }
+            footer.removeAll { $0.isEmpty }
+            if let t = footer.firstIndex(where: { $0.first?.id == targetID }), footer[t].count < 2 { footer[t].append(b) }
+            else { footer.append([b]) }
         }
     }
 
@@ -793,10 +870,18 @@ struct ArticleComposer: View {
                 b.color = r.button.color
                 insert(b)
             }
-        } else if let id = r.footerID, let i = footer.firstIndex(where: { $0.id == id }) {
-            footer[i] = r.button
-        } else if footer.count < 8 {
-            withAnimation { footer.append(r.button) }
+        } else if let id = r.footerID {
+            for i in footer.indices { if let k = footer[i].firstIndex(where: { $0.id == id }) { footer[i][k] = r.button } }
+        } else if footerCount < 8 {
+            withAnimation {
+                if let row = r.row, footer.indices.contains(row), footer[row].count < 2 {
+                    footer[row].append(r.button)            // вторая кнопка в ряд
+                } else if r.row == nil, r.joinLast, let last = footer.indices.last, footer[last].count < 2 {
+                    footer[last].append(r.button)
+                } else {
+                    footer.append([r.button])               // новый ряд
+                }
+            }
         }
     }
 
@@ -1064,11 +1149,15 @@ struct ArticleButtonDraft: Identifiable {
     var inline: Bool                    // в тексте статьи / под сообщением
     var blockID: String? = nil          // правим кнопку в тексте
     var footerID: String? = nil         // правим кнопку под сообщением
+    var row: Int? = nil                 // добавить в этот ряд (под сообщением)
     var placementLocked = false
+    var joinLast = false                // под сообщением: рядом с последней кнопкой, а не новым рядом
 }
 
 struct ArticleButtonSheet: View {
     @State var draft: ArticleButtonDraft
+    /// В последнем ряду под сообщением одна кнопка — можно поставить новую рядом
+    var lastRowHasRoom = false
     let onDone: (ArticleButtonDraft) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -1087,15 +1176,25 @@ struct ArticleButtonSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     // предпросмотр
                     ArticleLinkButton(text: draft.button.text.isEmpty ? s.t("Текст кнопки", "Button text") : draft.button.text,
-                                      url: draft.button.url, color: draft.button.color, mine: false, fullWidth: draft.inline)
+                                      url: draft.button.url, color: draft.button.color, mine: false, large: !draft.inline)
                         .allowsHitTesting(false)
+                        .frame(maxWidth: draft.inline ? nil : 240)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
+                        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: draft.inline)
 
                     if !draft.placementLocked && draft.footerID == nil {
                         Picker("", selection: $draft.inline) {
                             Text(s.t("В тексте", "In the text")).tag(true)
                             Text(s.t("Под сообщением", "Below the message")).tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    // под сообщением: новый ряд или рядом с последней кнопкой (в ряду до двух)
+                    if !draft.inline && draft.footerID == nil && draft.row == nil && lastRowHasRoom {
+                        Picker("", selection: $draft.joinLast) {
+                            Text(s.t("Новый ряд", "New row")).tag(false)
+                            Text(s.t("Рядом с последней", "Next to the last")).tag(true)
                         }
                         .pickerStyle(.segmented)
                     }

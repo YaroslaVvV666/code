@@ -524,8 +524,8 @@ protocol MessengerRepository: Sendable {
     func setChatProtected(peerID: String, on: Bool) async throws -> Bool
     /// Нажали кнопку под сообщением бота: ответ бота (подсказка, окно или ссылка)
     func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer
-    /// Статья: блоки (медиа уже загружены) и кнопки-ссылки под сообщением
-    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+    /// Статья: блоки (медиа уже загружены) и кнопки-ссылки под сообщением — рядами (до двух в ряду)
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[[String: Any]]], replyTo: String?,
                      topic: String?) async throws -> ChatMessage
     /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
     func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
@@ -1183,7 +1183,7 @@ struct RemoteMessengerRepository: MessengerRepository {
                           botKeyboard: dto.botKeyboard)
     }
 
-    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[[String: Any]]], replyTo: String?,
                      topic: String?) async throws -> ChatMessage {
         var body: [String: Any] = ["text": "", "blocks": blocks]
         if !buttons.isEmpty { body["buttons"] = buttons }
