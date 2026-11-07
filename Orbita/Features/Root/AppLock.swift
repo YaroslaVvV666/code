@@ -301,6 +301,8 @@ struct PasscodePad: View {
     @State private var wrong = false
     @State private var busy = false                 // идёт тряска: нажатия не принимаем
 
+    private var pal: PasscodePalette { PasscodePalette(theme: theme) }
+
     private static let letters = ["", "A B C", "D E F", "G H I", "J K L", "M N O", "P Q R S", "T U V", "W X Y Z"]
 
     var body: some View {
@@ -308,21 +310,21 @@ struct PasscodePad: View {
             if showsLock {
                 Image(systemName: wrong ? "lock.trianglebadge.exclamationmark.fill" : "lock.fill")
                     .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : .white)
+                    .foregroundStyle(wrong ? AnyShapeStyle(Color(red: 1, green: 0.38, blue: 0.36)) : pal.lockStyle)
                     .contentTransition(.symbolEffect(.replace))
                     .modifier(LockWobble(animatableData: shake))       // замок качается из стороны в сторону
                     .padding(.bottom, 26)
             }
-            Text(title).font(.system(size: 21, weight: .semibold)).foregroundStyle(.white)
+            Text(title).font(.system(size: 21, weight: .semibold)).foregroundStyle(pal.ink)
                 .multilineTextAlignment(.center)
             if let line = disabledText ?? subtitle {
-                Text(line).font(.system(size: 14)).foregroundStyle(disabledText != nil ? Color.red.opacity(0.9) : Color.white.opacity(0.65))
+                Text(line).font(.system(size: 14)).foregroundStyle(disabledText != nil ? Color.red.opacity(0.9) : pal.inkSecondary)
                     .multilineTextAlignment(.center).padding(.top, 6)
             }
             HStack(spacing: length > 4 ? 22 : 26) {
                 ForEach(0..<length, id: \.self) { i in
-                    Circle().fill(i < code.count ? (wrong ? Color(red: 1, green: 0.38, blue: 0.36) : Color.white) : Color.clear)
-                        .overlay(Circle().stroke(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : Color.white, lineWidth: 1.4))
+                    Circle().fill(i < code.count ? (wrong ? Color(red: 1, green: 0.38, blue: 0.36) : pal.dot) : Color.clear)
+                        .overlay(Circle().stroke(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : pal.dotStroke, lineWidth: 1.4))
                         .frame(width: 13, height: 13)
                         .scaleEffect(i == code.count - 1 ? 1.15 : 1)
                         .animation(.spring(response: 0.2, dampingFraction: 0.5), value: code.count)
@@ -341,10 +343,10 @@ struct PasscodePad: View {
                 HStack(spacing: 26) {
                     Group {
                         if let leftTitle {
-                            Button(leftTitle, action: onLeft).font(.system(size: 17)).foregroundStyle(.white)
+                            Button(leftTitle, action: onLeft).font(.system(size: 17)).foregroundStyle(pal.ink)
                         } else if showsBiometrics {
                             Button(action: onBiometrics) {
-                                Image(systemName: biometryIcon).font(.system(size: 30)).foregroundStyle(.white)
+                                Image(systemName: biometryIcon).font(.system(size: 30)).foregroundStyle(pal.ink)
                             }
                         } else {
                             Color.clear
@@ -357,7 +359,7 @@ struct PasscodePad: View {
                         Haptics.impact(.light)
                         code.removeLast()
                     } label: {
-                        Text(Strings(lang: lang).t("Удалить", "Delete")).font(.system(size: 17)).foregroundStyle(.white)
+                        Text(Strings(lang: lang).t("Удалить", "Delete")).font(.system(size: 17)).foregroundStyle(pal.ink)
                             .frame(width: 80, height: 80)
                     }
                     .buttonStyle(.plain)
@@ -373,17 +375,17 @@ struct PasscodePad: View {
     private func key(_ d: String, letters: String) -> some View {
         Button { tap(d) } label: {
             VStack(spacing: -2) {
-                Text(d).font(.system(size: 36, weight: .regular)).foregroundStyle(.white)
+                Text(d).font(.system(size: 36, weight: .regular)).foregroundStyle(pal.ink)
                 if !letters.isEmpty {
-                    Text(letters).font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(.white)
+                    Text(letters).font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(pal.inkSecondary)
                 }
             }
             .frame(width: 80, height: 80)
-            .background(Circle().fill(Color.white.opacity(0.12)))
-            .overlay(Circle().stroke(theme.accentColor.opacity(0.35), lineWidth: 1))
+            .background(Circle().fill(pal.keyFill))
+            .overlay(Circle().stroke(pal.keyStroke, lineWidth: 1))
             .contentShape(Circle())
         }
-        .buttonStyle(PasscodeKeyStyle())
+        .buttonStyle(PasscodeKeyStyle(pressed: pal.keyPressed))
     }
 
     private func tap(_ d: String) {
@@ -430,23 +432,79 @@ private struct LockWobble: GeometryEffect {
 
 /// Нажатие клавиши: кружок светлеет, как на экране блокировки iPhone
 private struct PasscodeKeyStyle: ButtonStyle {
+    var pressed: Color = Color.white.opacity(0.35)
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(Circle().fill(Color.white.opacity(configuration.isPressed ? 0.35 : 0)))
+            .background(Circle().fill(configuration.isPressed ? pressed : .clear))
             .animation(.easeOut(duration: configuration.isPressed ? 0.02 : 0.35), value: configuration.isPressed)
     }
 }
 
-/// Тёмный фон с отсветом акцентного цвета — как на экране блокировки
+/// Цвета экрана кода из темы приложения. Тема по умолчанию (тёмная, синий акцент) — как было:
+/// чёрный фон, белые цифры. Свой цвет акцента или светлая тема — экран в её цветах.
+struct PasscodePalette {
+    let theme: Theme
+    var isDefault: Bool { theme.dark && theme.accentIndex == 0 && theme.customAccent == nil }
+    private var accent: Color { theme.accentColor }
+
+    var ink: Color { theme.dark ? .white : theme.text }
+    var inkSecondary: Color { theme.dark ? Color.white.opacity(0.65) : theme.textSecondary }
+    var dot: Color { isDefault ? .white : accent }
+    var dotStroke: Color { isDefault ? .white : (theme.dark ? accent.opacity(0.9) : accent.opacity(0.75)) }
+    var keyFill: Color {
+        if isDefault { return Color.white.opacity(0.12) }
+        return theme.dark ? accent.opacity(0.16) : Color.white.opacity(0.85)
+    }
+    var keyStroke: Color {
+        if isDefault { return accent.opacity(0.35) }
+        return accent.opacity(theme.dark ? 0.5 : 0.3)
+    }
+    var keyPressed: Color {
+        if isDefault { return Color.white.opacity(0.35) }
+        return accent.opacity(theme.dark ? 0.45 : 0.3)
+    }
+    /// Замок: белый по умолчанию, иначе — переливается цветом темы
+    var lockStyle: AnyShapeStyle {
+        isDefault ? AnyShapeStyle(Color.white) : AnyShapeStyle(theme.accent)
+    }
+}
+
+/// Фон экрана кода: по умолчанию тёмный с отсветом акцента — как на экране блокировки;
+/// со своим цветом — глубокий градиент этого цвета; в светлой теме — светлый с цветными отсветами
 struct PasscodeBackground: View {
     @Environment(\.theme) private var theme
+    @State private var drift = false
+
     var body: some View {
+        let pal = PasscodePalette(theme: theme)
+        let a = theme.accentColor
         ZStack {
-            Color.black
-            RadialGradient(colors: [theme.accentColor.opacity(0.35), .clear], center: .bottomLeading, startRadius: 20, endRadius: 600)
-            RadialGradient(colors: [theme.accentColor.opacity(0.18), .clear], center: .topLeading, startRadius: 10, endRadius: 500)
+            if pal.isDefault {
+                Color.black
+                RadialGradient(colors: [a.opacity(0.35), .clear], center: .bottomLeading, startRadius: 20, endRadius: 600)
+                RadialGradient(colors: [a.opacity(0.18), .clear], center: .topLeading, startRadius: 10, endRadius: 500)
+            } else if theme.dark {
+                Color.black
+                LinearGradient(colors: [a.opacity(0.38), a.opacity(0.08), .black], startPoint: .top, endPoint: .bottom)
+                RadialGradient(colors: [a.opacity(0.55), .clear], center: drift ? .bottomTrailing : .bottomLeading,
+                               startRadius: 20, endRadius: 620)
+                RadialGradient(colors: [a.opacity(0.28), .clear], center: drift ? .topLeading : .topTrailing,
+                               startRadius: 10, endRadius: 480)
+            } else {
+                theme.sheet
+                LinearGradient(colors: [a.opacity(0.22), a.opacity(0.05), .clear], startPoint: .top, endPoint: .bottom)
+                RadialGradient(colors: [a.opacity(0.30), .clear], center: drift ? .bottomTrailing : .bottomLeading,
+                               startRadius: 20, endRadius: 600)
+                RadialGradient(colors: [a.opacity(0.16), .clear], center: drift ? .topLeading : .topTrailing,
+                               startRadius: 10, endRadius: 460)
+            }
         }
         .ignoresSafeArea()
+        .onAppear {
+            // свои цвета: отсветы медленно переплывают — экран «живой»
+            guard !pal.isDefault else { return }
+            withAnimation(.easeInOut(duration: 9).repeatForever(autoreverses: true)) { drift = true }
+        }
     }
 }
 
@@ -456,6 +514,8 @@ struct AppLockView: View {
     @ObservedObject var lock: AppLock
     var onForgot: () -> Void = {}
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    private var pal: PasscodePalette { PasscodePalette(theme: theme) }
     @State private var now = Date()
     @State private var askForgot = false
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -484,11 +544,11 @@ struct AppLockView: View {
                             disabledText: waitText) { lock.unlock(with: $0) }
                 Spacer()
                 Button(s.t("Забыли код?", "Forgot passcode?")) { askForgot = true }
-                    .font(.system(size: 15)).foregroundStyle(.white.opacity(0.6))
+                    .font(.system(size: 15)).foregroundStyle(pal.inkSecondary)
                     .padding(.bottom, 24)
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(theme.dark ? .dark : .light)
         .onReceive(timer) { now = $0 }
         .onAppear {
             hideKeyboard()
@@ -600,7 +660,7 @@ struct AppLockSettings: View {
                     return true
                 }
             }
-            .preferredColorScheme(.dark)
+            .preferredColorScheme(theme.dark ? .dark : .light)
             .environment(\.theme, theme).environment(\.lang, lang)
         }
     }
@@ -612,6 +672,7 @@ struct PasscodeSetupView: View {
     let onDone: () -> Void
     @ObservedObject private var lock = AppLock.shared
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
     @State private var oldOK = false
     @State private var first: String?
     @State private var length = 4
@@ -657,9 +718,9 @@ struct PasscodeSetupView: View {
                         length = length == 4 ? 6 : 4
                     } label: {
                         Text(length == 4 ? s.t("Код из 6 цифр", "6-digit passcode") : s.t("Код из 4 цифр", "4-digit passcode"))
-                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(PasscodePalette(theme: theme).ink)
                             .padding(.horizontal, 16).frame(height: 36)
-                            .background(Color.white.opacity(0.14), in: Capsule())
+                            .background(PasscodePalette(theme: theme).keyFill, in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 22)
@@ -667,7 +728,7 @@ struct PasscodeSetupView: View {
                 Spacer()
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(theme.dark ? .dark : .light)
     }
 }
 
