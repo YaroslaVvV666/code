@@ -1,6 +1,9 @@
 import SwiftUI
 import AVFoundation
+import CoreImage
 import CoreImage.CIFilterBuiltins
+import PhotosUI
+import UIKit
 import Combine
 
 // MARK: - Матрица QR-кода
@@ -112,6 +115,7 @@ struct ProfileQRSheet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
+            .qrBrightnessBoost()
     }
 }
 
@@ -120,28 +124,40 @@ struct ProfileQRSheet: View {
 struct QRScannerView: UIViewControllerRepresentable {
     let onCode: (String) -> Void
     let onDenied: () -> Void
+    var torch = false
+    /// Камера не поддерживает фонарик (фронтальная, симулятор)
+    var onTorchAvailable: (Bool) -> Void = { _ in }
 
     func makeUIViewController(context: Context) -> ScannerController {
         let controller = ScannerController()
         controller.onCode = onCode
         controller.onDenied = onDenied
+        controller.onTorchAvailable = onTorchAvailable
         return controller
     }
 
     func updateUIViewController(_ controller: ScannerController, context: Context) {
         controller.onCode = onCode
         controller.onDenied = onDenied
+        controller.onTorchAvailable = onTorchAvailable
+        controller.setTorch(torch)
     }
 }
 
+/// Камера для QR: задняя (на iPhone Pro — «виртуальная», сама переключается на макро для мелких кодов),
+/// автофокус на близкое расстояние, рекомендованный зум (как в примере Apple), щипок — приближение
 final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onCode: ((String) -> Void)?
     var onDenied: (() -> Void)?
+    var onTorchAvailable: ((Bool) -> Void)?
 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "orbita.scanner")
     private var preview: AVCaptureVideoPreviewLayer?
+    private var device: AVCaptureDevice?
     private var locked = false
+    private var torchOn = false
+    private var pinchStart: CGFloat = 1
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -158,19 +174,31 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
         default:
             onDenied?()
         }
+        view.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
+    }
+
+    private static func bestCamera() -> AVCaptureDevice? {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera],
+                                         mediaType: .video, position: .back).devices.first
+            ?? AVCaptureDevice.default(for: .video)
     }
 
     private func configure() {
-        guard let device = AVCaptureDevice.default(for: .video),
+        guard let device = Self.bestCamera(),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else { onDenied?(); return }
+        session.beginConfiguration()
+        if session.canSetSessionPreset(.hd1920x1080) { session.sessionPreset = .hd1920x1080 }
         session.addInput(input)
-
         let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return }
+        guard session.canAddOutput(output) else { session.commitConfiguration(); return }
         session.addOutput(output)
         output.setMetadataObjectsDelegate(self, queue: .main)
-        output.metadataObjectTypes = [.qr]
+        output.metadataObjectTypes = output.availableMetadataObjectTypes.contains(.qr) ? [.qr] : []
+        session.commitConfiguration()
+        self.device = device
+        tune(device)
+        onTorchAvailable?(device.hasTorch && device.isTorchAvailable)
 
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
@@ -181,6 +209,47 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
         queue.async { [session] in session.startRunning() }
     }
 
+    /// Фокус вблизи и зум, при котором код размером ~2 см ещё в фокусе (а не размыт у самого объектива)
+    private func tune(_ device: AVCaptureDevice) {
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+        if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+        if device.isAutoFocusRangeRestrictionSupported { device.autoFocusRangeRestriction = .near }
+        if device.isSmoothAutoFocusSupported { device.isSmoothAutoFocusEnabled = false }
+        if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+        if device.isVirtualDevice {
+            // «обычная» камера (1×), а для близких кодов система сама включит макро
+            if let wide = device.virtualDeviceSwitchOverVideoZoomFactors.first {
+                device.videoZoomFactor = min(device.maxAvailableVideoZoomFactor, CGFloat(truncating: wide))
+            }
+            return
+        }
+        let minFocus = Float(device.minimumFocusDistance)              // мм; −1 — неизвестно
+        guard minFocus > 0 else { return }
+        let fov = device.activeFormat.videoFieldOfView                  // градусы
+        let codeSize: Float = 20, fill: Float = 0.6                     // код 2 см должен занимать ~60% окна
+        let distance = (codeSize / fill) / tan(fov * .pi / 360)
+        if distance < minFocus {
+            device.videoZoomFactor = min(device.activeFormat.videoMaxZoomFactor, CGFloat(minFocus / distance))
+        }
+    }
+
+    func setTorch(_ on: Bool) {
+        guard on != torchOn, let device, device.hasTorch, (try? device.lockForConfiguration()) != nil else { return }
+        if on, device.isTorchModeSupported(.on) { try? device.setTorchModeOn(level: 0.8) } else { device.torchMode = .off }
+        device.unlockForConfiguration()
+        torchOn = on
+    }
+
+    @objc private func pinched(_ g: UIPinchGestureRecognizer) {
+        guard let device else { return }
+        if g.state == .began { pinchStart = device.videoZoomFactor }
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        let maxZoom = min(device.maxAvailableVideoZoomFactor, 8)
+        device.videoZoomFactor = max(device.minAvailableVideoZoomFactor, min(maxZoom, pinchStart * g.scale))
+        device.unlockForConfiguration()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         preview?.frame = view.bounds
@@ -188,6 +257,7 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        setTorch(false)
         queue.async { [session] in if session.isRunning { session.stopRunning() } }
     }
 
@@ -202,6 +272,45 @@ final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsD
     }
 }
 
+/// QR на картинке (скриншот, фото из галереи)
+enum QRImageReader {
+    static func read(_ data: Data) -> String? {
+        guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
+        let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+        return detector?.features(in: image).compactMap { ($0 as? CIQRCodeFeature)?.messageString }.first
+    }
+}
+
+/// Пока на экране QR-код — яркость на максимум (его легче считать), при уходе — как было
+struct QRBrightnessBoost: ViewModifier {
+    @Environment(\.scenePhase) private var phase
+    @State private var saved: CGFloat?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { boost() }
+            .onDisappear { restore() }
+            .onChange(of: phase) { _, p in if p == .active { boost() } else { restore() } }
+    }
+
+    private func boost() {
+        guard saved == nil else { return }
+        let screen = UIScreen.main
+        saved = screen.brightness
+        if screen.brightness < 0.9 { screen.brightness = 0.9 }
+    }
+
+    private func restore() {
+        guard let saved else { return }
+        UIScreen.main.brightness = saved
+        self.saved = nil
+    }
+}
+
+extension View {
+    func qrBrightnessBoost() -> some View { modifier(QRBrightnessBoost()) }
+}
+
 struct QRScannerScreen: View {
     /// Вызывается, когда вход подтверждён и экран можно закрывать
     var onApproved: () -> Void = {}
@@ -209,10 +318,17 @@ struct QRScannerScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @Environment(\.openURL) private var openURL
 
     @State private var denied = false
     @State private var link: DeepLink?
     @State private var notice: String?
+    @State private var foreign: String?            // считан не код Orbita: ссылка или текст
+    @State private var torch = false
+    @State private var torchAvailable = false
+    @State private var pickerItem: PhotosPickerItem?
+    @State private var success = false
+    @State private var pulse = false
 
     private var s: Strings { Strings(lang: lang) }
     private let frameSize: CGFloat = 250
@@ -221,7 +337,8 @@ struct QRScannerScreen: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            QRScannerView(onCode: handle, onDenied: { denied = true })
+            QRScannerView(onCode: handle, onDenied: { denied = true }, torch: torch,
+                          onTorchAvailable: { ok in DispatchQueue.main.async { torchAvailable = ok } })
                 .ignoresSafeArea()
 
             // затемнение с «окном» под код
@@ -239,37 +356,58 @@ struct QRScannerScreen: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-            RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .stroke(Color.white.opacity(0.85), lineWidth: 1.5)
+            // уголки рамки: тихо «дышат», при удачном считывании — зелёная вспышка
+            ScanCorners()
+                .stroke(success ? Color.green : Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
                 .frame(width: frameSize, height: frameSize)
+                .scaleEffect(success ? 0.94 : (pulse ? 1.03 : 1))
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: success)
                 .allowsHitTesting(false)
+                .onAppear { pulse = true }
 
             VStack {
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 42, height: 42)
-                            .glassCircle()
-                    }
-                    .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    roundButton("xmark") { dismiss() }
                     Spacer()
+                    PhotosPicker(selection: $pickerItem, matching: .images) {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.white)
+                            .frame(width: 42, height: 42).glassCircle()
+                    }
+                    .accessibilityLabel(s.t("QR из галереи", "QR from photos"))
+                    if torchAvailable {
+                        roundButton(torch ? "flashlight.on.fill" : "flashlight.off.fill", tint: torch ? .yellow : .white) {
+                            Haptics.impact(.light)
+                            torch.toggle()
+                        }
+                        .accessibilityLabel(s.t("Фонарик", "Flashlight"))
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
                 Spacer()
 
-                Text(notice ?? s.scanHint)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 20)
-                    .frame(height: 44)
-                    .glassCapsule()
-                    .padding(.bottom, 54)
-                    .animation(.easeOut(duration: 0.2), value: notice)
+                if let foreign {
+                    foreignCard(foreign)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else {
+                    VStack(spacing: 6) {
+                        Text(notice ?? s.scanHint)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 20)
+                            .frame(height: 44)
+                            .glassCapsule()
+                            .animation(.easeOut(duration: 0.2), value: notice)
+                        Text(s.t("Код далеко — сведите два пальца, чтобы приблизить", "Code too far? Pinch to zoom"))
+                            .font(.system(size: 12)).foregroundStyle(Color.white.opacity(0.6))
+                    }
+                    .padding(.bottom, 44)
+                }
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: foreign)
 
             if denied {
                 VStack(spacing: 14) {
@@ -286,6 +424,12 @@ struct QRScannerScreen: View {
                     .padding(.horizontal, 20)
                     .frame(height: 42)
                     .glassCapsule(interactive: true)
+                    // без камеры всё равно можно считать код с картинки
+                    PhotosPicker(selection: $pickerItem, matching: .images) {
+                        Label(s.t("Выбрать фото с QR-кодом", "Pick a photo with a QR code"), systemImage: "photo")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.white)
+                            .padding(.horizontal, 20).frame(height: 42).glassCapsule(interactive: true)
+                    }
                 }
                 .padding(28)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -293,7 +437,19 @@ struct QRScannerScreen: View {
             }
         }
         .preferredColorScheme(.dark)
-        .sheet(item: $link) { item in
+        .onChange(of: pickerItem) { _, item in
+            guard let item else { return }
+            Task { @MainActor in
+                defer { pickerItem = nil }
+                guard let data = try? await item.loadTransferable(type: Data.self), let code = QRImageReader.read(data) else {
+                    flash(s.t("На фото не найден QR-код", "No QR code found in the photo"))
+                    return
+                }
+                Haptics.notify(.success)
+                handle(code)
+            }
+        }
+        .sheet(item: $link, onDismiss: { success = false }) { item in
             LinkSheet(link: item) {
                 link = nil
                 onApproved()
@@ -303,17 +459,110 @@ struct QRScannerScreen: View {
         }
     }
 
+    private func roundButton(_ icon: String, tint: Color = .white, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 42, height: 42)
+                .glassCircle()
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Не код Orbita: ссылку можно открыть (с проверкой адреса), текст — скопировать
+    private func foreignCard(_ code: String) -> some View {
+        let url = SafeLink.url(code)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: url != nil ? "link" : "text.alignleft")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.accentColor)
+                    .frame(width: 36, height: 36).background(theme.accentColor.opacity(0.15), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(url != nil ? s.t("Ссылка в QR-коде", "Link in the QR code") : s.t("Текст в QR-коде", "Text in the QR code"))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.white.opacity(0.7))
+                    Text(url?.host ?? code).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white).lineLimit(3)
+                }
+                Spacer(minLength: 0)
+                Button { withAnimation { foreign = nil } } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+            }
+            HStack(spacing: 10) {
+                if let url {
+                    Button {
+                        HiddenLink.confirm(url, shown: url.absoluteString) { openURL($0) }
+                    } label: {
+                        Label(s.t("Открыть", "Open"), systemImage: "safari")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).frame(height: 44).background(theme.accent, in: Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.notify(.success)
+                    flash(s.t("Скопировано", "Copied"))
+                    withAnimation { foreign = nil }
+                } label: {
+                    Label(s.t("Скопировать", "Copy"), systemImage: "doc.on.doc")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 44).background(Color.white.opacity(0.15), in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+        }
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 16).padding(.bottom, 30)
+    }
+
+    private func flash(_ text: String) {
+        notice = text
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if notice == text { notice = nil }
+        }
+    }
+
     private func handle(_ code: String) {
         guard link == nil else { return }
         if let parsed = DeepLink(string: code) {
+            foreign = nil
+            success = true
             link = parsed
+        } else if code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            flash(s.notOrbitaCode)
         } else {
-            notice = s.notOrbitaCode
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                notice = nil
-            }
+            withAnimation { foreign = code }
         }
+    }
+}
+
+/// Четыре уголка рамки сканера
+struct ScanCorners: Shape {
+    func path(in r: CGRect) -> Path {
+        let l: CGFloat = 38, rad: CGFloat = 22
+        var p = Path()
+        // левый верхний
+        p.move(to: CGPoint(x: r.minX, y: r.minY + l)); p.addLine(to: CGPoint(x: r.minX, y: r.minY + rad))
+        p.addQuadCurve(to: CGPoint(x: r.minX + rad, y: r.minY), control: CGPoint(x: r.minX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.minX + l, y: r.minY))
+        // правый верхний
+        p.move(to: CGPoint(x: r.maxX - l, y: r.minY)); p.addLine(to: CGPoint(x: r.maxX - rad, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY + rad), control: CGPoint(x: r.maxX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + l))
+        // правый нижний
+        p.move(to: CGPoint(x: r.maxX, y: r.maxY - l)); p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - rad))
+        p.addQuadCurve(to: CGPoint(x: r.maxX - rad, y: r.maxY), control: CGPoint(x: r.maxX, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.maxX - l, y: r.maxY))
+        // левый нижний
+        p.move(to: CGPoint(x: r.minX + l, y: r.maxY)); p.addLine(to: CGPoint(x: r.minX + rad, y: r.maxY))
+        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.maxY - rad), control: CGPoint(x: r.minX, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX, y: r.maxY - l))
+        return p
     }
 }
 
@@ -513,6 +762,7 @@ struct QRSheet: View {
     @State private var password = ""
     @State private var busy = false
     @State private var runID = 0
+    @State private var expiresAt: Date?             // когда код сменится на новый
 
     var body: some View {
         VStack(spacing: 20) {
@@ -535,6 +785,20 @@ struct QRSheet: View {
             .frame(width: 252, height: 252)
             .animation(.easeInOut(duration: 0.25), value: link)
 
+            // сколько живёт этот код: по истечении сам сменится на новый
+            if let expiresAt, link != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    let left = max(0, Int(expiresAt.timeIntervalSince(ctx.date)))
+                    HStack(spacing: 6) {
+                        ProgressView(value: Double(left), total: max(1, Double(qrSession?.expiresIn ?? 60)))
+                            .progressViewStyle(.linear).tint(theme.accentColor).frame(width: 70)
+                        Text(strings.t("Код обновится через \(left / 60):\(String(format: "%02d", left % 60))",
+                                       "Code refreshes in \(left / 60):\(String(format: "%02d", left % 60))"))
+                            .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textSecondary)
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 12) {
                 step(1, strings.qrStep1)
                 step(2, strings.qrStep2)
@@ -556,6 +820,7 @@ struct QRSheet: View {
         .frame(maxWidth: .infinity)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .qrBrightnessBoost()
         .task(id: runID) { await run() }
     }
 
@@ -637,6 +902,7 @@ struct QRSheet: View {
                 link = session.link
                 errorText = nil
                 let deadline = Date().addingTimeInterval(session.expiresIn)
+                expiresAt = deadline
                 poll: while !Task.isCancelled && Date() < deadline {
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                     switch try await QRLoginClient.poll(session) {

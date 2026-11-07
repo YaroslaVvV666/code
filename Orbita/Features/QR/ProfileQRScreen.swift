@@ -206,6 +206,7 @@ struct ProfileQRScreen: View {
             panel
         }
         .preferredColorScheme(theme.dark ? .dark : .light)
+        .qrBrightnessBoost()                     // яркость на максимум — код легче считать с другого телефона
         .onAppear { if !didInit { didInit = true; dark = theme.dark } }
         .task { tone = await AvatarTone.load(avatarID) }
         .sheet(item: $shareItems) { ActivitySheet(items: $0.items).presentationDetents([.medium, .large]) }

@@ -1395,6 +1395,7 @@ struct GroupQRSheet: View {
         VStack(spacing: 16) {
             Text(title).font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text).padding(.top, 24)
             QRCodeView(text: link.absoluteString)
+                .qrBrightnessBoost()
                 .frame(width: 210, height: 210)
                 .padding(16)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
