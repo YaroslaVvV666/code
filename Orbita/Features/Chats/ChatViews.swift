@@ -1997,7 +1997,11 @@ struct ChatScreen: View {
                 onOpenStory: openStory,
                 onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil,
                 onCallBack: (model.peer.isGroup || isSaved) ? nil : { video in session.calls.start(peer: model.peer, video: video) },
-                onOpenStickerPack: { stickerPack = StickerPackRoute(id: $0) },
+                onOpenStickerPack: {
+                    // поле ввода отпускаем заранее: иначе меню «…» в шторке возвращало ему фокус и выезжала клавиатура
+                    hideKeyboard()
+                    stickerPack = StickerPackRoute(id: $0)
+                },
                 onOpenEntity: { entitySheet = $0 })
             // пузырь не пересчитывается, пока само сообщение то же: печатает собеседник, прочитали другое сообщение,
             // открылась шторка — раньше от любого такого изменения заново считались ВСЕ пузыри переписки

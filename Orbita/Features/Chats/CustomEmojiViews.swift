@@ -30,6 +30,7 @@ final class EmojiPackPresenter: ObservableObject {
     /// Открыть набор, в котором лежит это эмодзи
     func open(emojiID: String) {
         Haptics.impact(.light)
+        hideKeyboard()                       // клавиатура чата не должна выезжать поверх шторки набора
         if let pack = CustomEmojiStore.shared.info(emojiID)?.pack {
             route = Route(id: pack)
             return

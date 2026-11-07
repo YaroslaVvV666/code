@@ -1840,6 +1840,8 @@ struct StickerPackSheet: View {
 
     var body: some View {
         ZStack {
+            // меню «…» и любые нажатия в шторке не должны возвращать фокус полю ввода под ней
+            Color.clear.frame(width: 0, height: 0).onAppear { hideKeyboard() }
             if let pack {
                 VStack(spacing: 0) {
                     header(pack)
