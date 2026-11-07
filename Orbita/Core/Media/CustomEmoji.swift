@@ -22,7 +22,7 @@ struct CustomEmojiRef: Equatable {
 }
 
 /// Свои эмодзи на телефоне: сведения (какой файл, анимированный ли) и сами файлы лежат на диске и работают без сети.
-/// Анимации — сжатый Lottie (как .tgs): распаковываются один раз и держатся в памяти
+/// Анимации — Lottie JSON, на сервере хранятся сжатыми: распаковываются один раз и держатся в памяти
 @MainActor
 final class CustomEmojiStore: ObservableObject {
     static let shared = CustomEmojiStore()
@@ -157,7 +157,7 @@ final class CustomEmojiStore: ObservableObject {
     }
     #endif
 
-    /// Распаковать gzip (.tgs): заголовок gzip + «сырой» deflate + 8 байт хвоста
+    /// Распаковать gzip: заголовок gzip + «сырой» deflate + 8 байт хвоста
     nonisolated static func gunzip(_ data: Data) -> Data? {
         let b = [UInt8](data.prefix(4096))
         guard b.count > 18, b[0] == 0x1f, b[1] == 0x8b, b[2] == 8 else { return nil }

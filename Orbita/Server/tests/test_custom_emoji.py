@@ -1,5 +1,5 @@
-"""Свои эмодзи: набор эмодзи через @stickers, анимированный (.tgs / .json Lottie) и статичный (PNG → 100×100),
-проверки Lottie, эмодзи в тексте сообщения (custom_emoji), поиск по id."""
+"""Свои эмодзи: набор эмодзи только через @stickers, анимированный (только Lottie .json) и статичный
+(картинка → обрезка по центру → PNG 100×100), проверки Lottie, эмодзи в тексте сообщения (custom_emoji), поиск по id."""
 import gzip
 import io
 import json
@@ -17,10 +17,10 @@ def lottie(seconds=2, w=100, extra_layer=None):
     return {"v": "5.7.4", "fr": 60, "ip": 0, "op": 60 * seconds, "w": w, "h": w, "layers": [layer], "meta": {"g": "LottieFiles"}}
 
 
-def png(size):
+def png(w, h=None):
     from PIL import Image
     out = io.BytesIO()
-    Image.new("RGBA", (size, size), (255, 0, 0, 128)).save(out, "PNG")
+    Image.new("RGBA", (w, h or w), (255, 0, 0, 128)).save(out, "PNG")
     return out.getvalue()
 
 
@@ -46,9 +46,8 @@ def main():
 
     check("/newemojipack", "набор эмодзи" in say("/newemojipack")["text"].lower())
     check("набор создан", "создан" in say("Мои котики")["text"])
-    tgs = gzip.compress(json.dumps(lottie()).encode())
-    r = say("", [upload_file(tgs, "cat.tgs", "application/octet-stream")])
-    check(".tgs принят", "Анимация принята" in r["text"], r["text"])
+    r = say("", [upload_file(json.dumps(lottie()).encode(), "cat.json", "application/json")])
+    check(".json Lottie принят", "Анимация принята" in r["text"], r["text"])
     r = say("😺")
     msgs = (jbody(req("GET", "/v1/chats/%s/messages?peek=1" % BOT, t)[1]) or {}).get("messages", [])
     done = [m for m in msgs if m["text"].startswith("Готово")][-1]
@@ -57,14 +56,14 @@ def main():
     emoji_id = ent[0]["url"] if ent else ""
 
     r = say("", [upload_file(json.dumps(lottie(1)).encode(), "heart.json", "application/json")])
-    check(".json Lottie принят", "Анимация принята" in r["text"], r["text"])
+    check("второй .json Lottie принят", "Анимация принята" in r["text"], r["text"])
     say("❤️")
-    s, b, _ = req("POST", "/v1/media?kind=image&w=300&h=300", t, raw=png(300), ctype="image/png")
+    s, b, _ = req("POST", "/v1/media?kind=image&w=300&h=180", t, raw=png(300, 180), ctype="image/png")
     r = say("", [{"type": "photo", "media_id": (jbody(b) or {}).get("id")}])
-    check("PNG 300×300 → статичный (уменьшен до 100)", "Картинка принята" in r["text"], r["text"])
+    check("фото 300×180 → статичный (обрезан до 100×100)", "Картинка принята" in r["text"], r["text"])
     say("⭐")
 
-    r = say("", [upload_file(gzip.compress(json.dumps(lottie(5)).encode()), "long.tgs", "application/octet-stream")])
+    r = say("", [upload_file(json.dumps(lottie(5)).encode(), "long.json", "application/json")])
     check("длиннее 3 секунд — отказ", "не дольше" in r["text"], r["text"])
     bad = lottie()
     bad["assets"] = [{"id": "img", "p": "data:image/png;base64,AAAA"}]
@@ -73,8 +72,10 @@ def main():
     r = say("", [upload_file(json.dumps(lottie(2, extra_layer={"ks": {"o": {"x": "var $bm_rt = 1"}}})).encode(),
                              "expr.json", "application/json")])
     check("выражения (скрипты) — отказ", "Выражения" in r["text"], r["text"])
-    r = say("", [upload_file(b"\x1f\x8b" + b"garbage" * 10, "x.tgs", "application/octet-stream")])
-    check("битый .tgs — отказ", "повреждён" in r["text"] or "Lottie" in r["text"], r["text"])
+    r = say("", [upload_file(gzip.compress(json.dumps(lottie()).encode()), "x.tgs", "application/octet-stream")])
+    check("чужой формат анимации — отказ", "не поддерживается" in r["text"], r["text"])
+    r = say("", [upload_file(gzip.compress(json.dumps(lottie()).encode()), "x.json", "application/json")])
+    check("сжатый JSON — отказ", "не поддерживается" in r["text"], r["text"])
     say("/done")
 
     s, b, _ = req("GET", "/v1/stickers", t)
@@ -88,6 +89,9 @@ def main():
         check("анимация хранится сжатой (gzip, ≤64 КБ)", raw[:2] == b"\x1f\x8b" and len(raw) <= 64 * 1024, raw[:4])
         j = json.loads(gzip.decompress(raw))
         check("метаданные вырезаны", "meta" not in j)
+        from PIL import Image
+        s, raw, h = req("GET", "/media/%s" % st[2]["media_id"])
+        check("статичный эмодзи — ровно 100×100", Image.open(io.BytesIO(raw)).size == (100, 100))
 
     # эмодзи в тексте сообщения другу
     text = "Привет 😺!"
@@ -110,23 +114,16 @@ def main():
     check("несуществующее своё эмодзи в реакции — отказ",
           req("PUT", "/v1/messages/%s/reaction" % mid, tf, {"emoji": "u:" + "1" * 32})[0] == 400)
 
-    # набор эмодзи прямо из приложения
+    # из приложения наборы эмодзи не создаются — только в боте
     s, b, _ = req("POST", "/v1/stickers/packs", tf, {"title": "Из приложения", "kind": "emoji"})
     pack = jbody(b) or {}
-    check("создан набор эмодзи из приложения", s == 201 and pack.get("kind") == "emoji", b[:200])
-    pid = pack.get("id", "")
+    check("из приложения kind=emoji не создаёт набор эмодзи", s == 201 and pack.get("kind") != "emoji", b[:200])
     s, b, _ = req("POST", "/v1/media?kind=image&w=64&h=64", tf, raw=png(64), ctype="image/png")
-    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🔥"})
-    e1 = jbody(b) or {}
-    check("картинка → эмодзи (PNG 100×100)", s == 201 and not e1.get("lottie") and e1.get("emoji") == "🔥", (s, b[:200]))
-    s, b, _ = req("POST", "/v1/media?kind=file", tf, raw=gzip.compress(json.dumps(lottie()).encode()), ctype="application/octet-stream")
-    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🎉"})
-    check(".tgs → анимированное эмодзи", s == 201 and (jbody(b) or {}).get("lottie"), (s, b[:200]))
-    s, b, _ = req("POST", "/v1/media?kind=file", tf, raw=gzip.compress(json.dumps(lottie(9)).encode()), ctype="application/octet-stream")
-    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🎉"})
-    check("длинная анимация — понятная ошибка", s == 400 and "не дольше" in (jbody(b) or {}).get("message", ""), b[:200])
-    check("в стикерпак эмодзи не добавить", req("POST", "/v1/stickers/packs/%s/stickers" % pid, tf,
-                                                 {"media_id": e1.get("media_id"), "emoji": "🔥"})[0] == 404)
+    mid64 = (jbody(b) or {}).get("id")
+    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % ep[0]["id"], t, {"media_id": mid64, "emoji": "🔥"})
+    check("добавить эмодзи из приложения нельзя", s == 404, (s, b[:120]))
+    check("в эмодзи-пак стикер не добавить", req("POST", "/v1/stickers/packs/%s/stickers" % ep[0]["id"], t,
+                                                {"media_id": mid64, "emoji": "🔥"})[0] in (400, 404))
     s, b, _ = req("PUT", "/v1/stickers/packs/%s/install" % ep[0]["id"], tf)
     check("друг добавил чужой набор эмодзи", s == 200 and (jbody(b) or {}).get("installed"))
     print("FAILS: %d" % fails)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Пакует Lottie JSON в gzip (как .tgs): python3 pack_emoji.py файл.json [...]. Файл перезаписывается тем же именем."""
+"""Ужимает и сжимает (gzip) Lottie JSON встроенных эмодзи: python3 pack_emoji.py файл.json [...]. Файл перезаписывается тем же именем."""
 import json, gzip, sys
 STRIP = {"nm", "mn", "ln", "cl"}
 def rnd(o, strip):

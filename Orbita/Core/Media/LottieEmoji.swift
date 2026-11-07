@@ -411,7 +411,7 @@ actor LottieEmojiStore {
         return result
     }
 
-    /// Файлы анимаций лежат сжатыми (gzip, как .tgs в Telegram): в приложении они в ~8 раз меньше и читаются с диска быстрее.
+    /// Файлы анимаций (Lottie JSON) лежат сжатыми gzip: в приложении они в ~8 раз меньше и читаются с диска быстрее.
     /// Обычный несжатый JSON тоже принимается — так можно класть и новые файлы без упаковки
     private static func inflate(_ raw: Data) -> Data? {
         guard raw.count > 18, raw[raw.startIndex] == 0x1f, raw[raw.startIndex + 1] == 0x8b else { return raw }
