@@ -37,12 +37,16 @@ struct ArticleComposer: View {
     @State private var sending = false
     @State private var errorText: String?
     @State private var confirmClose = false
+    /// С чем редактор открылся (текст из поля ввода): ничего не добавили — закрываем без вопроса, текст остаётся в поле
+    @State private var initialBlocks: [ArticleBlock] = []
 
     /// initialText — уже набранный в поле ввода текст: каждый абзац становится текстовым блоком
     init(model: ChatModel, initialText: String = "", onSent: @escaping () -> Void = {}) {
         self.model = model
         self.onSent = onSent
-        _blocks = State(initialValue: Self.blocks(from: initialText))
+        let start = Self.blocks(from: initialText)
+        _blocks = State(initialValue: start)
+        _initialBlocks = State(initialValue: start)
     }
 
     static func blocks(from text: String) -> [ArticleBlock] {
@@ -149,17 +153,22 @@ struct ArticleComposer: View {
         .alert(errorText ?? "", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button("OK", role: .cancel) {}
         }
-        .interactiveDismissDisabled(hasContent)
+        .interactiveDismissDisabled(hasContent && !unchanged)
     }
 
     // MARK: Верх
+
+    /// Статью не меняли: те же абзацы, что пришли из поля ввода, и без кнопок
+    private var unchanged: Bool {
+        footer.isEmpty && blocks.filter { !$0.isEmpty } == initialBlocks.filter { !$0.isEmpty }
+    }
 
     private var hasContent: Bool { blocks.contains { !$0.isEmpty } || !footer.isEmpty }
 
     private var topBar: some View {
         HStack {
             Button {
-                if hasContent { confirmClose = true } else { dismiss() }
+                if hasContent && !unchanged { confirmClose = true } else { dismiss() }
             } label: {
                 Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).foregroundStyle(theme.text)
                     .frame(width: 48, height: 48).glassCircle()
