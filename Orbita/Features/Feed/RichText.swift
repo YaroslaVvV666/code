@@ -358,7 +358,8 @@ struct RichInlineText: View {
                 let base = RichTextCodec.attributed(text: segment.text + (isLast ? filler : ""), entities: segment.entities,
                                                     size: size, color: UIColor(color), linkColor: UIColor(linkColor), display: true)
                 let detected = detect ? ChatEntityDetector.annotate(base) : base
-                let ns = commandLinks ? BotCommandLinks.annotate(detected, linkColor: UIColor(linkColor)) : detected
+                let linked = commandLinks ? BotCommandLinks.annotate(detected, linkColor: UIColor(linkColor)) : detected
+                let ns = MathText.styleInline(linked, size: size)           // формулы внутри текста — шрифтом формул
                 let attributed = (try? AttributedString(ns, including: \.uiKit)) ?? AttributedString(segment.text)
                 let label = Text(attributed).tint(linkColor).fixedSize(horizontal: false, vertical: true)
                 if segment.isQuote {

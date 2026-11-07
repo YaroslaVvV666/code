@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import UIKit
+import CoreText
 
 // MARK: - Статья в сообщении: модель
 
@@ -167,6 +168,51 @@ enum MathText {
         "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "x": "ₓ"
     ]
 
+    /// Невидимая метка вокруг формулы внутри обычного текста: по ней формула рисуется шрифтом формул
+    static let mark = "\u{2061}"
+
+    /// Формула для вставки в текст: «E = mc²» между невидимыми метками
+    static func inline(_ latex: String) -> String { mark + render(latex).trimmingCharacters(in: .whitespaces) + mark }
+
+    /// Шрифт формулы как в учебнике: буквы — наклонные с засечками, цифры и знаки — прямые
+    static func uiFont(_ size: CGFloat, italic: Bool) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size)
+        var d = base.fontDescriptor.withDesign(.serif) ?? base.fontDescriptor
+        if italic, let it = d.withSymbolicTraits(.traitItalic) { d = it }
+        return UIFont(descriptor: d, size: size)
+    }
+
+    /// Готовая (уже переведённая из LaTeX) строка → текст со шрифтом формул
+    static func styled(_ rendered: String, size: CGFloat) -> AttributedString {
+        var out = AttributedString()
+        for ch in rendered {
+            var piece = AttributedString(String(ch))
+            piece.font = Font(uiFont(size, italic: ch.isLetter && ch.isASCII) as CTFont)
+            out += piece
+        }
+        return out
+    }
+
+    /// В тексте сообщения/статьи формулы (между метками) рисуются шрифтом формул
+    static func styleInline(_ ns: NSAttributedString, size: CGFloat) -> NSAttributedString {
+        let str = ns.string as NSString
+        guard str.range(of: mark).location != NSNotFound else { return ns }
+        let out = NSMutableAttributedString(attributedString: ns)
+        var inside = false
+        var i = 0
+        while i < str.length {
+            let r = str.rangeOfComposedCharacterSequence(at: i)
+            let piece = str.substring(with: r)
+            if piece == mark {
+                inside.toggle()
+            } else if inside, let ch = piece.first {
+                out.addAttribute(.font, value: uiFont(size * 1.12, italic: ch.isLetter && ch.isASCII), range: r)
+            }
+            i = r.location + r.length
+        }
+        return out
+    }
+
     static func render(_ latex: String) -> String {
         var chars = Array(latex)
         var i = 0
@@ -250,6 +296,20 @@ enum MathText {
     }
 }
 
+/// Формула, нарисованная из LaTeX: E = mc² — буквы наклонные с засечками, цифры и знаки прямые
+struct FormulaView: View {
+    let latex: String
+    var size: CGFloat = 24
+    var color: Color
+
+    var body: some View {
+        Text(MathText.styled(MathText.render(latex).trimmingCharacters(in: .whitespaces), size: size))
+            .foregroundStyle(color)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 // MARK: - Статья в пузыре сообщения
 
 struct ArticleBody: View {
@@ -317,10 +377,7 @@ struct ArticleBody: View {
             CodeBlockView(code: b.text, lang: b.lang, textColor: textColor, secondary: secondary, mine: mine)
                 .padding(.horizontal, 10)
         case .formula:
-            Text(MathText.render(b.text))
-                .font(.system(size: 22, design: .serif).italic())
-                .foregroundStyle(textColor)
-                .multilineTextAlignment(.center)
+            FormulaView(latex: b.text, size: 24, color: textColor)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 .textSelection(.enabled)

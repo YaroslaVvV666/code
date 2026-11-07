@@ -31,6 +31,7 @@ struct ArticleComposer: View {
     @State private var showLocation = false
     @State private var showEmoji = false
     @State private var buttonDraft: ArticleButtonDraft?
+    @State private var formulaDraft: FormulaDraft?
     @State private var loadingMedia = 0
     @State private var sending = false
     @State private var errorText: String?
@@ -123,6 +124,12 @@ struct ArticleComposer: View {
             ArticleEmojiPicker { appendText($0) }
                 .environment(\.theme, theme)
                 .presentationDetents([.height(320)])
+        }
+        .sheet(item: $formulaDraft) { draft in
+            FormulaSheet(draft: draft) { applyFormula(draft, latex: $0) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.medium, .large])
+                .presentationBackground(theme.dark ? Color.black : Color(white: 0.97))
         }
         .sheet(item: $buttonDraft) { draft in
             ArticleButtonSheet(draft: draft) { result in applyButton(result) }
@@ -227,7 +234,13 @@ struct ArticleComposer: View {
         Button { insert(ArticleBlock(kind: .quote)) } label: { Label(s.t("Цитата", "Quote"), systemImage: "text.quote") }
         Button { insert(ArticleBlock(kind: .pullquote)) } label: { Label(s.t("Выносная цитата", "Pull quote"), systemImage: "quote.opening") }
         Button { insert(ArticleBlock(kind: .code)) } label: { Label(s.t("Код", "Code"), systemImage: "chevron.left.forwardslash.chevron.right") }
-        Button { insert(ArticleBlock(kind: .formula)) } label: { Label(s.t("Формула", "Formula"), systemImage: "function") }
+        // «Формула» → «В тексте» / «На отдельной строке» → шторка с LaTeX и предпросмотром
+        Menu {
+            Button { formulaDraft = FormulaDraft(inline: true) } label: { Label(s.t("В тексте", "Inline"), systemImage: "x.squareroot") }
+            Button { formulaDraft = FormulaDraft(inline: false) } label: {
+                Label(s.t("На отдельной строке", "On its own line"), systemImage: "function")
+            }
+        } label: { Label(s.t("Формула", "Formula"), systemImage: "function") }
         Button { buttonDraft = ArticleButtonDraft(button: ArticleButton(), inline: true) } label: {
             Label(s.t("Кнопка", "Button"), systemImage: "link")
         }
@@ -406,18 +419,20 @@ struct ArticleComposer: View {
             .padding(10)
             .background(Color.black.opacity(theme.dark ? 0.35 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         case .formula:
-            VStack(spacing: 8) {
-                TextField("LaTeX: E = mc^2, \\frac{a}{b}", text: block.text, axis: .vertical)
-                    .font(.system(size: 15, design: .monospaced)).foregroundStyle(theme.text)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .focused($focus, equals: b.id)
-                if !b.text.isEmpty {
-                    Text(MathText.render(b.text)).font(.system(size: 22, design: .serif).italic())
-                        .foregroundStyle(theme.text).frame(maxWidth: .infinity)
+            // в статье — уже готовая формула; нажатие открывает её LaTeX для правки
+            Button { formulaDraft = FormulaDraft(inline: false, latex: b.text, blockID: b.id) } label: {
+                Group {
+                    if b.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Label(s.t("Задать формулу", "Set formula"), systemImage: "function")
+                            .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.textSecondary)
+                    } else {
+                        FormulaView(latex: b.text, size: 24, color: theme.text)
+                    }
                 }
+                .frame(maxWidth: .infinity).padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
-            .padding(10)
-            .background(theme.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .buttonStyle(.plain)
         case .button:
             ArticleLinkButton(text: b.text.isEmpty ? s.t("Кнопка", "Button") : b.text, url: b.url, color: b.color,
                               mine: false, fullWidth: true)
@@ -891,6 +906,35 @@ struct ArticleComposer: View {
     }
 
     /// Эмодзи — в поле, где стоит курсор
+    /// Готово в шторке формулы: в текст — там, где курсор; отдельной строкой — блоком (или правка существующего)
+    private func applyFormula(_ draft: FormulaDraft, latex: String) {
+        let value = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        commitSnapshot()
+        if let id = draft.blockID, let i = blocks.firstIndex(where: { $0.id == id }) {
+            blocks[i].text = value
+            return
+        }
+        if !draft.inline {
+            var b = ArticleBlock(kind: .formula)
+            b.text = value
+            insert(b)
+            return
+        }
+        let piece = MathText.inline(value)
+        if let i = focusedIndex, ([.text, .heading, .quote, .pullquote, .collapse, .list] as [ArticleBlock.Kind]).contains(blocks[i].kind) {
+            appendText(piece)
+        } else if let i = blocks.lastIndex(where: { $0.kind == .text }) {
+            blocks[i].text += piece
+            let id = blocks[i].id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { focus = id }
+        } else {
+            var b = ArticleBlock(kind: .text)
+            b.text = piece
+            insert(b)
+        }
+    }
+
     private func appendText(_ e: String) {
         guard let f = focus ?? lastFocus, let i = focusedIndex else { return }
         let id = blocks[i].id
@@ -1099,5 +1143,105 @@ struct ArticleEmojiPicker: View {
             .padding(16)
         }
         .background(theme.sheet)
+    }
+}
+
+// MARK: - Формула: LaTeX и предпросмотр
+
+struct FormulaDraft: Identifiable {
+    let id = UUID()
+    var inline: Bool
+    var latex = ""
+    var blockID: String? = nil          // правка уже вставленной формулы
+}
+
+/// «Новая формула»: поле LaTeX и вид формулы в тексте/отдельной строкой, готово — галочкой
+struct FormulaSheet: View {
+    let draft: FormulaDraft
+    let onDone: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var latex = ""
+    @FocusState private var focused: Bool
+
+    private var s: Strings { Strings(lang: lang) }
+    private var empty: Bool { latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var field: Color { theme.dark ? Color(white: 0.13) : Color.white }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(width: 50, height: 50).background(field, in: Circle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(draft.blockID == nil ? s.t("Новая формула", "New formula") : s.t("Формула", "Formula"))
+                    .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
+                Spacer()
+                Button(action: done) {
+                    Image(systemName: "checkmark").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 50, height: 50)
+                        .background(empty ? AnyShapeStyle(Color.gray.opacity(0.4)) : AnyShapeStyle(theme.accent), in: Circle())
+                }
+                .buttonStyle(PressStyle())
+                .disabled(empty)
+            }
+            .padding(.top, 18)
+
+            caption("LaTeX")
+            TextField("E = mc^2", text: $latex, axis: .vertical)
+                .font(.system(size: 18)).foregroundStyle(theme.text)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .keyboardType(.asciiCapable)
+                .submitLabel(.done)
+                .focused($focused)
+                .onSubmit(done)
+                .onChange(of: latex) { _, v in
+                    // Return на клавиатуре — «готово», а не новая строка
+                    if v.contains("\n") { latex = v.replacingOccurrences(of: "\n", with: ""); done() }
+                }
+                .padding(.horizontal, 20).padding(.vertical, 16)
+                .background(field, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+
+            caption(draft.inline ? s.t("Вид в тексте", "Inline preview") : s.t("Вид на отдельной строке", "Preview"))
+            ZStack {
+                if empty {
+                    Text(s.t("Здесь появится формула", "Your formula will appear here"))
+                        .font(.system(size: 15)).foregroundStyle(theme.textTertiary)
+                } else {
+                    FormulaView(latex: latex, size: 30, color: theme.text)
+                        .padding(.horizontal, 16)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 96)
+            .background(field, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .animation(.easeOut(duration: 0.15), value: empty)
+
+            Text(s.t("Например: \\frac{a}{b}, x^{2}, \\sqrt{x}, \\alpha, \\sum, \\int", "E.g. \\frac{a}{b}, x^{2}, \\sqrt{x}, \\alpha, \\sum, \\int"))
+                .font(.system(size: 13)).foregroundStyle(theme.textTertiary)
+                .padding(.horizontal, 20).padding(.top, 10)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .onAppear {
+            latex = draft.latex
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { focused = true }
+        }
+    }
+
+    private func caption(_ t: String) -> some View {
+        Text(t.uppercased()).font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.textSecondary)
+            .padding(.leading, 20).padding(.top, 26).padding(.bottom, 10)
+    }
+
+    private func done() {
+        guard !empty else { return }
+        Haptics.impact(.light)
+        onDone(latex)
+        dismiss()
     }
 }
