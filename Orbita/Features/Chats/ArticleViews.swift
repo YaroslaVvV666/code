@@ -15,6 +15,8 @@ final class ArticleLocalMedia: Equatable {
     enum Source {
         case prepared(PreparedMedia)
         case file(URL, name: String, mime: String)
+        /// Музыка/звук: уходит как аудио (с названием, исполнителем, длительностью и обложкой) — тогда её можно слушать
+        case audio(URL, name: String, title: String, artist: String, duration: Double, cover: Data?)
         case location(GeoPoint)
     }
     let source: Source
@@ -29,6 +31,8 @@ final class ArticleLocalMedia: Equatable {
         switch source {
         case .prepared(let m): return .prepared(m)
         case .file(let url, let name, let mime): return .file(url: url, name: name, mime: mime)
+        case .audio(let url, let name, let title, let artist, let duration, let cover):
+            return .audio(url: url, name: name, title: title, artist: artist, duration: duration, cover: cover)
         case .location(let p): return .location(p, live: 0)
         }
     }

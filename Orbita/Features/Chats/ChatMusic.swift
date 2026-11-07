@@ -38,7 +38,8 @@ struct ChatMusicItem: Identifiable, Equatable {
 
 func chatMusicItems(_ messages: [ChatMessage]) -> [ChatMusicItem] {
     messages.flatMap { m in
-        m.attachments.compactMap { a in
+        // вложения сообщения и звук внутри статьи — в одной очереди
+        (m.attachments + m.blocks.compactMap(\.media)).compactMap { a in
             a.track.map { ChatMusicItem(messageID: m.id, attachment: a, track: $0, mine: m.mine) }
         }
     }

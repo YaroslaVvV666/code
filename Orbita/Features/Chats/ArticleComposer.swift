@@ -700,6 +700,28 @@ struct ArticleComposer: View {
                 .padding(14)
                 .background(theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .padding(.horizontal, 16).padding(.top, 50)
+            case .audio(_, let name, let title, let artist, let duration, let cover):
+                HStack(spacing: 12) {
+                    ZStack {
+                        if let cover, let img = UIImage(data: cover) {
+                            Image(uiImage: img).resizable().scaledToFill()
+                        } else {
+                            theme.accent
+                            Image(systemName: "music.note").font(.system(size: 22)).foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 48, height: 48).clipShape(Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title.isEmpty ? name : title).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(2)
+                        let mins = Int(duration) / 60, secs = Int(duration) % 60
+                        Text((artist.isEmpty ? "" : artist + " · ") + String(format: "%d:%02d", mins, secs))
+                            .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .padding(14)
+                .background(theme.text.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 16).padding(.top, 50)
             case .location(let p):
                 HStack(spacing: 12) {
                     Image(systemName: "mappin.circle.fill").font(.system(size: 34)).foregroundStyle(.red)
@@ -753,6 +775,16 @@ struct ArticleComposer: View {
                 try FileManager.default.copyItem(at: url, to: target)
             } catch {
                 errorText = s.t("Не удалось добавить файл", "Couldn't add the file")
+                continue
+            }
+            let ext = target.pathExtension.lowercased()
+            if ["mp3", "m4a", "aac"].contains(ext) {
+                // звук/музыка: читаем теги и длительность — уходит как аудио, у получателя играет в плеере с таймером
+                Task { @MainActor in
+                    let meta = await AudioMeta.read(target)
+                    insert(mediaBlock(ArticleLocalMedia(.audio(target, name: name, title: meta.title, artist: meta.artist,
+                                                               duration: meta.duration, cover: meta.cover))))
+                }
                 continue
             }
             let mime = UTType(filenameExtension: target.pathExtension)?.preferredMIMEType ?? "application/octet-stream"

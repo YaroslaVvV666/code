@@ -700,7 +700,7 @@ final class ChatModel: ObservableObject {
                     guard let local = b.local else { continue }
                     switch local.source {
                     case .prepared(let m): ping(m.isVideo ? "video" : "photo")
-                    case .file: ping("file")
+                    case .file, .audio: ping("file")
                     case .location: break
                     }
                     d["media"] = try await repo.upload(local.outgoing).json
