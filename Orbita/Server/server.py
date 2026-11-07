@@ -342,7 +342,8 @@ ensure_column("users", "birthday_enc", "birthday_enc BLOB")
 ensure_column("users", "privacy_enc", "privacy_enc BLOB")
 ensure_column("posts", "edited_at", "edited_at REAL")
 ensure_column("posts", "reel", "reel INTEGER NOT NULL DEFAULT 0")
-ensure_column("post_media", "live", "live INTEGER NOT NULL DEFAULT 0")       # живое фото: короткое видео со звуком
+ensure_column("post_media", "live", "live INTEGER NOT NULL DEFAULT 0")
+ensure_column("posts", "duet_of", "duet_of TEXT")                         # дуэт: шортс, рядом с которым сняли своё видео       # живое фото: короткое видео со звуком
 ensure_column("posts", "music_enc", "music_enc BLOB")
 ensure_column("posts", "repost_of", "repost_of TEXT")
 ensure_column("posts", "music_media", "music_media TEXT")
@@ -1031,7 +1032,7 @@ def post_json(p, me_id):
     return {
         "reposts": reposts, "reposted_by_me": reposted, "is_repost": bool(p["repost_of"]), "music": music_of(p),
         "repost_friends": friend_reposters(me_id, [base]).get(base, []), "origin": origin_brief(p, me_id),
-        "saves": saves, "saved_by_me": saved, "reel": bool(p["reel"]),
+        "saves": saves, "saved_by_me": saved, "reel": bool(p["reel"]), **duet_field(p, me_id),
         "id": pid, "author": user_brief(author, me_id),
         "text": dec(author, "posts", COL["post_text"], pid, p["text_enc"]) or "",
         "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
@@ -1089,7 +1090,7 @@ def posts_json(rows, me_id):
         out.append({
             "repost_friends": rfriends.get(p["repost_of"] or pid, []), "origin": origin_brief(p, me_id),
             "reposts": reposts.get(p["repost_of"] or pid, 0), "reposted_by_me": (p["repost_of"] or pid) in reposted, "is_repost": bool(p["repost_of"]), "music": music_of(p),
-            "saves": saves.get(pid, 0), "saved_by_me": pid in saved, "reel": bool(p["reel"]),
+            "saves": saves.get(pid, 0), "saved_by_me": pid in saved, "reel": bool(p["reel"]), **duet_field(p, me_id),
             "id": pid, "author": briefs[author],
             "text": dec(author, "posts", COL["post_text"], pid, p["text_enc"]) or "",
             "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
@@ -3524,6 +3525,17 @@ def create_bot_post(req, me, bot_id):
     make_post(req, me, bot_id)
 
 
+def duet_field(p, me_id):
+    """Дуэт: с чьим шортсом снято (оригинал могли удалить — тогда пометки нет)"""
+    if not ("duet_of" in p.keys() and p["duet_of"]):
+        return {}
+    o = q1("SELECT id, author FROM posts WHERE id = ?", (p["duet_of"],))
+    if not o:
+        return {}
+    b = user_brief(o["author"], me_id)
+    return {"duet": {"id": o["id"], "author": {"id": o["author"], "name": b["name"], "username": b.get("username")}}}
+
+
 def make_post(req, me, author):
     """Новая запись: автор — сам человек или его бот (файлы и музыка — загруженные владельцем)"""
     body = req.body_json()
@@ -3557,6 +3569,12 @@ def make_post(req, me, author):
         marks = ",".join("?" for _ in media_ids)
         auto_sensitive = q1("SELECT 1 FROM media WHERE id IN (%s) AND nsfw = 1 LIMIT 1" % marks, tuple(media_ids)) is not None
     sensitive = 1 if (body.get("sensitive") or auto_sensitive) else 0
+    duet_of = None
+    if reel and body.get("duet_of"):
+        o = q1("SELECT * FROM posts WHERE id = ? AND reel = 1", (str(body["duet_of"]),))
+        if not o or either_blocked(o["author"], uid) or ("no_repost" in o.keys() and o["no_repost"] and o["author"] != uid):
+            raise ApiError(400, "duet_not_allowed")          # автор запретил использовать свой шортс
+        duet_of = o["id"]
     with LOCK:
         run("BEGIN")
         try:
@@ -3567,6 +3585,8 @@ def make_post(req, me, author):
                  music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
                  1 if (not reel and body.get("wall_only")) else 0, sensitive))
             write_post_media(pid, items)
+            if duet_of:
+                run("UPDATE posts SET duet_of = ? WHERE id = ?", (duet_of, pid))
             run("COMMIT")
         except Exception:
             run("ROLLBACK")

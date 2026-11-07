@@ -144,6 +144,7 @@ struct Post: Identifiable, Equatable {
     var allowRepost = true           // автор разрешил репосты
     var sensitive = false            // 18+/чувствительный контент — медиа под размытием
     var repostFriends: [Author] = [] // кто из друзей сделал репост (до 8)
+    var duet: DuetRef? = nil          // дуэт: снято рядом с этим шортсом
     var origin: Author? = nil        // у репост-копии — автор оригинала
     /// Создатель ролика: у репоста — автор оригинала, иначе автор
     var creator: Author { origin ?? author }
@@ -155,6 +156,12 @@ struct PostOptions: Equatable {
     var noRepost = false             // запретить репосты (для шортсов)
     var wallOnly = false             // запись на своей стене: видна в профиле, в ленту публикаций не попадает
     var sensitive = false            // 18+/чувствительный контент — показывается с размытием
+}
+
+/// С чьим шортсом снят дуэт
+struct DuetRef: Equatable {
+    let postID: String
+    let author: Author
 }
 
 struct PostMusic: Equatable, Identifiable {

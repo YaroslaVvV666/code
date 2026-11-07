@@ -2253,8 +2253,9 @@ struct SendToChatSheet: View {
 
     init(text: String) { payload = .text(text) }
     init(postID: String, onDownload: (() -> Void)? = nil, onNotInterested: (() -> Void)? = nil, onReport: ((String) -> Void)? = nil,
-         onDelete: (() -> Void)? = nil) {
+         onDelete: (() -> Void)? = nil, onDuet: (() -> Void)? = nil) {
         payload = .post(postID)
+        self.onDuet = onDuet
         self.onDelete = onDelete
         self.onDownload = onDownload
         self.onNotInterested = onNotInterested
@@ -2264,6 +2265,7 @@ struct SendToChatSheet: View {
 
     /// Только для шортсов: две отдельные кнопки над списком чатов
     var onNotInterested: (() -> Void)? = nil
+    var onDuet: (() -> Void)? = nil                      // шортс: снять дуэт рядом с ним
     var onReport: ((String) -> Void)? = nil
     /// Только для шортсов: скачать ролик с водяным знаком
     var onDownload: (() -> Void)? = nil
@@ -2323,11 +2325,18 @@ struct SendToChatSheet: View {
             }
             .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 10)
 
-            if onNotInterested != nil || onReport != nil || onDownload != nil || onDelete != nil {
+            if onNotInterested != nil || onReport != nil || onDownload != nil || onDelete != nil || onDuet != nil {
                 VStack(spacing: 8) {
-                    if let onDownload {
-                        feedbackButton(s.t("Скачать", "Save"), icon: "arrow.down.to.line", danger: false) {
-                            Haptics.impact(.medium); dismiss(); onDownload()
+                    HStack(spacing: 8) {
+                        if let onDownload {
+                            feedbackButton(s.t("Скачать", "Save"), icon: "arrow.down.to.line", danger: false) {
+                                Haptics.impact(.medium); dismiss(); onDownload()
+                            }
+                        }
+                        if let onDuet {
+                            feedbackButton(s.t("Дуэт", "Duet"), icon: "rectangle.split.2x1", danger: false) {
+                                Haptics.impact(.medium); dismiss(); onDuet()
+                            }
                         }
                     }
                     if onDelete != nil {

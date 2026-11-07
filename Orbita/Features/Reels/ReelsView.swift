@@ -205,6 +205,7 @@ struct ReelsView: View {
     @State private var sheetTall = false            // шторка комментариев раскрыта выше
     @State private var sheetDrag: CGFloat = 0
     @State private var shareFor: Post?
+    @State private var duetFor: Post?                   // снять дуэт с этим шортсом
     @State private var showComposer = false
     @State private var showSearch = false          // поиск по шортсам: текущее видео стоит
     @State private var searchQuery = ""            // предзаполненный запрос (нажали на #хэштег)
@@ -603,6 +604,11 @@ struct ReelsView: View {
                 .presentationDragIndicator(.hidden)
                 .onAppear { soundTrackID = music.mediaID }
         }
+        .fullScreenCover(item: $duetFor) { post in
+            DuetRecorderView(original: post) { await model.showMine(session: session); current = model.reels.first?.id }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
         .fullScreenCover(isPresented: $showSearch) {
             ReelSearchView(onClose: { showSearch = false }, initialQuery: searchQuery)
                 .environmentObject(session).environmentObject(flow)
@@ -618,7 +624,9 @@ struct ReelsView: View {
                             onDownload: { download(post) },
                             onNotInterested: { if let r = model.reels.first(where: { $0.id == post.id }) { hide(r) } },
                             onReport: { reason in report(post, reason: reason) },
-                            onDelete: post.isMine && !post.isRepost ? { deleteReel(post) } : nil)
+                            onDelete: post.isMine && !post.isRepost ? { deleteReel(post) } : nil,
+                            onDuet: post.allowRepost && !post.isCollage && post.media.first?.kind == .video
+                                ? { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { duetFor = post } } : nil)
                 .environmentObject(session)
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .presentationBackground(theme.sheet)
@@ -1624,6 +1632,22 @@ struct ReelPage: View {
     private var caption: some View {
         VStack(alignment: .leading, spacing: 7) {
             repostBadge
+            if let duet = post.duet {
+                // дуэт: нажатие — к оригинальному шортсу
+                Button {
+                    Haptics.impact(.light)
+                    Task {
+                        if let original = try? await session.feedRepo.post(id: duet.postID) { session.reelRequest = original }
+                    }
+                } label: {
+                    Label(s.t("Дуэт с ", "Duet with ") + (duet.author.username.map { "@" + $0 } ?? duet.author.name),
+                          systemImage: "rectangle.split.2x1")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).frame(height: 26)
+                        .background(Color.black.opacity(0.35), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
             Button(action: onAuthor) {
                 // как в TikTok: имя человека; нет имени — @username
                 Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
