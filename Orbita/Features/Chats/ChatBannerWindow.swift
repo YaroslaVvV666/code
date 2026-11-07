@@ -132,8 +132,14 @@ struct ChatBannerHost: View {
         }
         .confirmationDialog(s.clearHistory, isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible) {
-            Button(s.clearHistory, role: .destructive) {
+            Button(s.t("Удалить у меня", "Delete for me"), role: .destructive) {
                 if let chat = deleting { Task { await chats.clear(chat.id) } }
+            }
+            // личный чат (не «Избранное») — можно удалить и у собеседника
+            if let chat = deleting, !chat.peer.isGroup, chat.id != session.serverID {
+                Button(s.t("Удалить у меня и у \(chat.peer.name)", "Delete for me and \(chat.peer.name)"), role: .destructive) {
+                    Task { await chats.clear(chat.id, forEveryone: true) }
+                }
             }
             Button(s.cancel, role: .cancel) {}
         }

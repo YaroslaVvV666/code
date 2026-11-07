@@ -660,7 +660,17 @@ struct MessageRow: View {
                     .padding(.bottom, 6)
             }
 
-            if !mediaItems.isEmpty {
+            if let pid = message.forwarded?.postID, mediaItems.count == 1, mediaItems[0].kind == .video {
+                // присланный шортс или видео из поста: вертикальная карточка целиком (без обрезки), как в TikTok
+                SharedVideoCard(attachment: mediaItems[0], author: message.forwarded?.name ?? "", pending: message.isPending) {
+                    if blocked { return }
+                    if let open = onOpenPost { open(pid) } else if let item = mediaItems[0].mediaItem { onOpenMedia([item], 0) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(6) }
+                }
+                .padding(.top, message.reply == nil ? 0 : 6)
+            } else if !mediaItems.isEmpty {
                 MediaBlock(items: mediaItems, pending: message.isPending) { index in
                     // присланный шортс: нажатие открывает ленту шортсов на этом видео (как в TikTok)
                     if blocked { return }
@@ -893,7 +903,7 @@ struct MediaBlock: View {
         Group {
             switch items.count {
             case 1:
-                let aspect = min(1.5, max(0.65, CGFloat(items[0].aspect)))
+                let aspect = min(1.5, max(0.5625, CGFloat(items[0].aspect)))      // вертикальное 9:16 — целиком, без обрезки
                 cell(items[0], index: 0).frame(width: width, height: width / aspect)
             case 2:
                 if asp(0) > 1.25 && asp(1) > 1.25 {
@@ -983,7 +993,7 @@ struct MediaBlock: View {
                         .background(Color.black.opacity(0.45), in: Circle())
                 }
                 if a.duration > 0 {
-                    Text(mmss(Int(a.duration)))
+                    Text(mmss(Int(a.duration.rounded())))
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -2188,5 +2198,78 @@ struct EntityInfoSheet: View {
             found = try? await session.profileRepo.lookup(username: String(entity.value.drop(while: { $0 == "@" })))
         }
         account = found
+    }
+}
+
+// MARK: - Присланный шортс / видео из поста
+
+/// Вертикальная карточка видео из поста или шортса: кадр в своих пропорциях (9:16 — целиком), значок «Шортс»,
+/// длительность внизу слева, по центру — кнопка воспроизведения; без звука крутится превью, нажатие — открыть
+struct SharedVideoCard: View {
+    let attachment: ChatAttachment
+    let author: String
+    var pending = false
+    let onOpen: () -> Void
+
+    @AppStorage("autoplay") private var autoplay = true
+    @Environment(\.lang) private var lang
+
+    private var width: CGFloat { min(230, UIScreen.main.bounds.width * 0.6) }
+    private var height: CGFloat {
+        let a = attachment.aspect > 0 ? CGFloat(attachment.aspect) : 9.0 / 16.0
+        return min(width / max(0.5625, min(1.8, a)), width * 16 / 9)
+    }
+    private var vertical: Bool { attachment.aspect > 0 && attachment.aspect < 0.8 }
+
+    var body: some View {
+        Button(action: onOpen) {
+            ZStack {
+                if let id = attachment.thumbID ?? attachment.mediaID {
+                    RemoteImage(id: id)
+                } else {
+                    Color.black
+                }
+                if autoplay, !pending, let item = attachment.mediaItem {
+                    InlineVideo(item: item).allowsHitTesting(false)
+                }
+                LinearGradient(colors: [.black.opacity(0.35), .clear, .clear, .black.opacity(0.55)],
+                               startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+                Image(systemName: "play.fill")
+                    .font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 50, height: 50)
+                    .background(.black.opacity(0.4), in: Circle())
+                VStack {
+                    HStack(spacing: 5) {
+                        Image(systemName: vertical ? "play.rectangle.on.rectangle.fill" : "play.rectangle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(vertical ? Strings(lang: lang).t("Шортс", "Short") : Strings(lang: lang).t("Видео", "Video"))
+                            .font(.system(size: 12, weight: .semibold))
+                        if !author.isEmpty {
+                            Text("· " + author).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.top, 9)
+                    Spacer()
+                    HStack {
+                        if attachment.duration > 0 {
+                            Text(mmss(Int(attachment.duration.rounded())))
+                                .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(.black.opacity(0.45), in: Capsule())
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                }
+                if pending { Color.black.opacity(0.25) }
+            }
+            .frame(width: width, height: height)
+            .clipped()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
     }
 }

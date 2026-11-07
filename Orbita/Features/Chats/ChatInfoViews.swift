@@ -446,11 +446,16 @@ struct ChatInfoView: View {
                 .presentationBackground(theme.sheet)
         }
         .confirmationDialog(s.t("Удалить переписку?", "Delete chat?"), isPresented: $confirmDeleteChat, titleVisibility: .visible) {
-            Button(s.t("Удалить переписку", "Delete chat"), role: .destructive) { deleteChat() }
+            Button(s.t("Удалить у меня", "Delete for me"), role: .destructive) { deleteChat(forEveryone: false) }
+            if !model.peer.isGroup && model.peer.id != session.serverID {
+                Button(s.t("Удалить у меня и у \(model.peer.name)", "Delete for me and \(model.peer.name)"), role: .destructive) {
+                    deleteChat(forEveryone: true)
+                }
+            }
             Button(s.cancel, role: .cancel) {}
         } message: {
-            Text(s.t("Все сообщения с \(model.peer.name) пропадут у вас. Это нельзя отменить.",
-                     "All messages with \(model.peer.name) will be removed for you. This can't be undone."))
+            Text(s.t("«У меня» — переписка пропадёт только у вас. «У всех» — и у \(model.peer.name). Это нельзя отменить.",
+                     "“For me” removes the chat only for you. “For everyone” removes it for \(model.peer.name) too. This can't be undone."))
         }
     }
 
@@ -512,10 +517,10 @@ struct ChatInfoView: View {
         .padding(.horizontal, 16)
     }
 
-    private func deleteChat() {
+    private func deleteChat(forEveryone: Bool) {
         Haptics.notify(.warning)
         Task {
-            await session.chats.clear(model.peer.id)
+            await session.chats.clear(model.peer.id, forEveryone: forEveryone)
             onLeftGroup()                 // закрываем и информацию, и саму переписку
         }
     }

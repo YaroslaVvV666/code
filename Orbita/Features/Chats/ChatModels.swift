@@ -171,9 +171,9 @@ final class ChatsModel: ObservableObject {
         } catch {}
     }
 
-    func clear(_ peerID: String) async {
-        chats.removeAll { $0.id == peerID }
-        do { try await repo.clear(peerID: peerID) } catch let e as APIError { error = e } catch {}
+    func clear(_ peerID: String, forEveryone: Bool = false) async {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) { chats.removeAll { $0.id == peerID } }
+        do { try await repo.clear(peerID: peerID, forEveryone: forEveryone) } catch let e as APIError { error = e } catch {}
         await refresh()
     }
 }
@@ -357,7 +357,20 @@ final class ChatModel: ObservableObject {
             if refreshedOnce, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count, fresh.count - messages.count <= 3 { Haptics.impact(.soft) }       // только на настоящее новое сообщение, не на подгрузку истории при входе
             if fresh != messages {
                 announceIncomingReaction(in: fresh)
-                if abs(fresh.count - messages.count) > 3 {
+                // собеседник удалил сообщения «у всех»: пропавшие из видимого окна (а не ушедшие вверх по истории)
+                let oldest = fresh.first?.createdAt ?? .distantPast
+                let freshIDs = Set(fresh.map(\.id))
+                let gone = refreshedOnce ? messages.filter { !freshIDs.contains($0.id) && $0.createdAt >= oldest }.map(\.id) : []
+                if !gone.isEmpty && gone.count <= Self.dustLimit {
+                    // немного — рассыпаются частицами, как при своём удалении
+                    await dissolve(gone)
+                    withAnimation(Self.closeGap) { messages = fresh }
+                    dissolving.subtract(gone)
+                    freezing.subtract(gone)
+                } else if gone.count > Self.dustLimit {
+                    // много (вся переписка): лёгкое исчезновение без частиц — телефон не захлёбывается
+                    withAnimation(.easeOut(duration: 0.25)) { messages = fresh }
+                } else if abs(fresh.count - messages.count) > 3 {
                     // длинная история разом (10 предзагруженных → 100): без анимации появления — иначе строки «въезжали» с нулевой прозрачностью
                     // и экран на миг оставался пустым, пока не пролистаешь
                     var t = Transaction(); t.disablesAnimations = true
@@ -807,12 +820,15 @@ final class ChatModel: ObservableObject {
 
     /// Как соседние сообщения съезжают на место удалённого
     static let closeGap = Animation.spring(response: 0.45, dampingFraction: 0.9)
+    /// Больше стольких удалённых разом — без частиц, просто плавное исчезновение (иначе сотни частиц тормозят)
+    static let dustLimit = 6
 
     /// Несколько выбранных: рассыпаются и уходят из списка разом, запросы на сервер — уже после
     func deleteMany(_ list: [ChatMessage]) async {
         let ids = Set(list.map(\.id))
-        await dissolve(Array(ids))
-        withAnimation(Self.closeGap) {
+        // немного — частицами; много — лёгкое исчезновение без частиц, чтобы анимация не перегружала телефон
+        if ids.count <= Self.dustLimit { await dissolve(Array(ids)) } else { Haptics.impact(.soft) }
+        withAnimation(ids.count <= Self.dustLimit ? Self.closeGap : .easeOut(duration: 0.25)) {
             messages.removeAll { ids.contains($0.id) }
             dissolving.subtract(ids)
             freezing.subtract(ids)

@@ -546,7 +546,8 @@ protocol MessengerRepository: Sendable {
     func typing(peerID: String, action: String) async
     /// Только «печатает…» собеседника — без загрузки всей переписки
     func typingStatus(peerID: String) async throws -> String?
-    func clear(peerID: String) async throws
+    /// forEveryone — переписка пропадает и у собеседника (только личные чаты)
+    func clear(peerID: String, forEveryone: Bool) async throws
     func stickers() async throws -> [StickerPack]
     /// Наборы, сохранённые на телефоне (сразу, без сети); nil — ещё не сохраняли
     func savedStickers() -> [StickerPack]?
@@ -1313,8 +1314,8 @@ struct RemoteMessengerRepository: MessengerRepository {
         _ = try? await api.request("POST", "/v1/chats/\(peerID)/typing", body: ServerAPI.json(["action": action]))
     }
 
-    func clear(peerID: String) async throws {
-        _ = try await api.request("DELETE", "/v1/chats/\(peerID)")
+    func clear(peerID: String, forEveryone: Bool) async throws {
+        _ = try await api.request("DELETE", "/v1/chats/\(peerID)" + (forEveryone ? "?all=1" : ""))
     }
 
     /// Наборы стикеров. Ответ сервера сохраняется на телефон вместе с самими стикерами (StickerVault);

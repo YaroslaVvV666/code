@@ -6887,9 +6887,13 @@ def share_post(req, me, peer):
             continue
         item = {"type": "video" if pm["kind"] == "video" else "photo", "media_id": nid, "size": 0, "mime": "",
                 "width": pm["width"] or 0, "height": pm["height"] or 0, "duration": pm["duration"] or 0}
-        row = q1("SELECT size, mime, thumb FROM media WHERE id = ?", (nid,))
+        row = q1("SELECT size, mime, thumb, duration, width, height FROM media WHERE id = ?", (nid,))
         if row:
             item["size"], item["mime"] = row["size"], row["mime"]
+            # длительность и размер кадра — из самого файла, если у поста их не записали
+            item["duration"] = round(float(item["duration"] or row["duration"] or 0), 2)
+            if not item["width"] or not item["height"]:
+                item["width"], item["height"] = row["width"] or 0, row["height"] or 0
             if row["thumb"]:
                 item["thumb"] = row["thumb"]
         atts.append(item)
@@ -8237,6 +8241,7 @@ def delete_message(req, me, mid):
         retained_delete_dm(mid)                                     # у обоих (при ретеншне — скрыто, но сохранено)
         run("DELETE FROM reactions WHERE message_id = ?", (mid,))
         run("DELETE FROM pins WHERE message_id = ?", (mid,))
+        SHARED.events_publish(m["recipient"], "dm")                 # у собеседника сообщение рассыплется сразу
     elif m["sender"] == m["recipient"]:                         # «Избранное»
         drop_message_media(m)
         retained_delete_dm(mid)
@@ -8613,6 +8618,19 @@ def clear_chat(req, me, peer):
     if is_group(peer):
         leave_group(peer, uid)
         return req.send_json(200, {"ok": True})
+    if req.query().get("all") == "1" and peer != uid:
+        # «У всех»: переписка исчезает и у собеседника (его сообщения тоже — как в Telegram)
+        rows = q("SELECT * FROM messages WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)",
+                 (uid, peer, peer, uid))
+        for m in rows:
+            drop_message_media(m)
+            retained_delete_dm(m["id"])
+        if rows:
+            marks = _in([m["id"] for m in rows])
+            run("DELETE FROM reactions WHERE message_id IN (%s)" % marks, [m["id"] for m in rows])
+            run("DELETE FROM pins WHERE message_id IN (%s)" % marks, [m["id"] for m in rows])
+        SHARED.events_publish(peer, "dm")            # у собеседника переписка пропадёт сразу
+        return req.send_json(200, {"ok": True, "deleted": len(rows)})
     run("UPDATE messages SET del_sender = 1 WHERE sender = ? AND recipient = ?", (uid, peer))
     run("UPDATE messages SET del_recipient = 1 WHERE sender = ? AND recipient = ?", (peer, uid))
     req.send_json(200, {"ok": True})
