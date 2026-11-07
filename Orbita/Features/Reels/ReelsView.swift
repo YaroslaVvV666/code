@@ -319,6 +319,8 @@ struct ReelsView: View {
     private func edgeChanged(_ v: DragGesture.Value) {
         if swipeKind == .vertical { return }
         if swipeKind == .none {
+            // у коллажа вбок листаются фото — профиль автора свайпом не открываем
+            if model.reels.indices.contains(currentIndex), model.reels[currentIndex].post.isCollage { swipeKind = .vertical; return }
             guard !rotatedNow, commentsFor == nil, !holdFast, peekID == nil,
                   v.startLocation.y < UIScreen.main.bounds.height - bottomClear - 56,        // не мешаем перемотке по полосе внизу
                   model.reels.indices.contains(currentIndex) else { return }
@@ -838,6 +840,7 @@ struct ReelPage: View {
     /// Скорость воспроизведения: в повёрнутом режиме — выбранная кнопкой, иначе обычная
     private var rateNow: Float { forceFill ? mode.speed : 1 }
     @State private var lsMenu = false
+    @State private var page = 0                   // какое фото коллажа на экране
     @State private var repostSpin = 0
     @State private var repostsOpen = false
     // учёт просмотра
@@ -854,7 +857,11 @@ struct ReelPage: View {
     private var duration: Double { video?.duration ?? 0 }
     /// Вертикальное видео (9:16 и близкие) растягивается на весь экран, горизонтальное — по центру с чёрными полосами
     private var fill: Bool { (video?.aspect ?? 1) < 0.7 }
-    private var landscape: Bool { (video?.aspect ?? 1) >= 0.7 }
+    private var landscape: Bool { !collage && (video?.aspect ?? 1) >= 0.7 }
+    /// Коллаж: фото и живые фото листаются вбок, звук (музыка или звук живого фото) идёт непрерывно
+    private var collage: Bool { post.isCollage }
+    /// Что звучит в коллаже: выбранная музыка, иначе звук первого живого фото — играет через все фото, не обрываясь
+    private var soundID: String? { post.music?.mediaID ?? post.media.first { $0.live }?.id }
     private let red = Color(red: 1, green: 0.17, blue: 0.33)
 
     struct FloatingHeart: Identifiable { let id = UUID(); let point: CGPoint; let tilt: Double }
@@ -872,6 +879,8 @@ struct ReelPage: View {
                         .rotationEffect(.degrees(90))
                         .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
+            } else if collage {
+                collageLayer
             } else {
                 // Видео и его обложка — только наложение: их собственный размер (картинка «на всю высоту» шире экрана) не должен
                 // раздвигать страницу. Иначе пока обложка не сменилась кадром, колонка кнопок стояла за правым краем и потом «телепортировалась»
@@ -882,7 +891,8 @@ struct ReelPage: View {
             LinearGradient(colors: [.black.opacity(0.22), .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.12))
                 .allowsHitTesting(false)
 
-            // касания: один — пауза, два — сердечко
+            // касания: один — пауза, два — сердечко (у коллажа — свои, на листающихся фото)
+            if !collage {
             GeometryReader { geo in
                 Color.clear.contentShape(Rectangle())
                     .onTapGesture(count: 2, coordinateSpace: .local) { point in
@@ -911,6 +921,7 @@ struct ReelPage: View {
                 ForEach(hearts) { h in
                     TapHeart(tilt: h.tilt, size: forceFill ? 150 : 86).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
                 }
+            }
             }
 
             // как в TikTok: у горизонтального видео под кадром кнопка «На весь экран»
@@ -983,7 +994,34 @@ struct ReelPage: View {
 
             if !forceFill {
             VStack(spacing: 0) {
+                if collage && post.media.count > 1 {
+                    // слева сверху — какое фото из скольких
+                    HStack {
+                        Text("\(page + 1)/\(post.media.count)")
+                            .font(.system(size: 13, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                            .padding(.horizontal, 10).frame(height: 26)
+                            .background(Color.black.opacity(0.45), in: Capsule())
+                            .contentTransition(.numericText())
+                            .animation(.easeOut(duration: 0.2), value: page)
+                        Spacer()
+                    }
+                    .padding(.leading, 14).padding(.top, topInset + 58)
+                    .allowsHitTesting(false)
+                }
                 Spacer()
+                if collage && post.media.count > 1 {
+                    // точечки снизу, как в TikTok
+                    HStack(spacing: 5) {
+                        ForEach(0..<post.media.count, id: \.self) { i in
+                            Capsule().fill(Color.white.opacity(i == page ? 1 : 0.45))
+                                .frame(width: i == page ? 14 : 6, height: 6)
+                        }
+                    }
+                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: page)
+                    .frame(maxWidth: .infinity)
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(false)
+                }
                 HStack(alignment: .bottom, spacing: 0) {
                     caption
                     Spacer(minLength: 30)
@@ -991,6 +1029,7 @@ struct ReelPage: View {
                 }
                 .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, 6)
                 progressBar(hitHeight: 48)                       // широкая зона перемотки: промазать по полоске трудно
+                    .opacity(collage && soundID == nil ? 0 : 1)     // коллаж без звука — перематывать нечего
                     .padding(.horizontal, 14)
                 // кнопки/подпись/полоса прижаты ближе к панели вкладок (как в TikTok): оставляем место ровно под панель, без лишнего зазора
                 Color.clear.frame(height: max(0, bottomClear + Self.safeBottom - 10))   // полоса прогресса прижата к самому верху панели вкладок
@@ -1042,6 +1081,67 @@ struct ReelPage: View {
         }
     }
 
+    // MARK: Коллаж
+
+    /// Фото и живые фото листаются вбок; один тап — пауза звука, два — сердечко
+    private var collageLayer: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                SensitiveGate(sensitive: post.sensitive, id: post.id) {
+                    TabView(selection: $page) {
+                        ForEach(Array(post.media.enumerated()), id: \.offset) { i, m in
+                            ZStack {
+                                if m.live || m.kind == .video {
+                                    LiveLoopView(item: m, playing: active && page == i && !userPaused && !suspended)
+                                } else {
+                                    RemoteImage(id: m.id, fill: false, backdrop: .black)
+                                }
+                                if m.live {
+                                    // значок «живое фото»
+                                    VStack {
+                                        HStack {
+                                            Spacer()
+                                            Label("LIVE", systemImage: "livephoto")
+                                                .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                                .padding(.horizontal, 8).frame(height: 22)
+                                                .background(Color.black.opacity(0.45), in: Capsule())
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.top, topInset + 58).padding(.trailing, 14)
+                                    .allowsHitTesting(false)
+                                }
+                            }
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .tag(i)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .onChange(of: page) { _, _ in Haptics.select() }
+                }
+                ForEach(hearts) { h in
+                    TapHeart(tilt: h.tilt).position(h.point).allowsHitTesting(false)
+                }
+            }
+            // касания по фото: листание вбок остаётся у TabView, тапы ловим поверх без блокировки жестов
+            .simultaneousGesture(
+                SpatialTapGesture(count: 2).onEnded { v in
+                    onDoubleLike()
+                    let h = FloatingHeart(point: v.location, tilt: Double.random(in: -18...18))
+                    hearts.append(h)
+                    Haptics.impact(.medium)
+                    Task {
+                        try? await Task.sleep(nanoseconds: 900_000_000)
+                        hearts.removeAll { $0.id == h.id }
+                    }
+                }
+                .exclusively(before: TapGesture(count: 1).onEnded { togglePause() })     // один тап — пауза, два — сердечко
+            )
+        }
+    }
+
     // MARK: Видео
 
     @ViewBuilder
@@ -1062,7 +1162,8 @@ struct ReelPage: View {
     }
 
     private func makePlayer() {
-        guard player == nil, let v = video, let url = ServerConfig.mediaURL(v.id) else { return }
+        // у коллажа плеер — только звук (музыка или звук живого фото), он идёт через все фото
+        guard player == nil, let id = collage ? soundID : video?.id, let url = ServerConfig.mediaURL(id) else { return }
         let item = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: item)
         MediaSilence.register(p)               // при блокировке — пауза
@@ -1375,14 +1476,14 @@ struct ReelPage: View {
     }
 
     private func togglePause() {
-        guard let player else { return }
+        guard player != nil || collage else { return }
         if userPaused {
             userPaused = false
-            player.play()
+            player?.play()
             startClock()
         } else {
             userPaused = true
-            player.pause()
+            player?.pause()
             pauseClock()
         }
         Haptics.impact(.light)
@@ -1910,5 +2011,42 @@ final class LandscapeMode: ObservableObject {
 
     static func label(_ v: Float) -> String {
         (v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)) + "×"
+    }
+}
+
+/// Живое фото (или короткое видео) в коллаже шортса: без звука и по кругу — звук коллажа идёт отдельно и не обрывается
+struct LiveLoopView: View {
+    let item: MediaItem
+    let playing: Bool
+    @State private var player: AVPlayer?
+    @State private var loop: NSObjectProtocol?
+
+    var body: some View {
+        ZStack {
+            RemoteImage(id: item.thumbID ?? item.id, fill: false, backdrop: .black)
+            if let player {
+                PlayerLayerView(player: player, gravity: .resizeAspect)
+            }
+        }
+        .onAppear {
+            guard player == nil, let url = ServerConfig.mediaURL(item.id) else { return }
+            let p = AVPlayer(url: url)
+            p.isMuted = true
+            p.actionAtItemEnd = .none
+            MediaSilence.register(p)
+            loop = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: p.currentItem,
+                                                          queue: .main) { _ in p.seek(to: .zero); p.play() }
+            player = p
+            if playing { p.play() }
+        }
+        .onChange(of: playing) { _, on in
+            if on { player?.seek(to: .zero); player?.play() } else { player?.pause() }
+        }
+        .onDisappear {
+            player?.pause()
+            if let loop { NotificationCenter.default.removeObserver(loop) }
+            loop = nil
+            player = nil
+        }
     }
 }

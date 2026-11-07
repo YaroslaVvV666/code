@@ -223,9 +223,14 @@ extension ExtrasAPI {
     }
 
     /// Новый шортс: одно вертикальное видео до 3 минут (публикуется отдельно от постов)
-    func createReel(text: String, media: MediaItem, musicTrack: String? = nil, options: PostOptions = PostOptions()) async throws -> Post {
+    /// Шортс: одно видео или коллаж (до 10 фото и живых фото)
+    func createReel(text: String, media: [MediaItem], musicTrack: String? = nil, options: PostOptions = PostOptions()) async throws -> Post {
         var body: [String: Any] = ["text": text, "entities": [[String: Any]](),
-                                   "media": [["id": media.id, "width": media.width, "height": media.height]],
+                                   "media": media.map { m -> [String: Any] in
+                                       var d: [String: Any] = ["id": m.id, "width": m.width, "height": m.height]
+                                       if m.live { d["live"] = true }
+                                       return d
+                                   },
                                    "reel": true]
         if let musicTrack { body["music_track"] = musicTrack }
         if options.commentsOff { body["comments_off"] = true }

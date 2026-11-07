@@ -342,6 +342,7 @@ ensure_column("users", "birthday_enc", "birthday_enc BLOB")
 ensure_column("users", "privacy_enc", "privacy_enc BLOB")
 ensure_column("posts", "edited_at", "edited_at REAL")
 ensure_column("posts", "reel", "reel INTEGER NOT NULL DEFAULT 0")
+ensure_column("post_media", "live", "live INTEGER NOT NULL DEFAULT 0")       # живое фото: короткое видео со звуком
 ensure_column("posts", "music_enc", "music_enc BLOB")
 ensure_column("posts", "repost_of", "repost_of TEXT")
 ensure_column("posts", "music_media", "music_media TEXT")
@@ -917,8 +918,11 @@ def profile_json(r, me_id=None):
 
 
 def media_json(m):
-    return {"id": m["media_id"], "kind": m["kind"], "width": m["width"], "height": m["height"],
-            "duration": m["duration"], "thumb": m["thumb"]}
+    out = {"id": m["media_id"], "kind": m["kind"], "width": m["width"], "height": m["height"],
+           "duration": m["duration"], "thumb": m["thumb"]}
+    if "live" in m.keys() and m["live"]:
+        out["live"] = True
+    return out
 
 
 def music_of(p):
@@ -3204,6 +3208,7 @@ def ranked_feed(me, rows, limit):
 
 
 MAX_REEL_SECONDS = 180
+MAX_LIVE_SECONDS = 15             # живое фото в коллаже шортса — короткое видео
 
 
 # ---- Поиск по шортсам: по подписи, хэштегам, автору и названию музыки. Популярные запросы — из тех, что давали результат.
@@ -3314,7 +3319,7 @@ def reel_search(req, me):
     tokens = reel_tokens(query)
     phrase = query.lower().replace("ё", "е").lstrip("#@")
     rows = q("SELECT p.* FROM posts p JOIN post_media m ON m.post_id = p.id AND m.position = 0 "
-             "WHERE p.reel = 1 AND p.repost_of IS NULL AND m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?) "
+             "WHERE p.reel = 1 AND p.repost_of IS NULL AND ((m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)) OR m.kind = 'image' OR m.live = 1) "
              "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
              "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
              "AND p.id NOT IN (SELECT post_id FROM post_reports WHERE reporter = ?) "
@@ -3349,7 +3354,7 @@ def list_reels(req, me):
     uid = me["id"]
     exclude = {x for x in params.get("exclude", "").split(",") if x}
     sql = ("SELECT p.* FROM posts p JOIN post_media m ON m.post_id = p.id AND m.position = 0 "
-           "WHERE p.reel = 1 AND m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?) "
+           "WHERE p.reel = 1 AND ((m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)) OR m.kind = 'image' OR m.live = 1) "
            "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
            "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) " + hidden_sql("p"))
     args = [MAX_REEL_SECONDS, uid, uid, uid, uid]
@@ -3404,19 +3409,20 @@ def parse_post_body(d, me):
             raise ApiError(400, "bad_media")
         mid = str(m.get("id", ""))
         if mid.startswith("art:"):
-            items.append((mid, "art", m.get("width"), m.get("height"), None, None))
+            items.append((mid, "art", m.get("width"), m.get("height"), None, None, 0))
             continue
         r = q1("SELECT * FROM media WHERE id = ? AND owner = ? AND kind IN ('image','video')", (mid, me["id"]))
         if not r:
             raise ApiError(400, "media_not_found")
-        items.append((mid, r["kind"], r["width"], r["height"], r["duration"], r["thumb"]))
+        live = 1 if (m.get("live") and r["kind"] == "video") else 0
+        items.append((mid, r["kind"], r["width"], r["height"], r["duration"], r["thumb"], live))
     return text, entities, items
 
 
 def write_post_media(pid, items):
     for i, it in enumerate(items):
-        run("INSERT INTO post_media(post_id, position, media_id, kind, width, height, duration, thumb) VALUES (?,?,?,?,?,?,?,?)",
-            (pid, i, *it))
+        run("INSERT INTO post_media(post_id, position, media_id, kind, width, height, duration, thumb, live) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", (pid, i, *it))
 
 
 def drop_orphan_media(owner, ids):
@@ -3440,8 +3446,12 @@ def create_post(req, me):
     text, entities, items = parse_post_body(body, me)
     reel = 1 if body.get("reel") else 0
     if reel:
-        # шортс — одно короткое видео (до 3 минут)
-        if len(items) != 1 or items[0][1] != "video" or (items[0][4] or 0) > MAX_REEL_SECONDS:
+        # шортс — одно короткое видео (до 3 минут) или коллаж: до 10 фото и живых фото (видео до 15 секунд),
+        # листается вбок, как фото-посты в TikTok
+        single_video = len(items) == 1 and items[0][1] == "video" and not items[0][6] and (items[0][4] or 0) <= MAX_REEL_SECONDS
+        collage = 1 <= len(items) <= MAX_MEDIA_PER_POST and all(
+            it[1] == "image" or (it[1] == "video" and it[6] and (it[4] or 0) <= MAX_LIVE_SECONDS) for it in items)
+        if not (single_video or collage):
             raise ApiError(400, "bad_reel")
     pid = uuid.uuid4().hex
     uid = me["id"]
@@ -4126,8 +4136,8 @@ def repost_post(req, me, pid):
             run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, repost_of) VALUES (?,?,?,?,?,?,?,?)",
                 (new, uid, enc(uid, "posts", COL["post_text"], new, text), enc(uid, "posts", COL["post_entities"], new, ents),
                  time.time(), p["reel"], enc(uid, "posts", COL["post_music"], new, music) if music else None, orig))
-            run("INSERT INTO post_media(post_id, position, media_id, kind, width, height, duration, thumb) "
-                "SELECT ?, position, media_id, kind, width, height, duration, thumb FROM post_media WHERE post_id = ?", (new, p["id"]))
+            run("INSERT INTO post_media(post_id, position, media_id, kind, width, height, duration, thumb, live) "
+                "SELECT ?, position, media_id, kind, width, height, duration, thumb, live FROM post_media WHERE post_id = ?", (new, p["id"]))
             run("COMMIT")
         except Exception:
             run("ROLLBACK")

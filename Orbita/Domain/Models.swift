@@ -102,6 +102,7 @@ struct MediaItem: Identifiable, Equatable {
     let height: Int
     let duration: Double?
     let thumbID: String?            // обложка видео
+    var live = false                // живое фото: короткое видео со звуком (в коллаже шортса)
 
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
     var artIndex: Int { Int(id.dropFirst(4)) ?? 0 }
@@ -113,6 +114,11 @@ struct TextEntity: Codable, Equatable {
     var offset: Int
     var length: Int
     var url: String? = nil
+}
+
+extension Post {
+    /// Шортс-коллаж: несколько фото/живых фото, листается вбок (как фото-посты в TikTok)
+    var isCollage: Bool { media.count > 1 || media.first?.kind == .image || media.first?.live == true }
 }
 
 struct Post: Identifiable, Equatable {

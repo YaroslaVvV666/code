@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Photos
 import AVFoundation
 import Combine
 import UniformTypeIdentifiers
@@ -28,14 +29,24 @@ struct ReelComposerView: View {
     @State private var cameraMusic: Track?          // музыка, выбранная на экране камеры (подставляется в редактор)
     @State private var options = PostOptions()
     @FocusState private var focused: Bool
+    /// Коллаж: несколько фото и живых фото — в шортсах листаются вбок, как в TikTok
+    @State private var collage: [CollageItem] = []
+    @State private var collagePage = 0
+
+    struct CollageItem: Identifiable {
+        let id = UUID()
+        let image: UIImage
+        let jpeg: Data
+        var live: URL?                 // видео живого фото (со звуком)
+    }
 
     /// Пока видео не выбрано и не снято — показываем камеру (слева внизу — «Галерея»)
-    private var cameraVisible: Bool { prepared == nil && editModel == nil && !preparing && !showEditor }
+    private var cameraVisible: Bool { prepared == nil && collage.isEmpty && editModel == nil && !preparing && !showEditor }
 
     private let maxSeconds: Double = 180
     private let maxCaption = 300
     private var s: Strings { Strings(lang: lang) }
-    private var canPost: Bool { prepared != nil && !uploading && !preparing }
+    private var canPost: Bool { (prepared != nil || !collage.isEmpty) && !uploading && !preparing }
 
     private var aspectOK: Bool {
         guard let p = prepared, p.height > 0 else { return true }
@@ -49,8 +60,13 @@ struct ReelComposerView: View {
                 header
                 ScrollView {
                     VStack(spacing: 18) {
-                        videoCard
-                        editRow
+                        if collage.isEmpty {
+                            videoCard
+                            editRow
+                        } else {
+                            collageCard
+                            collageMusicRow
+                        }
                         captionField
                         if prepared != nil { feedPreview }
                         PostOptionsCard(options: $options, showsRepost: true,
@@ -94,6 +110,135 @@ struct ReelComposerView: View {
         .onDisappear { if !showEditor { discard() } }
         .task {
             if let list = try? await session.socialRepo.playlist(userID: session.serverID) { tracks = list }
+        }
+    }
+
+    // MARK: Коллаж
+
+    /// Предпросмотр коллажа: листается вбок, сверху «1/5», снизу точки, у живых фото — значок LIVE
+    private var collageCard: some View {
+        let width: CGFloat = 220, height = width * 16 / 9
+        return VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                TabView(selection: $collagePage) {
+                    ForEach(Array(collage.enumerated()), id: \.element.id) { i, item in
+                        ZStack(alignment: .topTrailing) {
+                            Color.black
+                            Image(uiImage: item.image).resizable().scaledToFit()
+                            if item.live != nil {
+                                Label("LIVE", systemImage: "livephoto").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                    .padding(.horizontal, 7).frame(height: 20).background(Color.black.opacity(0.5), in: Capsule())
+                                    .padding(8)
+                            }
+                        }
+                        .tag(i)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                if collage.count > 1 {
+                    Text("\(collagePage + 1)/\(collage.count)")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                        .padding(.horizontal, 9).frame(height: 22).background(Color.black.opacity(0.5), in: Capsule())
+                        .padding(8)
+                }
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            if collage.count > 1 {
+                HStack(spacing: 5) {
+                    ForEach(0..<collage.count, id: \.self) { i in
+                        Capsule().fill(i == collagePage ? theme.accentColor : theme.textTertiary.opacity(0.5))
+                            .frame(width: i == collagePage ? 14 : 6, height: 6)
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: collagePage)
+            }
+            HStack(spacing: 10) {
+                Button { showPicker = true } label: {
+                    Label(s.t("Заменить", "Replace"), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                }
+                .buttonStyle(PressStyle())
+                if collage.count > 1 {
+                    Button {
+                        let i = min(collagePage, collage.count - 1)
+                        if let u = collage[i].live { try? FileManager.default.removeItem(at: u) }
+                        withAnimation { _ = collage.remove(at: i); collagePage = max(0, min(collagePage, collage.count - 1)) }
+                    } label: {
+                        Label(s.t("Убрать фото", "Remove photo"), systemImage: "trash")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.danger)
+                            .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+            .disabled(uploading)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Музыка коллажа: играет через все фото, не обрываясь. Без музыки звучит первое живое фото
+    private var collageMusicRow: some View {
+        Menu {
+            Button { music = nil } label: {
+                Label(s.t("Без музыки", "No music"), systemImage: music == nil ? "checkmark" : "speaker.slash")
+            }
+            ForEach(tracks) { t in
+                Button { music = t } label: {
+                    if music?.id == t.id { Label(t.display, systemImage: "checkmark") } else { Text(t.display) }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "music.note").foregroundStyle(theme.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(music?.display ?? s.t("Добавить музыку", "Add music"))
+                        .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(music == nil && collage.contains(where: { $0.live != nil })
+                         ? s.t("Без музыки звучит живое фото — через весь коллаж", "Without music, the live photo's sound plays across the collage")
+                         : s.t("Играет через все фото, не обрываясь", "Plays across all photos without stopping"))
+                        .font(.system(size: 12)).foregroundStyle(theme.textSecondary).lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+            }
+            .padding(14).card(theme, radius: 16)
+        }
+        .disabled(uploading)
+    }
+
+    /// Публикация коллажа: фото — картинками, живые фото — короткими видео со звуком (отметка live)
+    private func publishCollage() {
+        focused = false
+        uploading = true
+        errorText = nil
+        let items = collage
+        Task {
+            defer { uploading = false }
+            do {
+                var uploaded: [MediaItem] = []
+                for item in items {
+                    if let live = item.live {
+                        let prepared = try await MediaPreparer.prepare(videoFile: live)
+                        var m = try await session.feedRepo.uploadMedia(prepared)
+                        m.live = true
+                        uploaded.append(m)
+                    } else {
+                        let prepared = try MediaPreparer.prepareImage(item.jpeg)
+                        uploaded.append(try await session.feedRepo.uploadMedia(prepared))
+                    }
+                }
+                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                        media: uploaded, musicTrack: music?.id, options: options)
+                discard()
+                Haptics.notify(.success)
+                await onPosted()
+                dismiss()
+            } catch {
+                Haptics.notify(.error)
+                errorText = s.api((error as? APIError) ?? .offline)
+            }
         }
     }
 
@@ -301,13 +446,30 @@ struct ReelComposerView: View {
                 prepared = media
                 editModel = ReelEditModel(video: url)
             } else {
-                var images: [UIImage] = []
+                // фото: несколько или живые — коллаж (листается вбок), одно обычное — в редактор, как раньше
+                var list: [CollageItem] = []
                 for item in items {
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) { images.append(image) }
+                    guard let data = try? await item.loadTransferable(type: Data.self),
+                          let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) else { continue }
+                    var entry = CollageItem(image: image, jpeg: jpeg)
+                    if item.supportedContentTypes.contains(where: { $0.conforms(to: .livePhoto) }), let id = item.itemIdentifier {
+                        entry.live = await LivePhotoVideo.export(localIdentifier: id)
+                    }
+                    list.append(entry)
                 }
-                guard !images.isEmpty else { errorText = s.t("Не удалось открыть фото", "Couldn't open the photos"); return }
-                editModel = ReelEditModel(photos: images)
+                guard !list.isEmpty else { errorText = s.t("Не удалось открыть фото", "Couldn't open the photos"); return }
+                if list.count > 1 || list.contains(where: { $0.live != nil }) {
+                    collage = list
+                    collagePage = 0
+                    if music == nil, let m = cameraMusic { music = m }
+                    Haptics.impact(.light)
+                    if !options.sensitive {
+                        let thumbs = list.map(\.jpeg)
+                        Task { if await SensitiveScanner.isSensitive(imageDatas: thumbs) { options.sensitive = true } }
+                    }
+                    return
+                }
+                editModel = ReelEditModel(photos: list.map(\.image))
             }
             Haptics.impact(.light)
             showEditor = true
@@ -370,6 +532,8 @@ struct ReelComposerView: View {
     }
 
     private func discard() {
+        for item in collage { if let u = item.live { try? FileManager.default.removeItem(at: u) } }
+        collage = []
         if let p = prepared, case .video(let url) = p.source { try? FileManager.default.removeItem(at: url) }
         if let o = original, case .video(let url) = o.source { try? FileManager.default.removeItem(at: url) }
         editModel?.cleanup()
@@ -380,6 +544,7 @@ struct ReelComposerView: View {
     }
 
     private func publish() {
+        if !collage.isEmpty { publishCollage(); return }
         guard let media = prepared else { return }
         focused = false
         uploading = true
@@ -388,7 +553,7 @@ struct ReelComposerView: View {
             defer { uploading = false }
             do {
                 let item = try await session.feedRepo.uploadMedia(media)
-                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: item, musicTrack: music?.id, options: options)
+                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: [item], musicTrack: music?.id, options: options)
                 discard()
                 Haptics.notify(.success)
                 await onPosted()
@@ -396,6 +561,25 @@ struct ReelComposerView: View {
             } catch {
                 Haptics.notify(.error)
                 errorText = s.api((error as? APIError) ?? .offline)
+            }
+        }
+    }
+}
+
+// MARK: - Видео живого фото
+
+/// Достаёт из галереи короткое видео живого фото (вместе со звуком) во временный файл
+enum LivePhotoVideo {
+    static func export(localIdentifier: String) async -> URL? {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject,
+              let resource = PHAssetResource.assetResources(for: asset).first(where: { $0.type == .pairedVideo || $0.type == .fullSizePairedVideo })
+        else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { cont in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+                cont.resume(returning: error == nil ? url : nil)
             }
         }
     }

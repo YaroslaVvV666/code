@@ -41,11 +41,12 @@ struct MediaDTO: Decodable {
     let height: Int?
     let duration: Double?
     let thumb: String?
+    let live: Bool?
 
     var model: MediaItem {
         MediaItem(id: id, kind: MediaKind(rawValue: kind) ?? .image,
                   width: width ?? 0, height: height ?? 0,
-                  duration: (duration ?? 0) > 0 ? duration : nil, thumbID: thumb)
+                  duration: (duration ?? 0) > 0 ? duration : nil, thumbID: thumb, live: live ?? false)
     }
 }
 
