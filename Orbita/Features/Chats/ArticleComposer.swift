@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Photos
 import UniformTypeIdentifiers
 import Combine
 
@@ -29,6 +30,8 @@ struct ArticleComposer: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
+    @State private var importTypes: [UTType] = [.item]       // «Звук» — только аудио, «Файл» — любые
+    @State private var showAttach = false                     // скрепка: галерея и вкладки, как в чате
     @State private var showLocation = false
     @State private var showEmoji = false
     @State private var buttonDraft: ArticleButtonDraft?
@@ -115,8 +118,23 @@ struct ArticleComposer: View {
             pickerItems = []
             addPicked(items)
         }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.audio, .item], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: importTypes, allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { addFiles(urls) }
+        }
+        .sheet(isPresented: $showAttach) {
+            AttachSheet(canPoll: false,
+                        onAssets: { addAssets($0) },
+                        onFiles: { importTypes = [.item]; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFiles = true } },
+                        onPoll: {},
+                        onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
+                        onAudio: { importTypes = [.audio]; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFiles = true } },
+                        onPhoto: { addCameraPhoto($0) },
+                        onVideo: { addVideoFile($0) },
+                        onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotos = true } })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.fraction(0.62), .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.sheet)
         }
         .sheet(isPresented: $showLocation) {
             LocationShareSheet { point, _ in
@@ -206,10 +224,10 @@ struct ArticleComposer: View {
                     listMenu
                 } label: { toolIcon("list.bullet") }
                 Button { insertTable() } label: { toolIcon("tablecells") }
-                Menu {
-                    Button { showPhotos = true } label: { Label(s.t("Фото или видео", "Photo or video"), systemImage: "photo.on.rectangle") }
-                    Button { showFiles = true } label: { Label(s.t("Звук или файл", "Audio or file"), systemImage: "music.note") }
-                    Button { showLocation = true } label: { Label(s.t("Геопозиция", "Location"), systemImage: "mappin.and.ellipse") }
+                // скрепка: сетка недавних фото и видео, снизу вкладки «Галерея / Звук / Файл / Геопозиция»
+                Button {
+                    focus = nil
+                    showAttach = true
                 } label: { toolIcon("paperclip") }
                 Button { showEmoji = true } label: { toolIcon("face.smiling") }
             }
@@ -743,6 +761,46 @@ struct ArticleComposer: View {
         var b = ArticleBlock(kind: .media)
         b.local = local
         return b
+    }
+
+    /// Фото и видео из сетки скрепки
+    private func addAssets(_ assets: [PHAsset]) {
+        for asset in assets {
+            loadingMedia += 1
+            Task { @MainActor in
+                defer { loadingMedia -= 1 }
+                do {
+                    let m = try await AssetLoader.prepare(asset)
+                    insert(mediaBlock(ArticleLocalMedia(.prepared(m), preview: ImageCache.downsample(m.thumbnail, maxPixel: 1000))))
+                } catch MediaError.tooLong {
+                    errorText = s.t("Видео слишком длинное", "Video is too long")
+                } catch {
+                    errorText = s.t("Не удалось добавить медиа", "Couldn't add the media")
+                }
+            }
+        }
+    }
+
+    /// Снято камерой из шторки скрепки
+    private func addCameraPhoto(_ data: Data) {
+        guard let m = try? MediaPreparer.prepareImage(data) else {
+            errorText = s.t("Не удалось добавить медиа", "Couldn't add the media")
+            return
+        }
+        insert(mediaBlock(ArticleLocalMedia(.prepared(m), preview: ImageCache.downsample(m.thumbnail, maxPixel: 1000))))
+    }
+
+    private func addVideoFile(_ url: URL) {
+        loadingMedia += 1
+        Task { @MainActor in
+            defer { loadingMedia -= 1 }
+            do {
+                let m = try await MediaPreparer.prepare(videoFile: url)
+                insert(mediaBlock(ArticleLocalMedia(.prepared(m), preview: ImageCache.downsample(m.thumbnail, maxPixel: 1000))))
+            } catch {
+                errorText = s.t("Не удалось добавить медиа", "Couldn't add the media")
+            }
+        }
     }
 
     private func addPicked(_ items: [PhotosPickerItem]) {

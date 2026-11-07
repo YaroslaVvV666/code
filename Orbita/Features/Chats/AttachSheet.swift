@@ -12,6 +12,8 @@ struct AttachSheet: View {
     var onFiles: () -> Void
     var onPoll: () -> Void
     var onLocation: () -> Void = {}
+    /// «Звук»: выбрать музыку/аудиофайл (в статье)
+    var onAudio: (() -> Void)? = nil
     var onArticle: (() -> Void)? = nil          // «Статья»: сообщение из блоков (заголовки, цитаты, таблицы, медиа…)
     var onPhoto: (Data) -> Void = { _ in }
     var onVideo: (URL) -> Void = { _ in }
@@ -30,6 +32,9 @@ struct AttachSheet: View {
     @ObservedObject private var camera = AttachCamera.shared
     @State private var showCamera = false
     @State private var leaving = false
+    /// Подсвеченная вкладка внизу: при нажатии подсветка плавно переезжает на неё, затем открывается выбранное
+    @State private var activeTab = "gallery"
+    @Namespace private var tabSpace
     private var s: Strings { Strings(lang: lang) }
 
     private var allowed: Bool { status == .authorized || status == .limited }
@@ -180,11 +185,12 @@ struct AttachSheet: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
         } else {
             HStack(spacing: 0) {
-                tab("photo.on.rectangle.fill", s.t("Галерея", "Gallery"), on: true) { }
-                tab("doc.fill", s.attachFile, on: false) { dismiss(); onFiles() }
-                tab("location.fill", s.t("Геопозиция", "Location"), on: false) { dismiss(); onLocation() }
-                if canPoll { tab("chart.bar.fill", s.t("Опрос", "Poll"), on: false) { dismiss(); onPoll() } }
-                if let onArticle { tab("doc.richtext.fill", s.t("Статья", "Article"), on: false) { dismiss(); onArticle() } }
+                tab("gallery", "photo.on.rectangle.fill", s.t("Галерея", "Gallery")) { }
+                if let onAudio { tab("audio", "play.circle.fill", s.t("Звук", "Audio")) { onAudio() } }
+                tab("file", "doc.fill", s.attachFile) { onFiles() }
+                tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location")) { onLocation() }
+                if canPoll { tab("poll", "chart.bar.fill", s.t("Опрос", "Poll")) { onPoll() } }
+                if let onArticle { tab("article", "doc.richtext.fill", s.t("Статья", "Article")) { onArticle() } }
             }
             .padding(6)
             .glass(Capsule())
@@ -193,15 +199,35 @@ struct AttachSheet: View {
         }
     }
 
-    private func tab(_ icon: String, _ title: String, on: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    /// Вкладка как в меню: подсветка-капсула переезжает на нажатую (с пружинкой), значок подпрыгивает,
+    /// и только потом шторка закрывается и открывается выбранное
+    private func tab(_ id: String, _ icon: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+        let on = activeTab == id
+        return Button {
+            guard id != "gallery" else {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { activeTab = id }
+                return
+            }
+            Haptics.select()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { activeTab = id }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                dismiss()
+                action()
+            }
+        } label: {
             VStack(spacing: 3) {
                 Image(systemName: icon).font(.system(size: 22, weight: .semibold))
+                    .symbolEffect(.bounce, value: on)
                 Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
             }
             .foregroundStyle(on ? theme.accentColor : theme.textSecondary)
             .frame(maxWidth: .infinity).frame(height: 56)
-            .background(on ? theme.accentColor.opacity(0.16) : Color.clear, in: Capsule())
+            .background {
+                if on {
+                    Capsule().fill(theme.accentColor.opacity(0.16))
+                        .matchedGeometryEffect(id: "attachTab", in: tabSpace)
+                }
+            }
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
