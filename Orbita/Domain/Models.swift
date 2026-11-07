@@ -196,6 +196,16 @@ struct OrbitFriend: Equatable, Identifiable {
     let id: String
     let name: String
     let avatarID: String?
+    var activity: UserActivity? = nil
+}
+
+/// «Чем я занят»: 🎧 Слушаю музыку, 🏋️ В зале… — на 15 минут – 24 часа
+struct UserActivity: Equatable, Hashable {
+    var emoji: String
+    var text: String
+    var until: Date
+    var active: Bool { until > Date() }
+    var line: String { emoji + " " + text }
 }
 
 struct UserProfile: Equatable {
@@ -231,6 +241,7 @@ struct UserProfile: Equatable {
     var statusEmoji: String? = nil      // эмодзи-статус рядом с именем
     var listening: Bool = false         // человек прямо сейчас слушает музыку
     var orbit: [OrbitFriend] = []       // лучшие друзья (если человек это включил)
+    var activity: UserActivity? = nil   // «чем я занят» — пока не истёк
     var isBot: Bool = false             // бот: вместо «был(а) в сети» — ничего или «N пользователей в месяц»
     var botOwned = false                // это мой бот: могу публиковать от его имени
     var monthlyUsers: Int? = nil        // у бота: сколько пишут за месяц (только если владелец разрешил и их 10 000+)

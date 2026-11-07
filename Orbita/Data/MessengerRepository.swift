@@ -14,6 +14,7 @@ struct ChatPeer: Equatable, Hashable {
     var type: String? = nil             // "group" | "channel"
     var handle: String? = nil           // публичная ссылка @имя
     var noForward = false               // запрет копирования
+    var activity: UserActivity? = nil   // личный чат: «чем занят» собеседник (вместо «был(а) в сети»)
     var isChannel: Bool { type == "channel" }
 }
 
@@ -667,10 +668,11 @@ private struct PeerDTO: Decodable {
     let type: String?
     let handle: String?
     let noForward: Bool?
+    let activity: ActivityDTO?
     var model: ChatPeer {
         ChatPeer(id: id, name: name, username: username, avatarID: avatar,
                  isGroup: group ?? false, kind: kind, memberCount: members ?? 0,
-                 type: type, handle: handle, noForward: noForward ?? false)
+                 type: type, handle: handle, noForward: noForward ?? false, activity: activity?.model)
     }
 }
 

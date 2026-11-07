@@ -1487,6 +1487,9 @@ struct ChatScreen: View {
                             if let n = model.bot?.monthlyUsers {
                                 Text(BotUsers.text(n, lang: lang)).foregroundStyle(theme.textSecondary)
                             }
+                        } else if let act = model.peer.activity, act.active {
+                            // «чем занят» собеседник — вместо «был(а) в сети»
+                            Text(act.line).foregroundStyle(theme.accentColor)
                         } else {
                             // «в сети» или «был(а) …» — как разрешил человек в приватности
                             Text(s.lastSeenText(model.lastSeen)).foregroundStyle(theme.textSecondary)
@@ -1555,6 +1558,7 @@ struct ChatScreen: View {
     private var headerStatusKey: String {
         if let action = model.typing { return "typing:\(action)" }
         if model.isBot { return model.bot?.monthlyUsers.map { BotUsers.text($0, lang: lang) } ?? "" }
+        if let act = model.peer.activity, act.active { return act.line }
         return s.lastSeenText(model.lastSeen)
     }
 

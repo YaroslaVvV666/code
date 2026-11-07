@@ -45,6 +45,21 @@ final class ProfileStore: ObservableObject {
     }
 
     /// Эмодзи-статус: рядом с ником появляется сразу, сервер — следом. Не получилось — возвращаем прежний
+    /// «Чем я занят»: видно сразу, сервер — следом; nil — убрать
+    func setActivity(_ value: (emoji: String, text: String, hours: Double)?) async -> Bool {
+        do {
+            if let value {
+                profile?.activity = try await repo.setActivity(emoji: value.emoji, text: value.text, hours: value.hours)
+            } else {
+                try await repo.clearActivity()
+                profile?.activity = nil
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func setStatusEmoji(_ emoji: String) {
         let old = profile?.statusEmoji
         profile?.statusEmoji = emoji.isEmpty ? nil : emoji

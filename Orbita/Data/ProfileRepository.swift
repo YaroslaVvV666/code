@@ -48,6 +48,9 @@ protocol ProfileRepository: Sendable {
     /// Свой профиль из сохранённой на телефоне копии — виден и без интернета (вместе с аватаркой)
     func cachedProfile() -> UserProfile?
     func update(_ patch: ProfilePatch) async throws -> UserProfile
+    /// «Чем я занят» на hours часов; nil — убрать
+    func setActivity(emoji: String, text: String, hours: Double) async throws -> UserActivity?
+    func clearActivity() async throws
     func uploadAvatar(_ jpeg: Data) async throws -> String
     func addAvatar(mediaID: String) async throws -> UserProfile
     func deleteAvatar(id: String) async throws -> UserProfile
@@ -72,6 +75,17 @@ private struct OrbitDTO: Decodable {
     let id: String
     let name: String
     let avatar: String?
+    let activity: ActivityDTO?
+}
+
+struct ActivityDTO: Decodable {
+    let emoji: String
+    let text: String
+    let until: Double
+    var model: UserActivity? {
+        let a = UserActivity(emoji: emoji, text: text, until: Date(timeIntervalSince1970: until))
+        return a.active ? a : nil
+    }
 }
 
 private struct AvatarDTO: Decodable {
@@ -120,6 +134,7 @@ private struct ProfileDTO: Decodable {
     let orbit: [OrbitDTO]?
     let bot: Bool?
     let monthlyUsers: Int?
+    let activity: ActivityDTO?
     let botOwned: Bool?
 
     var model: UserProfile {
@@ -135,7 +150,8 @@ private struct ProfileDTO: Decodable {
                     styleColor: style?.color, styleEmoji: style?.emoji,
                     friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, followersCount: followersCount, following: following ?? false,
                     requestsCount: requestsCount, statusEmoji: statusEmoji, listening: listening ?? false,
-                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar) },
+                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar, activity: $0.activity?.model) },
+                    activity: activity?.model,
                     isBot: bot ?? false, botOwned: botOwned ?? false, monthlyUsers: monthlyUsers)
     }
 }
@@ -195,6 +211,17 @@ struct RemoteProfileRepository: ProfileRepository {
 
     func cachedProfile() -> UserProfile? {
         api.cachedResponse("/v1/me").flatMap { try? decodeAPI(ProfileDTO.self, from: $0).model }
+    }
+
+    func setActivity(emoji: String, text: String, hours: Double) async throws -> UserActivity? {
+        struct R: Decodable { let activity: ActivityDTO }
+        let data = try await api.request("PUT", "/v1/me/activity",
+                                         body: ServerAPI.json(["emoji": emoji, "text": text, "hours": hours]))
+        return try decodeAPI(R.self, from: data).activity.model
+    }
+
+    func clearActivity() async throws {
+        _ = try await api.request("DELETE", "/v1/me/activity")
     }
 
     func update(_ patch: ProfilePatch) async throws -> UserProfile {
