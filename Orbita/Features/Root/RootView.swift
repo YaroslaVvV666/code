@@ -61,7 +61,7 @@ struct RootView: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: soundHint.shown)
         .overlay {
             if appLock.locked && appLock.enabled {
-                AppLockView(lock: appLock).transition(.opacity)
+                AppLockView(lock: appLock, onForgot: { flow.logout() }).transition(.opacity)
             } else if appLock.enabled && scenePhase != .active {
                 // в переключателе приложений содержимое не видно
                 SpaceBackground(isDark: isDark, showStars: true).ignoresSafeArea()
@@ -69,7 +69,9 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: appLock.locked)
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { appLock.lockNow() }
+            // автоблокировка: «сразу» или после N минут в фоне; вернулись — Face ID спрашивается сам
+            if phase == .background { appLock.didEnterBackground() }
+            if phase == .active { appLock.didBecomeActive() }
         }
         .edgeSwipeBack(enabled: showsTopBar && flow.canGoBack) { flow.back() }
         .animation(.easeInOut(duration: 0.3), value: flow.step)

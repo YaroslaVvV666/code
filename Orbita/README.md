@@ -128,7 +128,7 @@ bash start.sh
 Без настроенных SMS/почты включается dev-режим: коды показываются в консоли сервера.
 
 Одноразовые настройки в Xcode (Info): App Transport Security → Allow Local Networking = YES;
-`NSLocalNetworkUsageDescription`, `NSCameraUsageDescription`, `NSMicrophoneUsageDescription` (голосовые и «кружки»), `NSSpeechRecognitionUsageDescription` (расшифровка голосовых), `NSContactsUsageDescription` (поиск друзей в записной книге);
+`NSLocalNetworkUsageDescription`, `NSCameraUsageDescription`, `NSMicrophoneUsageDescription` (голосовые и «кружки»), `NSSpeechRecognitionUsageDescription` (расшифровка голосовых), `NSContactsUsageDescription` (поиск друзей в записной книге); `NSFaceIDUsageDescription` (вход в приложение по Face ID, например «Вход в Orbita по Face ID»);
 URL Types → схема `orbita`;
 Background Modes → Audio.
 
