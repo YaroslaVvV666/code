@@ -131,9 +131,10 @@ private struct ReelDTO: Decodable {
 private struct ReelListDTO: Decodable { let reels: [ReelDTO] }
 
 extension ExtrasAPI {
-    func reels(friendsOnly: Bool, exclude: [String]) async throws -> [Reel] {
+    /// feed: "friends" — друзья, "following" — подписки, nil — рекомендации
+    func reels(feed: String?, exclude: [String]) async throws -> [Reel] {
         var query = ["limit": "12"]
-        if friendsOnly { query["feed"] = "friends" }
+        if let feed { query["feed"] = feed }
         if !exclude.isEmpty { query["exclude"] = exclude.suffix(120).joined(separator: ",") }
         let data = try await api.request("GET", "/v1/reels", query: query)
         return try decodeAPI(ReelListDTO.self, from: data).reels.map { Reel(post: $0.post.model, state: $0.authorState) }

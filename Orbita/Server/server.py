@@ -3416,7 +3416,7 @@ def reel_search(req, me):
 @route("GET", r"/v1/reels")
 def list_reels(req, me):
     """Короткие видео (шортс): публикации, у которых первое медиа — видео не длиннее 3 минут.
-    feed=friends — только друзья; иначе — рекомендации (тот же «вкус», но с упором на долю просмотра)."""
+    feed=friends — только друзья; feed=following — авторы, на которых подписан (новые сверху); иначе — рекомендации (тот же «вкус», но с упором на долю просмотра)."""
     params = req.query()
     try:
         limit = max(1, min(int(params.get("limit", 12)), 30))
@@ -3432,9 +3432,12 @@ def list_reels(req, me):
     if params.get("feed") == "friends":
         sql += "AND (p.author = ? OR p.author IN (SELECT b FROM friends WHERE a = ?)) "
         args += [uid, uid]
+    elif params.get("feed") == "following":
+        sql += "AND p.author IN (SELECT followee FROM follows WHERE follower = ?) "
+        args += [uid]
     sql += "ORDER BY p.created_at DESC LIMIT 300"
     rows = [r for r in q(sql, tuple(args)) if r["id"] not in exclude]
-    if params.get("feed") == "friends":
+    if params.get("feed") in ("friends", "following"):
         rows = rows[:limit]
     else:
         rows = ranked_feed(me, rows, limit)

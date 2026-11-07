@@ -40,6 +40,14 @@ def main():
     closed = jbody(body) or {}
     s, body, _ = req("POST", "/v1/posts", tb, {"text": "x", "media": [{"id": video(tb)}], "reel": True, "duet_of": closed.get("id")})
     check("автор запретил — дуэт нельзя", s == 400, (s, body[:120]))
+    # вкладка «Подписки»: шортсы только тех, на кого подписан
+    c, tc = session("Зритель")
+    rs = lambda: [r["id"] for r in (jbody(req("GET", "/v1/reels?feed=following", tc)[1]) or {}).get("reels", [])]
+    check("без подписок — пусто", rs() == [])
+    req("POST", "/v1/follow/%s" % a, tc)
+    got = rs()
+    check("подписался — видны шортсы автора", orig.get("id") in got and all(x != "" for x in got))
+    check("чужие (не подписан) не видны", not any(r["author"]["id"] == b for r in (jbody(req("GET", "/v1/reels?feed=following", tc)[1]) or {}).get("reels", [])))
     print("FAILS: %d" % fails)
     sys.exit(1 if fails else 0)
 

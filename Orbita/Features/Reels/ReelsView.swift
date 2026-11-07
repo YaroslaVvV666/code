@@ -7,7 +7,7 @@ import CoreMedia
 
 @MainActor
 final class ReelsModel: ObservableObject {
-    enum Kind { case friends, forYou }
+    enum Kind { case friends, forYou, following }
 
     @Published var kind: Kind = .forYou
     @Published private(set) var reels: [Reel] = []
@@ -36,7 +36,8 @@ final class ReelsModel: ObservableObject {
         let gen = generation
         defer { if gen == generation { loading = false } }
         do {
-            let batch = try await session.extras.reels(friendsOnly: kind == .friends, exclude: reels.map(\.id))
+            let feed: String? = kind == .friends ? "friends" : (kind == .following ? "following" : nil)
+            let batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
             guard gen == generation else { return }
             let known = Set(reels.map(\.id))
             let fresh = batch.filter { !known.contains($0.id) }
@@ -460,8 +461,7 @@ struct ReelsView: View {
                             .scrollTargetLayout()
                         }
                         .scrollTargetBehavior(.paging)
-                        .scrollClipDisabled(false)
-                        .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
+                            .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
                         .offset(x: slideX)
                         .scrollPosition(id: $current)
                         .ignoresSafeArea()
@@ -673,7 +673,7 @@ struct ReelsView: View {
         Task { _ = await session.extras.setFollow(id: reel.post.author.id, on: false) }
     }
 
-    // MARK: Верх: «Друзья | Рекомендации»
+    // MARK: Верх: «Друзья | Рекомендации | Подписки»
 
     private var topBar: some View {
         VStack {
@@ -690,15 +690,29 @@ struct ReelsView: View {
                 .padding(.horizontal, 10)
                 .padding(.top, topInset)
             } else {
-            // вкладки по центру, значки справа поверх: ширина строки никогда не больше экрана (иначе вся лента съезжает вбок)
-            ZStack {
-                HStack(spacing: 14) {
-                    tab(s.t("Друзья", "Friends"), .friends)
-                    tab(s.t("Рекомендации", "For you"), .forYou)
+            // вкладки листаются вбок (как в других соцсетях): выбранная — по центру, соседняя справа видна частично
+            // и растворяется к значку поиска. Значки справа: ширина строки никогда не больше экрана
+            HStack(spacing: 6) {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 18) {
+                            tab(s.t("Друзья", "Friends"), .friends).id(ReelsModel.Kind.friends)
+                            tab(s.t("Рекомендации", "For you"), .forYou).id(ReelsModel.Kind.forYou)
+                            tab(s.t("Подписки", "Following"), .following).id(ReelsModel.Kind.following)
+                        }
+                        .padding(.horizontal, 60)
+                    }
+                    .mask(
+                        LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.1),
+                                               .init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
+                                       startPoint: .leading, endPoint: .trailing)
+                    )
+                    .onAppear { proxy.scrollTo(model.kind, anchor: .center) }
+                    .onChange(of: model.kind) { _, k in
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { proxy.scrollTo(k, anchor: .center) }
+                    }
                 }
-                .offset(x: -26)                      // чуть левее, чтобы не липло к поиску
                 HStack(spacing: 6) {
-                    Spacer(minLength: 0)
                     Button { Haptics.impact(.light); searchQuery = ""; showSearch = true } label: {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 19, weight: .medium)).foregroundStyle(.white)
@@ -716,9 +730,10 @@ struct ReelsView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                .fixedSize()
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 12)
+            .padding(.leading, 0).padding(.trailing, 12)
             .padding(.top, topInset + 4)
             }
             Spacer()
@@ -774,6 +789,9 @@ struct ReelsView: View {
                 Image(systemName: "play.rectangle.on.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(.white.opacity(0.7))
                 Text(model.failed ?? (model.kind == .friends
                                        ? s.t("У друзей пока нет коротких видео", "Your friends have no short videos yet")
+                                       : model.kind == .following
+                                       ? s.t("Подпишитесь на авторов — их новые шортсы появятся здесь",
+                                             "Follow creators — their new shorts will show up here")
                                        : s.t("Пока нет коротких видео", "No short videos yet")))
                     .font(.system(size: 16, weight: .medium)).foregroundStyle(.white.opacity(0.85))
                     .multilineTextAlignment(.center).padding(.horizontal, 40)
