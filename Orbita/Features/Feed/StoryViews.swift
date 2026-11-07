@@ -717,6 +717,7 @@ struct StoryViewerScreen: View {
             AudioSessionGate.willActivate()
             try? av.setActive(true)
             let p = player ?? AVPlayer()
+            MediaSilence.register(p)
             p.isMuted = false
             p.volume = 1
             p.pause()

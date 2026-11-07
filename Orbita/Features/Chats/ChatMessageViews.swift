@@ -1327,6 +1327,7 @@ final class CirclePlayback: ObservableObject {
             try? AVAudioSession.sharedInstance().setActive(true)
             let item = AVPlayerItem(url: url)
             let p = AVPlayer(playerItem: item)
+            MediaSilence.register(p)               // при блокировке — пауза
             player = p
             observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] time in
                 Task { @MainActor in

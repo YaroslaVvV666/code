@@ -316,6 +316,7 @@ struct InlineVideo: View {
     private func start() {
         guard player == nil, !CallGate.busy, let url = MediaFileCache.shared.playableURL(item.id) else { return }
         let newPlayer = AVPlayer(url: url)
+        MediaSilence.register(newPlayer)          // при блокировке — пауза
         newPlayer.isMuted = true
         newPlayer.volume = 0
         newPlayer.preventsDisplaySleepDuringVideoPlayback = false
@@ -565,6 +566,7 @@ private struct ViewerVideo: View {
         AudioSessionGate.willActivate()
         try? av.setActive(true)
         let newPlayer = AVPlayer(url: url)
+        MediaSilence.register(newPlayer)          // при блокировке — пауза
         observer = newPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main) { t in
             if !scrubbing { time = t.seconds.isFinite ? t.seconds : 0 }
             if let d = newPlayer.currentItem?.duration.seconds, d.isFinite, d > 0 { total = d }

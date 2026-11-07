@@ -3,6 +3,8 @@ import Combine
 import LocalAuthentication
 import Security
 import CryptoKit
+import AVFoundation
+import UIKit
 
 /// Код-пароль на вход в приложение + Face ID / Touch ID (как в Telegram).
 ///
@@ -14,13 +16,17 @@ import CryptoKit
 final class AppLock: ObservableObject {
     static let shared = AppLock()
 
-    @Published var locked: Bool
+    @Published var locked: Bool {
+        // заблокировались — все посторонние звуки (видео, голосовые, кружки) стихают; музыка играет дальше
+        didSet { if locked && !oldValue { MediaSilence.pauseAll() } }
+    }
     @Published private(set) var enabled: Bool
     @Published private(set) var codeLength: Int
     @Published var useBiometrics: Bool {
         didSet { UserDefaults.standard.set(useBiometrics, forKey: Keys.bio) }
     }
-    /// Автоблокировка: через сколько секунд в фоне снова просить код (0 — сразу)
+    /// Автоблокировка: через сколько секунд в фоне (или без касаний в открытом приложении) снова просить код.
+    /// 0 — сразу при выходе; без касаний тогда — через 5 минут
     @Published var autoLock: Int {
         didSet { UserDefaults.standard.set(autoLock, forKey: Keys.auto) }
     }
@@ -36,6 +42,7 @@ final class AppLock: ObservableObject {
         static let fails = "applock.fails"
         static let blocked = "applock.blockedUntil"
         static let wentBackground = "applock.bgAt"
+        static let autoV2 = "applock.auto.v2"
     }
     private static let account = "orbita.passcode"
 
@@ -61,7 +68,13 @@ final class AppLock: ObservableObject {
         locked = stored != nil
         codeLength = stored?.length ?? 4
         useBiometrics = d.object(forKey: Keys.bio) as? Bool ?? true
-        autoLock = d.object(forKey: Keys.auto) as? Int ?? 0
+        // по умолчанию — через 5 минут: вышел и сразу вернулся — код не спрашивается.
+        // Прежнее «сразу» (старое значение по умолчанию) один раз переводим на 5 минут
+        if !d.bool(forKey: Keys.autoV2) {
+            if (d.object(forKey: Keys.auto) as? Int ?? 0) == 0 { d.set(300, forKey: Keys.auto) }
+            d.set(true, forKey: Keys.autoV2)
+        }
+        autoLock = d.object(forKey: Keys.auto) as? Int ?? 300
         let until = d.double(forKey: Keys.blocked)
         blockedUntil = until > Date().timeIntervalSince1970 ? Date(timeIntervalSince1970: until) : nil
     }
@@ -219,6 +232,38 @@ final class AppLock: ObservableObject {
     func lockNow() {
         guard enabled, !locked else { return }
         locked = true
+    }
+
+    // MARK: Блокировка без действий
+
+    /// Последнее касание экрана или ввод текста
+    private var lastActivity = Date()
+    private var idleTask: Task<Void, Never>?
+    /// Сколько можно ничего не делать в открытом приложении: как автоблокировка, но не меньше 5 минут
+    var idleLimit: TimeInterval { TimeInterval(max(300, autoLock)) }
+
+    func touched() { lastActivity = Date() }
+
+    /// Следим за бездействием, пока приложение на экране (раз в 10 секунд — почти бесплатно)
+    func startIdleWatch() {
+        lastActivity = Date()
+        guard idleTask == nil else { return }
+        idleTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard let self else { return }
+                // во время звонка экран не блокируем
+                if self.enabled, !self.locked, !CallActivity.shared.active,
+                   Date().timeIntervalSince(self.lastActivity) >= self.idleLimit {
+                    self.locked = true
+                }
+            }
+        }
+    }
+
+    func stopIdleWatch() {
+        idleTask?.cancel()
+        idleTask = nil
     }
 
     static func autoLockTitle(_ seconds: Int, _ s: Strings) -> String {
@@ -483,7 +528,12 @@ struct AppLockSettings: View {
                 HStack(spacing: 14) {
                     Image(systemName: "timer").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                         .frame(width: 30, height: 30).background(Color.purple, in: RoundedRectangle(cornerRadius: 8))
-                    Text(s.t("Автоблокировка", "Auto-lock")).font(.system(size: 16)).foregroundStyle(theme.text)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(s.t("Автоблокировка", "Auto-lock")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        // и после выхода, и если в открытом приложении ничего не трогать (не меньше 5 минут)
+                        Text(s.t("И без действий в приложении", "Also when idle in the app")).font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    }
                     Spacer()
                     Picker("", selection: $lock.autoLock) {
                         ForEach(AppLock.autoLockOptions, id: \.self) { Text(AppLock.autoLockTitle($0, s)).tag($0) }
@@ -593,4 +643,73 @@ struct PasscodeSetupView: View {
         }
         .preferredColorScheme(.dark)
     }
+}
+
+// MARK: - Тишина при блокировке
+
+/// Плееры видео, голосовых и кружков регистрируются здесь; при блокировке все они встают на паузу.
+/// Музыка (плеер плейлистов) сюда не входит — её блокировка не трогает, в том числе в фоне
+@MainActor
+enum MediaSilence {
+    private static let players = NSHashTable<AVPlayer>.weakObjects()
+
+    static func register(_ p: AVPlayer) { players.add(p) }
+
+    static func pauseAll() {
+        for p in players.allObjects { p.pause() }
+        VoicePlayer.shared.stop()
+        CircleFocus.shared.stop()
+    }
+}
+
+// MARK: - Касания для блокировки без действий
+
+/// Ловит любое касание в окне (не мешая самим касаниям) и сообщает AppLock, что человек что-то делает
+final class ActivityTouchRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        Task { @MainActor in AppLock.shared.touched() }
+        state = .failed
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
+/// Ставит распознаватель касаний на окно приложения; ввод текста тоже считается действием
+struct ActivityTracker: UIViewRepresentable {
+    final class Probe: UIView {
+        private var installed: UIWindow?
+        private var observers: [NSObjectProtocol] = []
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let window, installed !== window else { return }
+            installed = window
+            window.addGestureRecognizer(ActivityTouchRecognizer())
+            if observers.isEmpty {
+                for name in [UITextView.textDidChangeNotification, UITextField.textDidChangeNotification] {
+                    observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                        Task { @MainActor in AppLock.shared.touched() }
+                    })
+                }
+            }
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let v = Probe()
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {}
 }

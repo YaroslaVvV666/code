@@ -57,6 +57,8 @@ final class AppSession: ObservableObject {
     let serverID: String
     private let api: ServerAPI
     private var listenBag: AnyCancellable?
+    private var lockBag: AnyCancellable?
+    private let lockHold = UUID()
     private var listenTask: Task<Void, Never>?
 
     init(userID: String, userName: String) {
@@ -83,6 +85,12 @@ final class AppSession: ObservableObject {
         PersistentOutbox.shared.attach(repo: messengerRepo, account: serverID)      // написанное без связи уйдёт само
         GroupCallManager.shared.attach(api: api, userID: serverID)                  // групповые звонки и видеочаты
         CustomEmojiStore.shared.attach(api: api)                                    // свои эмодзи в сообщениях
+        // экран заблокирован кодом — шортсы и плееры молчат, пока не разблокируют (музыка не затрагивается)
+        let hold = lockHold
+        lockBag = AppLock.shared.$locked.removeDuplicates().sink { [weak self] locked in
+            guard let self else { return }
+            if locked { self.mediaHolds.insert(hold) } else { self.mediaHolds.remove(hold) }
+        }
     }
 
     /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает

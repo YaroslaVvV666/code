@@ -260,6 +260,7 @@ final class VoicePlayer: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(true)
         let item = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: item)
+        MediaSilence.register(p)               // при блокировке — пауза
         player = p
         currentID = id
         total = max(duration, 0.1)

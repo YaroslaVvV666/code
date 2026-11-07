@@ -69,10 +69,13 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: appLock.locked)
         .onChange(of: scenePhase) { _, phase in
-            // автоблокировка: «сразу» или после N минут в фоне; вернулись — Face ID спрашивается сам
-            if phase == .background { appLock.didEnterBackground() }
-            if phase == .active { appLock.didBecomeActive() }
+            // автоблокировка: после N минут в фоне (по умолчанию 5); вернулись — Face ID спрашивается сам.
+            // Пока приложение открыто — блокировка, если 5 минут ничего не трогали
+            if phase == .background { appLock.didEnterBackground(); appLock.stopIdleWatch() }
+            if phase == .active { appLock.didBecomeActive(); appLock.startIdleWatch() }
         }
+        .onAppear { appLock.startIdleWatch() }
+        .background { ActivityTracker().frame(width: 0, height: 0) }
         .edgeSwipeBack(enabled: showsTopBar && flow.canGoBack) { flow.back() }
         .animation(.easeInOut(duration: 0.3), value: flow.step)
         .animation(.easeInOut(duration: 0.25), value: flow.keyboardVisible)

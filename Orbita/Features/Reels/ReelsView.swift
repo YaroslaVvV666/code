@@ -1065,6 +1065,7 @@ struct ReelPage: View {
         guard player == nil, let v = video, let url = ServerConfig.mediaURL(v.id) else { return }
         let item = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: item)
+        MediaSilence.register(p)               // при блокировке — пауза
         p.actionAtItemEnd = .none
         p.defaultRate = rateNow                       // play() сразу идёт с выбранной скоростью
         p.automaticallyWaitsToMinimizeStalling = true
