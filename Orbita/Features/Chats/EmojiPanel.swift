@@ -80,6 +80,29 @@ enum FavoriteStickers {
     }
 }
 
+/// Недавно отправленные стикеры (локально на устройстве) — раздел «Недавние», как в Telegram
+enum RecentStickers {
+    private static let key = "orbita.stickers.recent"
+    private struct Stored: Codable { let id: String; let emoji: String; let mediaID: String?; let animated: Bool; let packID: String? }
+
+    static var all: [Sticker] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let list = try? JSONDecoder().decode([Stored].self, from: data) else { return [] }
+        return list.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
+    }
+
+    /// Отправили стикер — он первым в «Недавних» (до 20 штук)
+    static func add(_ s: Sticker) {
+        var list = all
+        list.removeAll { $0.id == s.id }
+        list.insert(s, at: 0)
+        let stored = list.prefix(20).map { Stored(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
+        UserDefaults.standard.set(try? JSONEncoder().encode(Array(stored)), forKey: key)
+    }
+
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+}
+
 extension String {
     /// Только эмодзи (до трёх штук) — такие сообщения показываются крупно, без «пузыря»
     var isEmojiOnly: Bool {
@@ -199,7 +222,8 @@ struct EmojiStickerPanel: View {
     let onEmoji: (String) -> Void
     let onBackspace: () -> Void
     let onSticker: (Sticker) -> Void
-    var onCreateStickers: () -> Void = {}
+    /// «Создать стикер»; nil — открыть переписку с ботом @stickers
+    var onCreateStickers: (() -> Void)? = nil
     /// Свои эмодзи из эмодзи-паков: вставляются прямо в текст
     var onCustomEmoji: ((CustomEmojiRef) -> Void)? = nil
 
@@ -212,7 +236,9 @@ struct EmojiStickerPanel: View {
     @State private var packID: String?
     @State private var recent = EmojiData.recent
     @State private var favs: [Sticker] = FavoriteStickers.all
+    @State private var recents: [Sticker] = RecentStickers.all
     private let favID = "__fav__"
+    private let recentID = "__recent__"
     @State private var peek: Sticker?           // зажали стикер — крупный предпросмотр с действиями
 
     private var s: Strings { Strings(lang: lang) }
@@ -246,7 +272,7 @@ struct EmojiStickerPanel: View {
                     Button {
                         Haptics.impact(.light)
                         peek = nil
-                        onSticker(st)
+                        send(st)
                     } label: {
                         Label(s.t("Отправить", "Send"), systemImage: "arrow.up")
                             .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
@@ -284,8 +310,7 @@ struct EmojiStickerPanel: View {
         ScrollView {
             if let onCustomEmoji {
                 ForEach(emojiPacks) { pack in
-                    Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 10)
+                    sectionHeader(pack.title)
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {
                         ForEach(pack.stickers) { e in
                             Button {
@@ -301,8 +326,7 @@ struct EmojiStickerPanel: View {
                     .padding(.horizontal, 8)
                 }
                 if !emojiPacks.isEmpty {
-                    Text(s.t("Эмодзи", "Emoji")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 10)
+                    sectionHeader(s.t("Эмодзи", "Emoji"))
                 }
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {      // плотная сетка в 8 колонок, как в системной клавиатуре эмодзи
@@ -336,28 +360,68 @@ struct EmojiStickerPanel: View {
 
     // MARK: Стикеры
 
-    /// Свои стикеры делаются в боте @stickers (как в Telegram)
-    private var createStickersButton: some View {
-        Button {
-            Haptics.impact(.light)
-            onCreateStickers()
-        } label: {
-            Label(s.t("Создать свои стикеры", "Create your stickers"), systemImage: "plus.circle.fill")
-                .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.accentColor)
-                .frame(maxWidth: .infinity).frame(height: 40)
-                .background(theme.accentColor.opacity(0.1), in: Capsule())
-        }
-        .buttonStyle(PressStyle())
-        .padding(.horizontal, 14).padding(.vertical, 8)
+    /// Название раздела по центру, заглавными (как в Telegram): «ИЗБРАННЫЕ СТИКЕРЫ», «НЕДАВНИЕ», «КОСМОС».
+    /// onClear — крестик справа (очистить «Недавние»)
+    private func sectionHeader(_ title: String, onClear: (() -> Void)? = nil) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 13, weight: .bold)).tracking(0.6)
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 44)
+            .overlay(alignment: .trailing) {
+                if let onClear {
+                    Button {
+                        Haptics.select()
+                        onClear()
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(width: 36, height: 30).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 6)
+                }
+            }
+            .padding(.top, 14).padding(.bottom, 8)
     }
 
-    private func stickerGrid(_ stickers: [Sticker]) -> some View {
+    /// Единственная кнопка создания: плитка «+ Создать стикер» в начале «Недавних» (нет их — в самом начале)
+    private var createTile: some View {
+        Button {
+            Haptics.impact(.light)
+            if let onCreateStickers { onCreateStickers() }
+            else if let url = URL(string: "orbita://u/stickers?start=stickers") { UIApplication.shared.open(url) }
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: "plus").font(.system(size: 22, weight: .medium))
+                Text(s.t("Создать\nстикер", "Create\nsticker"))
+                    .font(.system(size: 12, weight: .semibold)).multilineTextAlignment(.center)
+                    .lineLimit(2).minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(theme.textSecondary)
+            .frame(maxWidth: .infinity).frame(height: 74)
+            .background(theme.text.opacity(theme.dark ? 0.08 : 0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel(s.t("Создать стикер", "Create sticker"))
+    }
+
+    private func send(_ sticker: Sticker) {
+        RecentStickers.add(sticker)
+        onSticker(sticker)
+        recents = RecentStickers.all
+    }
+
+    /// Сетка стикеров; withCreate — первой клеткой плитка «Создать стикер»
+    private func stickerGrid(_ stickers: [Sticker], withCreate: Bool = false) -> some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+            if withCreate { createTile }
             ForEach(stickers) { sticker in
                 Button {
                     guard peek == nil else { return }            // отпустили палец после предпросмотра — не отправляем
                     Haptics.impact(.light)
-                    onSticker(sticker)
+                    send(sticker)
                 } label: {
                     StickerImage(sticker: sticker, size: 74).frame(maxWidth: .infinity)
                 }
@@ -373,60 +437,84 @@ struct EmojiStickerPanel: View {
         .padding(.bottom, 4)
     }
 
+    /// Разделы ленты стикеров по порядку: избранные, недавние, наборы
+    private struct StickerSection: Identifiable { let id: String; let title: String; let stickers: [Sticker] }
+
+    private var sections: [StickerSection] {
+        var out: [StickerSection] = []
+        if !favs.isEmpty { out.append(StickerSection(id: favID, title: s.t("Избранные стикеры", "Favorite stickers"), stickers: favs)) }
+        if !recents.isEmpty { out.append(StickerSection(id: recentID, title: s.t("Недавние", "Recent"), stickers: recents)) }
+        out += stickerPacks.filter { !$0.stickers.isEmpty }.map { StickerSection(id: $0.id, title: $0.title, stickers: $0.stickers) }
+        return out
+    }
+
+    /// Где стоит плитка «Создать стикер»: в «Недавних», а если их нет — в первом разделе
+    private var createSectionID: String? { recents.isEmpty ? sections.first?.id : recentID }
+
+    private func stripButton<L: View>(_ id: String, selected: Bool, proxy: ScrollViewProxy, @ViewBuilder label: () -> L) -> some View {
+        Button {
+            Haptics.select()
+            packID = id
+            withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(id, anchor: .top) }
+        } label: {
+            label()
+                .frame(width: 42, height: 38)
+                .background(selected ? theme.accentColor.opacity(0.14) : Color.clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var stickerTab: some View {
-        VStack(spacing: 0) {
-            if stickerPacks.isEmpty {
-                VStack(spacing: 14) {
-                    Text(s.noStickers).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
-                    createStickersButton
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                let current = packID ?? stickerPacks.first?.id
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        if !favs.isEmpty {
-                            Button { packID = favID } label: {
-                                Image(systemName: "star.fill").font(.system(size: 16))
-                                    .foregroundStyle(current == favID ? theme.accentColor : theme.textSecondary)
-                                    .frame(width: 42, height: 38)
-                                    .background(current == favID ? theme.accentColor.opacity(0.14) : Color.clear, in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        ForEach(stickerPacks) { pack in
-                            let selected = current == pack.id
-                            Button { packID = pack.id } label: {
-                                Group {
-                                    if let icon = pack.stickers.first(where: { $0.id == pack.icon }) ?? pack.stickers.first {
+        let list = sections
+        let current = packID ?? list.first?.id
+        return ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                if !list.isEmpty {
+                    // полоска сверху: избранное, недавние и наборы — нажатие листает к разделу
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(list) { sec in
+                                stripButton(sec.id, selected: current == sec.id, proxy: proxy) {
+                                    if sec.id == favID {
+                                        Image(systemName: "bookmark").font(.system(size: 17, weight: .medium))
+                                            .foregroundStyle(current == sec.id ? theme.accentColor : theme.textSecondary)
+                                    } else if sec.id == recentID {
+                                        Image(systemName: "clock").font(.system(size: 17, weight: .medium))
+                                            .foregroundStyle(current == sec.id ? theme.accentColor : theme.textSecondary)
+                                    } else if let pack = stickerPacks.first(where: { $0.id == sec.id }),
+                                              let icon = pack.stickers.first(where: { $0.id == pack.icon }) ?? pack.stickers.first {
                                         StickerImage(sticker: icon, size: 30)
                                     }
                                 }
-                                .frame(width: 42, height: 38)
-                                .background(selected ? theme.accentColor.opacity(0.14) : Color.clear, in: Capsule())
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(.horizontal, 10)
                     }
-                    .padding(.horizontal, 10)
+                    .frame(height: 42)
                 }
-                .frame(height: 42)
 
                 ScrollView {
-                    if current == favID {
-                        Text(s.t("Избранное", "Favorites")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
-                        stickerGrid(favs)
-                    } else {
-                        let pack = stickerPacks.first { $0.id == current } ?? stickerPacks[0]
-                        Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
-                        stickerGrid(pack.stickers)
+                    LazyVStack(spacing: 0) {
+                        if list.isEmpty {
+                            // нет ни одного стикера — плитка в самом начале и подсказка
+                            stickerGrid([], withCreate: true).padding(.top, 12)
+                            Text(s.noStickers).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
+                                .padding(.top, 18)
+                        }
+                        ForEach(list) { sec in
+                            sectionHeader(sec.title, onClear: sec.id == recentID ? {
+                                RecentStickers.clear()
+                                withAnimation(.easeOut(duration: 0.2)) { recents = [] }
+                            } : nil)
+                            .id(sec.id)
+                            stickerGrid(sec.stickers, withCreate: sec.id == createSectionID)
+                        }
                     }
-                    createStickersButton
+                    .padding(.bottom, 8)
                 }
             }
         }
+        .onAppear { recents = RecentStickers.all; favs = FavoriteStickers.all }
     }
 
     // MARK: Нижняя панель

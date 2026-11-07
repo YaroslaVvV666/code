@@ -645,6 +645,7 @@ final class ChatModel: ObservableObject {
     }
 
     func sendSticker(_ sticker: Sticker) {
+        RecentStickers.add(sticker)               // в «Недавние» панели стикеров
         Task {
             await deliver(text: "", entities: [], media: [.sticker(sticker.id)],
                           placeholders: [ChatAttachment(kind: .sticker, mediaID: sticker.mediaID,
