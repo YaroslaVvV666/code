@@ -91,12 +91,12 @@ enum RecentStickers {
         return list.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
     }
 
-    /// Отправили стикер — он первым в «Недавних» (до 20 штук)
+    /// Отправили стикер — он первым в «Недавних» (до 25 штук)
     static func add(_ s: Sticker) {
         var list = all
         list.removeAll { $0.id == s.id }
         list.insert(s, at: 0)
-        let stored = list.prefix(20).map { Stored(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
+        let stored = list.prefix(25).map { Stored(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: $0.packID) }
         UserDefaults.standard.set(try? JSONEncoder().encode(Array(stored)), forKey: key)
     }
 
