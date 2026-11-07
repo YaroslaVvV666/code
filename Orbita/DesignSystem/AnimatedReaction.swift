@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Эмодзи реакции с «живой» анимацией: при появлении подпрыгивает с покачиванием,
 /// а когда ставите свою реакцию — из неё вылетает стайка таких же эмодзи (как в Telegram)
@@ -11,6 +12,8 @@ struct AnimatedReactionEmoji: View {
     @State private var tilt: Double = -25
     @State private var particles: [Particle] = []
     @State private var big = false
+    @State private var replay = 0           // выбрали реакцию — анимация проигрывается заново один раз
+    @State private var playing = false      // реакции на сообщениях при входе в чат не играют
 
     struct Particle: Identifiable {
         let id = UUID()
@@ -21,7 +24,8 @@ struct AnimatedReactionEmoji: View {
     }
 
     var body: some View {
-        LottieEmojiView(emoji: emoji, size: 20)
+        LottieEmojiView(emoji: emoji, size: 20, playing: playing, onFinish: { playing = false })
+            .id(replay)
             .scaleEffect(scale)
             .rotationEffect(.degrees(tilt))
             .overlay {
@@ -38,8 +42,8 @@ struct AnimatedReactionEmoji: View {
                 }
                 .allowsHitTesting(false)
             }
-            .onAppear { pop(big: false) }
-            .onChange(of: mine) { _, now in if now { pop(big: true) } }
+            .onAppear { scale = 1; tilt = 0 }              // при входе в чат реакции просто стоят, без прыжка
+            .onChange(of: mine) { _, now in if now { replay += 1; playing = true; pop(big: true) } }
             .onChange(of: count) { old, new in if new > old { pop(big: false) } }
     }
 

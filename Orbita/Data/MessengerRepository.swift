@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Модели
 
@@ -37,20 +38,82 @@ struct GroupInfo: Equatable {
     var approve = false                 // вступление по заявкам
     var noForward = false               // запретить копирование
     var slow = 0                        // медленный режим, секунд
-    var whoWrites = "all"               // "all" | "admins"
+    var whoWrites = "all"               // "all" | "admins" | "selected"
     var history = true                  // новые участники видят историю
     var count = 0
     var muted = false
     var canWrite = true
     var requests = 0
     var pending = false
+    var perms = GroupPerms()            // что участники могут без админки
+    var writers: [String] = []          // «писать могут выбранные» (видят только админы)
+    var restrictedUntil: Date? = nil    // вам запретили писать: до этого времени (distantFuture — навсегда)
     var discussion: DiscussionRef? = nil    // чат для комментариев канала
+    var forum = false                   // группа разделена на темы
+    var call: GroupCallBrief? = nil     // идёт групповой звонок / видеочат
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
     var isOpen: Bool { kind == "open" }
     var isChannel: Bool { type == "channel" }
     /// Публичная ссылка: @имя, иначе код приглашения
     var linkRef: String? { handle ?? code }
+}
+
+/// Каналы, открытые по ссылке: просмотры их постов попадают в статистику как «URL»
+enum ChannelViewSource {
+    static var openedByLink: Set<String> = []
+}
+
+/// Что участники группы могут без админки (как «Разрешения» в Telegram)
+struct GroupPerms: Equatable {
+    var media = true            // фото, видео, файлы, музыка
+    var voice = true            // голосовые и кружки
+    var stickers = true         // стикеры и GIF
+    var links = true
+    var polls = true
+    var invite = true           // добавлять участников
+    var pin = true              // закреплять сообщения
+
+    var json: [String: Bool] {
+        ["media": media, "voice": voice, "stickers": stickers, "links": links, "polls": polls, "invite": invite, "pin": pin]
+    }
+}
+
+/// Кому в группе запретили писать
+struct RestrictedMember: Identifiable, Equatable {
+    var id: String { member.id }
+    let member: GroupMember
+    let until: Date?            // nil — навсегда
+}
+
+/// Админ удаляет чужое сообщение: что сделать заодно
+struct ModerationOptions {
+    var deleteAll = false
+    var restrict: Int? = nil    // запретить писать: секунд, 0 — навсегда, nil — нет
+    var ban = false
+}
+
+/// Статистика канала или группы (как в Telegram)
+struct GroupStats {
+    struct DayViews { let day: Date; let sources: [String: Int] }
+    struct GrowthPoint { let day: Date; let count: Int }
+    struct FollowerPoint { let day: Date; let joined: Int; let left: Int }
+    struct LangShare { let index: Int; let code: String; let count: Int }
+    struct Post: Identifiable { let id: String; let text: String; let createdAt: Date; let views: Int; let reactions: Int; let shares: Int }
+    let count: Int
+    let countWeekAgo: Int
+    let notifyPercent: Double
+    let viewsPerPost: Double
+    let sharesPerPost: Double
+    let reactionsPerPost: Double
+    let periodStart: Date
+    let periodEnd: Date
+    let growth: [GrowthPoint]
+    let followers: [FollowerPoint]
+    let views: [DayViews]
+    let hours: [Int]
+    let languages: [LangShare]
+    let posts: [Post]
 }
 
 /// Чат, привязанный к каналу для комментариев
@@ -63,6 +126,7 @@ struct DiscussionRef: Equatable {
 struct CommentThread {
     var messages: [ChatMessage]
     var canComment: Bool
+    var mirrorID: String? = nil      // копия поста в чате обсуждения: ответы «на пост» — это ответы на неё
 }
 
 /// Параметры новой группы или канала
@@ -77,6 +141,9 @@ struct GroupDraft: Equatable {
     var slow = 0
     var whoWrites = "all"
     var history = true
+    var perms = GroupPerms()
+    var writers: [String] = []
+    var forum = false                   // разделить группу на темы
 }
 
 /// Что изменить в группе (nil — не трогать)
@@ -91,6 +158,8 @@ struct GroupPatch {
     var whoWrites: String?
     var history: Bool?
     var discussion: String?         // id чата для комментариев; "" — отвязать
+    var perms: GroupPerms?
+    var writers: [String]?
 }
 
 /// Заявка на вступление
@@ -160,8 +229,15 @@ struct ChatSummary: Identifiable, Equatable {
     let lastMine: Bool
     let lastRead: Bool
     let typing: String?             // "typing", "voice", "video", … или nil
+    var lastSender: String? = nil   // кто написал последнее (имя), если не вы: «Андрей: привет»
     var muted = false
     var mentions = 0                // непрочитанные «тэги» (@username) — вместо числа ставится значок @
+    var lastThumb: LastThumb? = nil // миниатюра фото/видео из последнего сообщения
+}
+
+struct LastThumb: Equatable {
+    let kind: String                // photo, video, circle
+    let mediaID: String
 }
 
 struct ReplyRef: Equatable {
@@ -173,7 +249,7 @@ struct ReplyRef: Equatable {
 
 /// Вложение сообщения: фото, видео, кружок, голосовое, файл или стикер
 struct ChatAttachment: Identifiable, Equatable {
-    enum Kind: String { case photo, video, circle, voice, file, sticker, audio }
+    enum Kind: String { case photo, video, circle, voice, file, sticker, audio, location }
 
     let kind: Kind
     var mediaID: String? = nil
@@ -189,6 +265,9 @@ struct ChatAttachment: Identifiable, Equatable {
     var title: String? = nil                // музыка: название и исполнитель из тегов
     var artist: String? = nil
     var localPreview: Data? = nil           // миниатюра, пока вложение загружается
+    var stickerPack: String? = nil          // свой стикер: из какого набора (нажатие — «Добавить набор»)
+    var gif = false                         // видео без звука, отправленное как GIF: крутится по кругу
+    var geo: GeoPoint? = nil                // геопозиция: точка или трансляция
 
     var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? name ?? "local") }
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
@@ -241,6 +320,9 @@ struct PollInfo: Equatable {
     var total: Int
     var options: [PollOption]
     var mine: Bool          // я создатель
+    var quiz = false        // викторина: один правильный ответ
+    var correct: Int? = nil // правильный вариант (сервер присылает после ответа)
+    var explanation: String? = nil
 }
 
 struct MessageInfo: Equatable {
@@ -268,6 +350,7 @@ struct ChatMessage: Identifiable, Equatable {
     var reply: ReplyRef?
     var attachments: [ChatAttachment] = []
     var isPending = false
+    var failed = false              // отправка не прошла из-за сети: висит «Отправляется…» с красным значком, уйдёт сама
     var sender: ChatPeer? = nil     // в группах — кто написал
     var views: Int? = nil           // в каналах — просмотры
     var reactions: [MessageReaction] = []
@@ -276,6 +359,11 @@ struct ChatMessage: Identifiable, Equatable {
     var poll: PollInfo? = nil
     var storyReply: StoryReplyRef? = nil
     var comments: Int? = nil        // в канале с обсуждением — число комментариев
+    var note: String? = nil         // своя заметка к сообщению: видна только тебе
+    var commenters: [ChatPeer] = [] // пост канала: последние комментаторы (аватарки под постом)
+    var markup: [[BotButton]] = []  // кнопки под сообщением (бота или кнопки-ссылки человека)
+    var blocks: [ArticleBlock] = [] // статья: заголовки, текст, цитаты, таблицы, медиа — по порядку
+    var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
         if system != nil { return "" }
@@ -291,6 +379,7 @@ struct ChatMessage: Identifiable, Equatable {
         case .sticker: return "Стикер"
         case .file: return first.name ?? "Файл"
         case .audio: return first.title ?? first.name ?? "Музыка"
+        case .location: return first.geo?.isLive == true ? "📍 Трансляция геопозиции" : "📍 " + (first.geo?.title ?? "Геопозиция")
         }
     }
 }
@@ -307,12 +396,34 @@ struct ChatThread {
     var pinned: [ChatMessage] = []
     var firstUnread: String? = nil  // первое непрочитанное при входе — для плашки «Новые сообщения»
     var isPreview = false           // открытый канал/группа просматривается без вступления
+    var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
+    var botCommands: [BotCommand] = []  // переписка с ботом: его команды (меню «/»)
+    var bot: BotInfo? = nil             // переписка с ботом: приветствие, «Старт», пользователи
+    var botKeyboard: BotKeyboard? = nil // клавиатура бота вместо обычной
 }
 
 struct Sticker: Identifiable, Equatable, Hashable {
-    let id: String                  // "пак/имя"
+    let id: String                  // "пак/имя" — встроенный, "u:<id>" — свой (созданный через бота @stickers)
     let emoji: String
+    var mediaID: String? = nil      // свой стикер: файл на сервере (картинка или видео)
+    var animated = false            // свой анимированный: видео без звука по кругу (или Lottie у эмодзи)
+    var packID: String? = nil
+    var lottie = false              // своё эмодзи: анимация Lottie (сжатая, как .tgs)
     var url: URL? { ServerConfig.baseURL.flatMap { URL(string: $0.absoluteString + "/stickers/" + id + ".png") } }
+}
+
+/// Бот @stickers: создание своих стикерпаков (как в Telegram)
+enum StickerBot {
+    static let id = "5717c4e5-0000-4000-8000-00000000057c"
+    static var peer: ChatPeer { ChatPeer(id: id, name: "Стикеры", username: "stickers", avatarID: nil) }
+}
+
+/// Свой набор стикеров: что в нём и добавлен ли он у меня
+struct CustomStickerPack: Identifiable, Equatable {
+    let pack: StickerPack
+    var installed: Bool
+    let mine: Bool
+    var id: String { pack.id }
 }
 
 struct StickerPack: Identifiable, Equatable {
@@ -320,9 +431,28 @@ struct StickerPack: Identifiable, Equatable {
     let title: String
     let icon: String
     let stickers: [Sticker]
+    var mine = false            // мой набор (можно редактировать/удалять)
+    var kind = "sticker"        // "sticker" — стикеры, "emoji" — свои эмодзи (вставляются прямо в текст)
+    var isEmoji: Bool { kind == "emoji" }
 }
 
 /// Что загрузить на сервер перед отправкой
+/// Геопозиция во вложении. Для трансляции — последняя присланная точка и до какого времени идёт
+struct GeoPoint: Equatable {
+    var lat: Double
+    var lon: Double
+    var accuracy: Double? = nil
+    var heading: Double? = nil
+    var title: String? = nil
+    var liveUntil: Date? = nil
+    var updatedAt: Date? = nil
+    var stopped = false
+
+    var isLive: Bool { liveUntil != nil }
+    /// Трансляция идёт прямо сейчас
+    func active(at now: Date = Date()) -> Bool { !stopped && (liveUntil.map { $0 > now } ?? false) }
+}
+
 enum OutgoingMedia {
     case prepared(PreparedMedia)                                  // фото или видео
     case circle(url: URL, thumb: Data, duration: Double)
@@ -330,6 +460,8 @@ enum OutgoingMedia {
     case file(url: URL, name: String, mime: String)
     case audio(url: URL, name: String, title: String, artist: String, duration: Double, cover: Data?)
     case sticker(String)
+    /// live — 0 (просто точка) или длительность трансляции в секундах (900 / 3600 / 28800)
+    case location(GeoPoint, live: Int)
 }
 
 /// Загруженное вложение, готовое к отправке
@@ -342,9 +474,20 @@ struct OutgoingAttachment {
     var title: String? = nil
     var artist: String? = nil
     var thumb: String? = nil
+    var gif = false
+    var geo: GeoPoint? = nil
+    var live = 0
 
     var json: [String: Any] {
         var d: [String: Any] = ["type": type]
+        if let geo {
+            d["lat"] = geo.lat
+            d["lon"] = geo.lon
+            if let a = geo.accuracy { d["acc"] = a }
+            if let h = geo.heading { d["heading"] = h }
+            if let t = geo.title { d["title"] = t }
+            if live > 0 { d["live"] = live }
+        }
         if let mediaID { d["media_id"] = mediaID }
         if let name { d["name"] = name }
         if let sticker { d["sticker"] = sticker }
@@ -352,23 +495,71 @@ struct OutgoingAttachment {
         if let title { d["title"] = title }
         if let artist { d["artist"] = artist }
         if let thumb { d["thumb"] = thumb }
+        if gif { d["gif"] = true }
         return d
     }
 }
 
+/// Пересказ пропущенного: текст пунктами, написан ли ИИ, сколько сообщений охвачено
+struct UnreadDigest: Decodable, Equatable {
+    let summary: String
+    let ai: Bool
+    let count: Int
+    let truncated: Bool?
+}
+
 protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
-    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread
+    /// topic — тема группы-форума ("general" — общая); nil — вся переписка
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread
+    /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
+    func cachedChats() -> (chats: [ChatSummary], unread: Int)?
+    func cachedThread(peerID: String) -> ChatThread?
+    func cachedThread(peerID: String, topic: String) -> ChatThread?
     func react(messageID: String, emoji: String?) async throws -> ChatMessage
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage]
+    func setNote(messageID: String, text: String) async throws -> ChatMessage
+    func setChatTTL(peerID: String, seconds: Int) async throws -> Int
+    /// Личная переписка: запретить копирование и пересылку (включить/выключить)
+    func setChatProtected(peerID: String, on: Bool) async throws -> Bool
+    /// Нажали кнопку под сообщением бота: ответ бота (подсказка, окно или ссылка)
+    func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer
+    /// Статья: блоки (медиа уже загружены) и кнопки-ссылки под сообщением
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+                     topic: String?) async throws -> ChatMessage
+    /// «Кратко»: пересказ сообщений начиная с `from` (первое непрочитанное)
+    func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
-              replyTo: String?, silent: Bool) async throws -> ChatMessage
+              replyTo: String?, silent: Bool, topic: String?) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
+    // темы в группах
+    func topics(groupID: String) async throws -> ForumTopicList
+    func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
+    func updateTopic(groupID: String, topicID: String, fields: [String: Any]) async throws -> ForumTopic
+    func deleteTopic(groupID: String, topicID: String) async throws
+    func setForum(groupID: String, on: Bool) async throws -> Bool
+    /// Трансляция геопозиции: новая точка / остановить
+    func updateLiveLocation(messageID: String, point: GeoPoint) async throws
+    func stopLiveLocation(messageID: String) async throws
     func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage
     func delete(messageID: String, forEveryone: Bool) async throws
     func typing(peerID: String, action: String) async
+    /// Только «печатает…» собеседника — без загрузки всей переписки
+    func typingStatus(peerID: String) async throws -> String?
     func clear(peerID: String) async throws
     func stickers() async throws -> [StickerPack]
+    /// Наборы, сохранённые на телефоне (сразу, без сети); nil — ещё не сохраняли
+    func savedStickers() -> [StickerPack]?
+    func stickerPack(id: String) async throws -> CustomStickerPack
+    func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack
+    func createStickerPack(title: String) async throws -> CustomStickerPack
+    /// Свои эмодзи прямо из приложения: набор, исходник (картинка или Lottie .tgs/.json), само эмодзи
+    func createEmojiPack(title: String) async throws -> CustomStickerPack
+    func uploadEmojiSource(_ data: Data, lottie: Bool) async throws -> String
+    func addEmoji(packID: String, mediaID: String, emoji: String) async throws -> CustomEmojiInfo
+    func addSticker(packID: String, mediaID: String, emoji: String) async throws
+    func deleteSticker(packID: String, stickerID: String) async throws
+    func deleteStickerPack(id: String) async throws
 
     // контакты
     func contacts() async throws -> [Contact]
@@ -386,10 +577,14 @@ protocol MessengerRepository: Sendable {
     func answerRequest(groupID: String, userID: String, approve: Bool) async throws -> GroupInfo
     func bannedUsers(groupID: String) async throws -> [GroupMember]
     func unban(groupID: String, userID: String) async throws
+    func moderate(groupID: String, userID: String, messageID: String?, options: ModerationOptions) async throws
+    func restricted(groupID: String) async throws -> [RestrictedMember]
+    func unrestrict(groupID: String, userID: String) async throws
+    func stats(groupID: String, days: Int) async throws -> GroupStats
     func setMuted(groupID: String, muted: Bool) async throws
     func deleteGroup(id: String) async throws
     func comments(channelID: String, messageID: String) async throws -> CommentThread
-    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage
+    func postComment(channelID: String, messageID: String, text: String, replyTo: String?) async throws -> ChatMessage
 
     // импорт записной книги и уведомления «теперь в Orbita»
     func importContacts(_ entries: [BookEntry]) async throws -> [ImportMatch]
@@ -397,6 +592,7 @@ protocol MessengerRepository: Sendable {
     func notices() async throws -> [JoinNotice]
     func dismissNotices(ids: [String]) async throws
     func publicGroups(query: String, type: String?) async throws -> [GroupPreview]
+    func searchMessages(query: String) async throws -> [MessageHit]
     func groupPreview(code: String) async throws -> GroupPreview
     func joinGroup(code: String) async throws -> GroupInfo
     func joinGroup(id: String) async throws -> GroupInfo
@@ -406,8 +602,19 @@ protocol MessengerRepository: Sendable {
 }
 
 extension MessengerRepository {
+    func savedStickers() -> [StickerPack]? { nil }
+    func searchMessages(query: String) async throws -> [MessageHit] { [] }
+
     func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
     func thread(peerID: String, limit: Int) async throws -> ChatThread { try await thread(peerID: peerID, limit: limit, peek: false) }
+    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
+        try await thread(peerID: peerID, limit: limit, peek: peek, topic: nil)
+    }
+    func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
+              replyTo: String?, silent: Bool) async throws -> ChatMessage {
+        try await send(peerID: peerID, text: text, entities: entities, attachments: attachments, replyTo: replyTo,
+                       silent: silent, topic: nil)
+    }
 
     /// Обычное текстовое сообщение
     func send(peerID: String, text: String, replyTo: String?) async throws -> ChatMessage {
@@ -436,10 +643,13 @@ private struct PeerDTO: Decodable {
 }
 
 private struct LastDTO: Decodable {
+    struct Thumb: Decodable { let type: String; let media: String }
     let text: String
     let mine: Bool
     let read: Bool
     let createdAt: Double
+    let thumb: Thumb?
+    let who: String?
 }
 
 private struct ChatDTO: Decodable {
@@ -451,6 +661,16 @@ private struct ChatDTO: Decodable {
     let muted: Bool?
     let mentions: Int?
 }
+
+private struct MessageHitDTO: Decodable {
+    let id: String
+    let peer: PeerDTO
+    let text: String
+    let mine: Bool
+    let createdAt: Double
+}
+
+private struct MessageHitListDTO: Decodable { let hits: [MessageHitDTO] }
 
 private struct ChatListDTO: Decodable {
     let chats: [ChatDTO]
@@ -478,12 +698,29 @@ private struct AttachmentDTO: Decodable {
     let sticker: String?
     let title: String?
     let artist: String?
+    let pack: String?
+    let gif: Bool?
+    let lat: Double?
+    let lon: Double?
+    let acc: Double?
+    let heading: Double?
+    let liveUntil: Double?
+    let updatedAt: Double?
+    let stopped: Bool?
 
     var model: ChatAttachment? {
         guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
+        var geo: GeoPoint?
+        if kind == .location {
+            guard let lat, let lon else { return nil }
+            geo = GeoPoint(lat: lat, lon: lon, accuracy: acc, heading: heading, title: title,
+                           liveUntil: liveUntil.map { Date(timeIntervalSince1970: $0) },
+                           updatedAt: updatedAt.map { Date(timeIntervalSince1970: $0) }, stopped: stopped ?? false)
+        }
         return ChatAttachment(kind: kind, mediaID: mediaId, thumbID: thumb, width: width ?? 0, height: height ?? 0,
                               duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
-                              waveform: waveform ?? [], sticker: sticker, title: title, artist: artist)
+                              waveform: waveform ?? [], sticker: sticker, title: kind == .location ? nil : title, artist: artist,
+                              stickerPack: pack, gif: gif ?? false, geo: geo)
     }
 }
 
@@ -501,12 +738,13 @@ struct PollOptionDTO: Decodable {
 struct PollDTO: Decodable {
     let multiple: Bool; let anonymous: Bool; let closed: Bool; let total: Int
     let options: [PollOptionDTO]; let mineCreated: Bool
+    let quiz: Bool?; let correct: Int?; let explanation: String?
     var model: PollInfo {
         PollInfo(multiple: multiple, anonymous: anonymous, closed: closed, total: total,
                  options: options.map { o in
                      PollOption(id: o.idx, text: o.text, votes: o.votes, mine: o.mine,
                                 voters: (o.voters ?? []).map { PollVoter(id: $0.id, name: $0.name, avatarID: $0.avatar, at: Date(timeIntervalSince1970: $0.at)) })
-                 }, mine: mineCreated)
+                 }, mine: mineCreated, quiz: quiz ?? false, correct: correct, explanation: explanation)
     }
 }
 
@@ -544,6 +782,10 @@ private struct MessageDTO: Decodable {
     let poll: PollDTO?
     let storyReply: StoryReplyDTO?
     let comments: Int?
+    let note: String?
+    let commenters: [PeerDTO]?
+    let markup: [[BotButton]]?
+    let blocks: [ArticleBlockDTO]?
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -555,7 +797,46 @@ private struct MessageDTO: Decodable {
                     forwarded: forwarded.map { ForwardRef(id: $0.id, name: $0.name, postID: $0.post) },
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
-                    comments: comments)
+                    comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
+                    markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model))
+    }
+}
+
+private struct ArticleBlockDTO: Decodable {
+    struct Item: Decodable { let text: String; let checked: Bool? }
+    let kind: String
+    let text: String?
+    let level: Int?
+    let author: String?
+    let lang: String?
+    let url: String?
+    let color: String?
+    let style: String?
+    let items: [Item]?
+    let body: String?
+    let rows: [[String]]?
+    let header: Bool?
+    let caption: String?
+    let media: AttachmentDTO?
+
+    var model: ArticleBlock? {
+        guard let k = ArticleBlock.Kind(rawValue: kind) else { return nil }
+        var b = ArticleBlock(kind: k)
+        b.text = text ?? ""
+        b.level = level ?? 1
+        b.author = author ?? ""
+        b.lang = lang ?? ""
+        b.url = url ?? ""
+        b.color = color ?? "default"
+        b.style = style ?? "bullet"
+        b.items = (items ?? []).map { ArticleListItem(text: $0.text, checked: $0.checked ?? false) }
+        b.body = body ?? ""
+        b.rows = rows ?? []
+        b.header = header ?? true
+        b.caption = caption ?? ""
+        b.media = media?.model
+        if k == .media && b.media == nil { return nil }
+        return b
     }
 }
 
@@ -586,7 +867,7 @@ private struct MemberDTO: Decodable {
 }
 
 private struct DiscussionDTO: Decodable { let id: String; let name: String }
-private struct CommentThreadDTO: Decodable { let messages: [MessageDTO]; let canComment: Bool }
+private struct CommentThreadDTO: Decodable { let messages: [MessageDTO]; let canComment: Bool; let mirror: String? }
 
 private struct GroupDTO: Decodable {
     let id: String
@@ -609,12 +890,102 @@ private struct GroupDTO: Decodable {
     let requests: Int?
     let pending: Bool?
     let discussion: DiscussionDTO?
+    let perms: [String: Bool]?
+    let writers: [String]?
+    let restrictedUntil: Double?
+    let forum: Bool?
+    let call: GroupCallBrief?
     var model: GroupInfo {
         GroupInfo(id: id, name: name, about: about, kind: kind, members: members.map(\.model), myRole: myRole, code: code,
                   type: type ?? "group", handle: handle, approve: approve ?? false, noForward: noForward ?? false,
                   slow: slow ?? 0, whoWrites: whoWrites ?? "all", history: history ?? true, count: count ?? members.count,
                   muted: muted ?? false, canWrite: canWrite ?? true, requests: requests ?? 0, pending: pending ?? false,
-                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) })
+                  perms: perms.map { p in GroupPerms(media: p["media"] ?? true, voice: p["voice"] ?? true, stickers: p["stickers"] ?? true,
+                                                     links: p["links"] ?? true, polls: p["polls"] ?? true, invite: p["invite"] ?? true,
+                                                     pin: p["pin"] ?? true) } ?? GroupPerms(),
+                  writers: writers ?? [],
+                  restrictedUntil: restrictedUntil.map { $0 > 0 ? Date(timeIntervalSince1970: $0) : .distantFuture },
+                  discussion: discussion.map { DiscussionRef(id: $0.id, name: $0.name) }, forum: forum ?? false, call: call)
+    }
+}
+
+private struct RestrictedListDTO: Decodable {
+    struct Item: Decodable { let user: MemberDTOLite; let until: Double }
+    let restricted: [Item]
+}
+
+private struct GroupStatsDTO: Decodable {
+    struct PostDTO: Decodable { let id: String; let text: String; let createdAt: Double; let views: Int; let reactions: Int; let shares: Int }
+    struct DayViewsDTO: Decodable {
+        let day: Double
+        let sources: [String: Int]
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            day = try c.decode(Double.self)
+            sources = try c.decode([String: Int].self)
+        }
+    }
+    let period: [Double]
+    let count: Int
+    let countWeekAgo: Int
+    let notifyPct: Double
+    let viewsPerPost: Double
+    let sharesPerPost: Double
+    let reactionsPerPost: Double
+    let growth: [[Double]]
+    let followers: [[Double]]
+    let views: [DayViewsDTO]
+    let hours: [Int]
+    let languagesRaw: [LangDTO]?
+    let posts: [PostDTO]
+
+    struct LangDTO: Decodable {
+        let code: String
+        let count: Int
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            code = try c.decode(String.self)
+            count = try c.decode(Int.self)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case period, count, countWeekAgo, notifyPct, viewsPerPost, sharesPerPost, reactionsPerPost, growth, followers, views, hours, posts
+        case languagesRaw = "languages"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        period = try c.decode([Double].self, forKey: .period)
+        count = try c.decode(Int.self, forKey: .count)
+        countWeekAgo = try c.decode(Int.self, forKey: .countWeekAgo)
+        notifyPct = try c.decode(Double.self, forKey: .notifyPct)
+        viewsPerPost = try c.decode(Double.self, forKey: .viewsPerPost)
+        sharesPerPost = try c.decode(Double.self, forKey: .sharesPerPost)
+        reactionsPerPost = try c.decode(Double.self, forKey: .reactionsPerPost)
+        growth = try c.decode([[Double]].self, forKey: .growth)
+        followers = try c.decode([[Double]].self, forKey: .followers)
+        views = try c.decode([DayViewsDTO].self, forKey: .views)
+        hours = try c.decode([Int].self, forKey: .hours)
+        languagesRaw = try c.decodeIfPresent([LangDTO].self, forKey: .languagesRaw)
+        posts = try c.decode([PostDTO].self, forKey: .posts)
+    }
+
+    var model: GroupStats {
+        let date = { (t: Double) in Date(timeIntervalSince1970: t) }
+        return GroupStats(count: count, countWeekAgo: countWeekAgo, notifyPercent: notifyPct, viewsPerPost: viewsPerPost,
+                          sharesPerPost: sharesPerPost, reactionsPerPost: reactionsPerPost,
+                          periodStart: date(period.first ?? 0), periodEnd: date(period.last ?? 0),
+                          growth: growth.compactMap { $0.count >= 2 ? GroupStats.GrowthPoint(day: date($0[0]), count: Int($0[1])) : nil },
+                          followers: followers.compactMap {
+                              $0.count >= 3 ? GroupStats.FollowerPoint(day: date($0[0]), joined: Int($0[1]), left: Int($0[2])) : nil
+                          },
+                          views: views.map { GroupStats.DayViews(day: date($0.day), sources: $0.sources) },
+                          hours: hours.count == 24 ? hours : Array(repeating: 0, count: 24),
+                          languages: (languagesRaw ?? []).enumerated().map { GroupStats.LangShare(index: $0.offset, code: $0.element.code,
+                                                                                                count: $0.element.count) },
+                          posts: posts.map { GroupStats.Post(id: $0.id, text: $0.text, createdAt: date($0.createdAt), views: $0.views,
+                                                             reactions: $0.reactions, shares: $0.shares) })
     }
 }
 
@@ -686,12 +1057,28 @@ private struct ThreadDTO: Decodable {
     let pinned: [MessageDTO]?
     let preview: Bool?
     let firstUnread: String?
+    let ttl: Int?
+    let botCommands: [BotCommand]?
+    let bot: BotInfo?
+    let botKeyboard: BotKeyboard?
+    let `protected`: Bool?                  // личная переписка: запрещено копирование и пересылка
 }
 
 private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
 
-private struct StickerDTO: Decodable { let id: String; let emoji: String }
-private struct PackDTO: Decodable { let id: String; let title: String; let icon: String; let stickers: [StickerDTO] }
+private struct StickerDTO: Decodable {
+    let id: String; let emoji: String; let mediaId: String?; let animated: Bool?; let lottie: Bool?
+}
+private struct PackDTO: Decodable {
+    let id: String; let title: String; let icon: String; let stickers: [StickerDTO]
+    let mine: Bool?; let installed: Bool?; let kind: String?
+    var model: StickerPack {
+        StickerPack(id: id, title: title, icon: icon,
+                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false,
+                                                     packID: id, lottie: $0.lottie ?? false) },
+                    mine: mine ?? false, kind: kind ?? "sticker")
+    }
+}
 private struct PackListDTO: Decodable { let packs: [PackDTO] }
 private struct UploadedDTO: Decodable { let id: String }
 
@@ -701,12 +1088,24 @@ struct RemoteMessengerRepository: MessengerRepository {
     let api: ServerAPI
 
     func chats() async throws -> (chats: [ChatSummary], unread: Int) {
-        let data = try await api.request("GET", "/v1/chats")
+        try decodeChats(try await api.requestCached("/v1/chats"))
+    }
+
+    func cachedChats() -> (chats: [ChatSummary], unread: Int)? {
+        api.cachedResponse("/v1/chats").flatMap { try? decodeChats($0) }
+    }
+
+    func cachedThread(peerID: String) -> ChatThread? {
+        api.cachedResponse("/v1/chats/\(peerID)/messages", slot: "", fallback: ["p"]).flatMap { try? decodeThread($0) }
+    }
+
+    private func decodeChats(_ data: Data) throws -> (chats: [ChatSummary], unread: Int) {
         let dto = try decodeAPI(ChatListDTO.self, from: data)
         let list = dto.chats.map {
             ChatSummary(peer: $0.peer.model, unread: $0.unread, updatedAt: Date(timeIntervalSince1970: $0.updatedAt),
-                        lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing, muted: $0.muted ?? false,
-                        mentions: $0.mentions ?? 0)
+                        lastText: $0.last.text, lastMine: $0.last.mine, lastRead: $0.last.read, typing: $0.typing,
+                        lastSender: $0.last.who, muted: $0.muted ?? false,
+                        mentions: $0.mentions ?? 0, lastThumb: $0.last.thumb.map { LastThumb(kind: $0.type, mediaID: $0.media) })
         }
         return (list, dto.unread)
     }
@@ -717,27 +1116,108 @@ struct RemoteMessengerRepository: MessengerRepository {
         return try decodeAPI(MessageDTO.self, from: data).model
     }
 
+    func setNote(messageID: String, text: String) async throws -> ChatMessage {
+        let body = ServerAPI.json(["text": text] as [String: Any])
+        let data = try await api.request("PUT", "/v1/messages/\(messageID)/note", body: body)
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
     func pin(messageID: String, pinned: Bool) async throws -> [ChatMessage] {
         let body = ServerAPI.json(["pinned": pinned] as [String: Any])
         let data = try await api.request("PUT", "/v1/messages/\(messageID)/pin", body: body)
         return try decodeAPI(PinnedDTO.self, from: data).pinned.map(\.model)
     }
 
-    func thread(peerID: String, limit: Int, peek: Bool) async throws -> ChatThread {
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
-        let data = try await api.request("GET", "/v1/chats/\(peerID)/messages", query: query)
+        if ChannelViewSource.openedByLink.contains(peerID) { query["src"] = "link" }      // статистика: «URL»
+        if let topic {
+            query["topic"] = topic
+            let slot = "t-" + topic + (peek ? "-p" : "")                  // у каждой темы своя копия на телефоне
+            return try decodeThread(try await api.requestCached("/v1/chats/\(peerID)/messages", query: query, slot: slot))
+        }
+        // быстрый просмотр (предзагрузка) и полная загрузка хранятся отдельно: короткая копия не затирает длинную
+        let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
+                                               slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
+        return try decodeThread(data)
+    }
+
+    func cachedThread(peerID: String, topic: String) -> ChatThread? {
+        api.cachedResponse("/v1/chats/\(peerID)/messages", slot: "t-" + topic, fallback: []).flatMap { try? decodeThread($0) }
+    }
+
+    func topics(groupID: String) async throws -> ForumTopicList {
+        try decodeAPI(ForumTopicList.self, from: try await api.requestCached("/v1/groups/\(groupID)/topics"))
+    }
+
+    func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic {
+        var body: [String: Any] = ["title": title, "color": color]
+        if let icon { body["icon"] = icon }
+        return try decodeAPI(ForumTopic.self, from: try await api.request("POST", "/v1/groups/\(groupID)/topics", body: ServerAPI.json(body)))
+    }
+
+    func updateTopic(groupID: String, topicID: String, fields: [String: Any]) async throws -> ForumTopic {
+        try decodeAPI(ForumTopic.self, from: try await api.request("PUT", "/v1/groups/\(groupID)/topics/\(topicID)", body: ServerAPI.json(fields)))
+    }
+
+    func deleteTopic(groupID: String, topicID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/topics/\(topicID)")
+    }
+
+    func setForum(groupID: String, on: Bool) async throws -> Bool {
+        struct R: Decodable { let forum: Bool }
+        let data = try await api.request("PUT", "/v1/groups/\(groupID)/forum", body: ServerAPI.json(["on": on]))
+        return (try? decodeAPI(R.self, from: data))?.forum ?? on
+    }
+
+    private func decodeThread(_ data: Data) throws -> ChatThread {
         let dto = try decodeAPI(ThreadDTO.self, from: data)
         let peer = ChatPeer(id: dto.peer.id, name: dto.peer.name, username: dto.peer.username, avatarID: dto.peer.avatar,
                             isGroup: dto.peer.group ?? false, kind: dto.peer.kind, memberCount: dto.peer.members ?? 0,
-                            type: dto.peer.type, handle: dto.peer.handle, noForward: dto.peer.noForward ?? false)
+                            type: dto.peer.type, handle: dto.peer.handle,
+                            noForward: (dto.peer.noForward ?? false) || (dto.protected ?? false))
         let real = [dto.peer.firstName, dto.peer.lastName].compactMap { $0 }.joined(separator: " ")
         return ChatThread(messages: dto.messages.map(\.model), peer: peer,
                           lastSeen: dto.peer.lastSeen.map { Date(timeIntervalSince1970: $0) },
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
                           pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
-                          isPreview: dto.preview ?? false)
+                          isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot,
+                          botKeyboard: dto.botKeyboard)
+    }
+
+    func sendArticle(peerID: String, blocks: [[String: Any]], buttons: [[String: Any]], replyTo: String?,
+                     topic: String?) async throws -> ChatMessage {
+        var body: [String: Any] = ["text": "", "blocks": blocks]
+        if !buttons.isEmpty { body["buttons"] = buttons }
+        if let replyTo { body["reply_to"] = replyTo }
+        if let topic, topic != "general" { body["topic_id"] = topic }
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func botCallback(messageID: String, data: String) async throws -> BotCallbackAnswer {
+        let body = ServerAPI.json(["data": data] as [String: Any])
+        return try decodeAPI(BotCallbackAnswer.self, from: try await api.request("POST", "/v1/messages/\(messageID)/callback", body: body))
+    }
+
+    func setChatProtected(peerID: String, on: Bool) async throws -> Bool {
+        let data = try await api.request("PUT", "/v1/chats/\(peerID)/protect", body: ServerAPI.json(["on": on]))
+        struct R: Decodable { let `protected`: Bool }
+        return (try? decodeAPI(R.self, from: data))?.protected ?? on
+    }
+
+    func setChatTTL(peerID: String, seconds: Int) async throws -> Int {
+        let data = try await api.request("PUT", "/v1/chats/\(peerID)/ttl",
+                                         body: ServerAPI.json(["ttl": seconds]))
+        struct R: Decodable { let ttl: Int }
+        return (try? decodeAPI(R.self, from: data))?.ttl ?? seconds
+    }
+
+    func unreadDigest(peerID: String, from messageID: String) async throws -> UnreadDigest {
+        let data = try await api.request("GET", "/v1/chats/\(peerID)/summary", query: ["from": messageID])
+        return try decodeAPI(UnreadDigest.self, from: data)
     }
 
     static func entityJSON(_ entities: [TextEntity]) -> [[String: Any]] {
@@ -749,9 +1229,10 @@ struct RemoteMessengerRepository: MessengerRepository {
     }
 
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
-              replyTo: String?, silent: Bool) async throws -> ChatMessage {
+              replyTo: String?, silent: Bool, topic: String?) async throws -> ChatMessage {
         var body: [String: Any] = ["text": text, "entities": Self.entityJSON(entities)]
         if silent { body["silent"] = true }
+        if let topic, topic != "general" { body["topic_id"] = topic }
         if !attachments.isEmpty { body["attachments"] = attachments.map(\.json) }
         if let replyTo { body["reply_to"] = replyTo }
         let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
@@ -762,7 +1243,7 @@ struct RemoteMessengerRepository: MessengerRepository {
         switch media {
         case .prepared(let prepared):
             let item = try await RemoteFeedRepository(api: api).uploadMedia(prepared)
-            return OutgoingAttachment(type: prepared.isVideo ? "video" : "photo", mediaID: item.id)
+            return OutgoingAttachment(type: prepared.isVideo ? "video" : "photo", mediaID: item.id, gif: prepared.gif && prepared.isVideo)
 
         case .circle(let url, let thumb, let duration):
             let thumbData = try await api.upload("/v1/media", query: ["kind": "image", "w": "480", "h": "480"],
@@ -800,7 +1281,21 @@ struct RemoteMessengerRepository: MessengerRepository {
 
         case .sticker(let id):
             return OutgoingAttachment(type: "sticker", sticker: id)
+
+        case .location(let geo, let live):
+            return OutgoingAttachment(type: "location", geo: geo, live: live)
         }
+    }
+
+    func updateLiveLocation(messageID: String, point: GeoPoint) async throws {
+        var body: [String: Any] = ["lat": point.lat, "lon": point.lon]
+        if let a = point.accuracy { body["acc"] = a }
+        if let h = point.heading { body["heading"] = h }
+        _ = try await api.request("PUT", "/v1/live-location/\(messageID)", body: ServerAPI.json(body))
+    }
+
+    func stopLiveLocation(messageID: String) async throws {
+        _ = try await api.request("POST", "/v1/live-location/\(messageID)/stop")
     }
 
     func edit(messageID: String, text: String, entities: [TextEntity]) async throws -> ChatMessage {
@@ -813,6 +1308,11 @@ struct RemoteMessengerRepository: MessengerRepository {
         _ = try await api.request("DELETE", "/v1/messages/\(messageID)", query: forEveryone ? ["all": "1"] : [:])
     }
 
+    func typingStatus(peerID: String) async throws -> String? {
+        struct R: Decodable { let typing: String? }
+        return try decodeAPI(R.self, from: try await api.request("GET", "/v1/chats/\(peerID)/typing")).typing
+    }
+
     func typing(peerID: String, action: String) async {
         _ = try? await api.request("POST", "/v1/chats/\(peerID)/typing", body: ServerAPI.json(["action": action]))
     }
@@ -821,12 +1321,88 @@ struct RemoteMessengerRepository: MessengerRepository {
         _ = try await api.request("DELETE", "/v1/chats/\(peerID)")
     }
 
+    /// Наборы стикеров. Ответ сервера сохраняется на телефон вместе с самими стикерами (StickerVault);
+    /// без сети — отдаём сохранённое, панель стикеров работает как обычно
     func stickers() async throws -> [StickerPack] {
-        let data = try await api.request("GET", "/v1/stickers")
-        return try decodeAPI(PackListDTO.self, from: data).packs.map { pack in
-            StickerPack(id: pack.id, title: pack.title, icon: pack.icon,
-                        stickers: pack.stickers.map { Sticker(id: $0.id, emoji: $0.emoji) })
+        do {
+            let data = try await api.request("GET", "/v1/stickers")
+            let packs = try decodeAPI(PackListDTO.self, from: data).packs.map(\.model)
+            StickerVault.shared.store(packs, account: api.accountID)
+            return packs
+        } catch {
+            if let saved = StickerVault.shared.packs(account: api.accountID) { return saved }
+            throw error
         }
+    }
+
+    func savedStickers() -> [StickerPack]? { StickerVault.shared.packs(account: api.accountID) }
+
+    func stickerPack(id: String) async throws -> CustomStickerPack {
+        do {
+            let dto = try decodeAPI(PackDTO.self, from: try await api.request("GET", "/v1/stickers/packs/\(id)"))
+            return CustomStickerPack(pack: dto.model, installed: dto.installed ?? false, mine: dto.mine ?? false)
+        } catch {
+            // без сети — сохранённый на телефоне набор
+            if let saved = StickerVault.shared.packs(account: api.accountID)?.first(where: { $0.id == id }) {
+                return CustomStickerPack(pack: saved, installed: true, mine: saved.mine)
+            }
+            throw error
+        }
+    }
+
+    func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request(installed ? "PUT" : "DELETE", "/v1/stickers/packs/\(id)/install"))
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? installed, mine: dto.mine ?? false)
+        // добавили — сразу на телефон; убрали из набора своими руками — только тогда стираем с телефона
+        if result.installed { StickerVault.shared.keep(result.pack, account: api.accountID) }
+        else { StickerVault.shared.forget(packID: id, account: api.accountID) }
+        return result
+    }
+
+    func createStickerPack(title: String) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request("POST", "/v1/stickers/packs",
+                                                                           body: ServerAPI.json(["title": title])))
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+        StickerVault.shared.keep(result.pack, account: api.accountID)
+        return result
+    }
+
+    func createEmojiPack(title: String) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request("POST", "/v1/stickers/packs",
+                                                                           body: ServerAPI.json(["title": title, "kind": "emoji"])))
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+        StickerVault.shared.keep(result.pack, account: api.accountID)
+        return result
+    }
+
+    func uploadEmojiSource(_ data: Data, lottie: Bool) async throws -> String {
+        let query = lottie ? ["kind": "file"] : ["kind": "image", "w": "100", "h": "100"]
+        let mime = lottie ? "application/octet-stream" : "image/png"
+        let res = try await api.upload("/v1/media", query: query, payload: .data(data), contentType: mime)
+        return try decodeAPI(UploadedDTO.self, from: res).id
+    }
+
+    func addEmoji(packID: String, mediaID: String, emoji: String) async throws -> CustomEmojiInfo {
+        struct R: Decodable { let id: String; let emoji: String; let mediaId: String; let lottie: Bool; let pack: String? }
+        let data = try await api.request("POST", "/v1/stickers/packs/\(packID)/emoji",
+                                         body: ServerAPI.json(["media_id": mediaID, "emoji": emoji]))
+        let r = try decodeAPI(R.self, from: data)
+        return CustomEmojiInfo(id: r.id, emoji: r.emoji, mediaID: r.mediaId, lottie: r.lottie, pack: r.pack)
+    }
+
+    func addSticker(packID: String, mediaID: String, emoji: String) async throws {
+        _ = try await api.request("POST", "/v1/stickers/packs/\(packID)/stickers",
+                                  body: ServerAPI.json(["media_id": mediaID, "emoji": emoji]))
+    }
+
+    func deleteSticker(packID: String, stickerID: String) async throws {
+        let bare = stickerID.hasPrefix("u:") ? String(stickerID.dropFirst(2)) : stickerID
+        _ = try await api.request("DELETE", "/v1/stickers/packs/\(packID)/stickers/\(bare)")
+    }
+
+    func deleteStickerPack(id: String) async throws {
+        _ = try await api.request("DELETE", "/v1/stickers/packs/\(id)")
+        StickerVault.shared.forget(packID: id, account: api.accountID)          // удалили набор — и с телефона
     }
 
     // MARK: Контакты
@@ -849,7 +1425,7 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     private static func draftBody(_ d: GroupDraft) -> [String: Any] {
         ["title": d.title, "about": d.about, "type": d.type, "kind": d.kind, "handle": d.handle, "approve": d.approve,
-         "no_forward": d.noForward, "slow": d.slow, "who_writes": d.whoWrites, "history": d.history]
+         "no_forward": d.noForward, "slow": d.slow, "who_writes": d.whoWrites, "history": d.history, "perms": d.perms.json]
     }
 
     func createGroup(_ draft: GroupDraft, members: [String]) async throws -> GroupInfo {
@@ -874,17 +1450,21 @@ struct RemoteMessengerRepository: MessengerRepository {
         if let v = patch.whoWrites { body["who_writes"] = v }
         if let v = patch.history { body["history"] = v }
         if let v = patch.discussion { body["discussion"] = v }
+        if let v = patch.perms { body["perms"] = v.json }
+        if let v = patch.writers { body["writers"] = v }
         return try decodeAPI(GroupDTO.self, from: try await api.request("PUT", "/v1/groups/\(id)", body: ServerAPI.json(body))).model
     }
 
     func comments(channelID: String, messageID: String) async throws -> CommentThread {
         let data = try await api.request("GET", "/v1/groups/\(channelID)/comments/\(messageID)")
         let dto = try decodeAPI(CommentThreadDTO.self, from: data)
-        return CommentThread(messages: dto.messages.map(\.model), canComment: dto.canComment)
+        return CommentThread(messages: dto.messages.map(\.model), canComment: dto.canComment, mirrorID: dto.mirror)
     }
 
-    func postComment(channelID: String, messageID: String, text: String) async throws -> ChatMessage {
-        let body = ServerAPI.json(["text": text, "entities": [Any]()] as [String: Any])
+    func postComment(channelID: String, messageID: String, text: String, replyTo: String?) async throws -> ChatMessage {
+        var fields: [String: Any] = ["text": text, "entities": [Any]()]
+        if let replyTo { fields["reply_to"] = replyTo }
+        let body = ServerAPI.json(fields)
         let data = try await api.request("POST", "/v1/groups/\(channelID)/comments/\(messageID)", body: body)
         return try decodeAPI(MessageDTO.self, from: data).model
     }
@@ -921,6 +1501,28 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func unban(groupID: String, userID: String) async throws {
         _ = try await api.request("DELETE", "/v1/groups/\(groupID)/bans/\(userID)")
+    }
+
+    func moderate(groupID: String, userID: String, messageID: String?, options: ModerationOptions) async throws {
+        var body: [String: Any] = ["delete_all": options.deleteAll, "ban": options.ban]
+        if let messageID { body["message_id"] = messageID }
+        if let r = options.restrict { body["restrict"] = r }
+        _ = try await api.request("POST", "/v1/groups/\(groupID)/moderate/\(userID)", body: ServerAPI.json(body))
+    }
+
+    func restricted(groupID: String) async throws -> [RestrictedMember] {
+        try decodeAPI(RestrictedListDTO.self, from: try await api.request("GET", "/v1/groups/\(groupID)/restricted")).restricted.map {
+            RestrictedMember(member: $0.user.model, until: $0.until > 0 ? Date(timeIntervalSince1970: $0.until) : nil)
+        }
+    }
+
+    func unrestrict(groupID: String, userID: String) async throws {
+        _ = try await api.request("DELETE", "/v1/groups/\(groupID)/restricted/\(userID)")
+    }
+
+    func stats(groupID: String, days: Int) async throws -> GroupStats {
+        let data = try await api.request("GET", "/v1/groups/\(groupID)/stats", query: ["days": String(days)])
+        return try decodeAPI(GroupStatsDTO.self, from: data).model
     }
 
     func setMuted(groupID: String, muted: Bool) async throws {
@@ -962,6 +1564,14 @@ struct RemoteMessengerRepository: MessengerRepository {
         if let type { params["type"] = type }
         let data = try await api.request("GET", "/v1/groups/public", query: params)
         return try decodeAPI(GroupPreviewListDTO.self, from: data).groups.map(\.model)
+    }
+
+    func searchMessages(query: String) async throws -> [MessageHit] {
+        let data = try await api.request("GET", "/v1/search/messages", query: ["q": query])
+        return try decodeAPI(MessageHitListDTO.self, from: data).hits.map {
+            MessageHit(id: $0.id, peer: $0.peer.model, text: $0.text, mine: $0.mine,
+                       date: Date(timeIntervalSince1970: $0.createdAt))
+        }
     }
 
     func groupPreview(code: String) async throws -> GroupPreview {

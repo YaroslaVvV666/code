@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 /// Название и версия устройства для списка сеансов
 enum DeviceInfo {
@@ -47,4 +48,6 @@ enum DeviceInfo {
 extension Notification.Name {
     /// Сервер больше не признаёт этот сеанс (его завершили с другого устройства)
     static let orbitaSessionRevoked = Notification.Name("orbita.sessionRevoked")
+    /// Началось видео со звуком: музыка встаёт на паузу
+    static let orbitaVideoWithSound = Notification.Name("orbita.videoWithSound")
 }

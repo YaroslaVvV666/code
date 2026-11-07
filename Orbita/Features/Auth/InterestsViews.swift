@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Каталог интересов (id совпадают с темами на сервере)
 

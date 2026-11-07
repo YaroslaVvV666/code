@@ -1,0 +1,66 @@
+# Боевая связка Orbita: PostgreSQL + Redis + сервер (несколько воркеров) + nginx.
+# Запуск:   cd Orbita/deploy && cp .env.example .env && <отредактировать .env> && docker compose up -d --build
+#
+# .env задаёт пароли и число воркеров. Медиа по умолчанию на диске (том app-data); для S3 — переменные ORBITA_S3_*.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-orbita}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?задайте PG_PASSWORD в .env}
+      POSTGRES_DB: ${PG_DB:-orbita}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-orbita}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  cache:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://${PG_USER:-orbita}:${PG_PASSWORD}@db:5432/${PG_DB:-orbita}
+      REDIS_URL: redis://cache:6379/0
+      ORBITA_WORKERS: ${ORBITA_WORKERS:-4}
+      ORBITA_ADMIN_TOKEN: ${ORBITA_ADMIN_TOKEN:-}
+      # ключ шифрования: задайте ORBITA_MASTER_KEY (base64 32 байта), иначе создастся в томе /data (сделайте бэкап!)
+      ORBITA_MASTER_KEY: ${ORBITA_MASTER_KEY:-}
+      # медиа в S3 (необязательно): раскомментируйте и заполните
+      # ORBITA_S3_BUCKET: ${ORBITA_S3_BUCKET:-}
+      # ORBITA_S3_ENDPOINT: ${ORBITA_S3_ENDPOINT:-}
+      # AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    volumes:
+      - app-data:/data
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      # - "443:443"   # включите вместе с TLS в nginx.conf
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # - ./certs:/etc/nginx/certs:ro   # сюда положите сертификаты для TLS
+
+volumes:
+  db-data:
+  app-data:

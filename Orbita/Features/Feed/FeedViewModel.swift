@@ -9,6 +9,8 @@ final class FeedViewModel: ObservableObject {
     }
 
     @Published private(set) var posts: [Post] = []
+    @Published private(set) var ads: [FeedAd] = []
+    @Published var hiddenAdIDs: Set<String> = []
     @Published private(set) var state: LoadState = .idle
     @Published var uploadProgress: Double?          // nil — ничего не загружается
     @Published var actionError: APIError?
@@ -44,7 +46,9 @@ final class FeedViewModel: ObservableObject {
     func load() async {
         if posts.isEmpty { state = .loading }
         do {
-            posts = try await repo.loadFeed(forYou: forYou)
+            let page = try await repo.loadFeed(forYou: forYou)
+            posts = page.posts
+            ads = page.ads
             state = .loaded
         } catch {
             state = .failed(Self.map(error))
@@ -71,7 +75,10 @@ final class FeedViewModel: ObservableObject {
         }
     }
 
-    func publish(text: String, entities: [TextEntity], media: [PreparedMedia]) async -> Bool {
+    /// Последняя опубликованная запись (в том числе «только на стене», которой нет в ленте)
+    private(set) var lastPublished: Post?
+
+    func publish(text: String, entities: [TextEntity], media: [PreparedMedia], options: PostOptions = PostOptions()) async -> Bool {
         actionError = nil
         uploadProgress = 0
         defer { uploadProgress = nil }
@@ -81,9 +88,12 @@ final class FeedViewModel: ObservableObject {
                 uploaded.append(try await repo.uploadMedia(item))
                 uploadProgress = Double(index + 1) / Double(media.count + 1)
             }
-            let post = try await repo.createPost(text: text, entities: entities, media: uploaded)
-            posts.insert(post, at: 0)
-            state = .loaded
+            let post = try await repo.createPost(text: text, entities: entities, media: uploaded, options: options)
+            lastPublished = post
+            if !options.wallOnly {                 // запись «только на стене» в ленту не добавляем
+                posts.insert(post, at: 0)
+                state = .loaded
+            }
             return true
         } catch {
             actionError = Self.map(error)

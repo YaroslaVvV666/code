@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Модели
 
@@ -25,6 +26,7 @@ struct StoryItem: Identifiable, Decodable, Equatable {
     let createdAt: Double
     let expiresAt: Double
     var permanent: Bool? = nil
+    var thumb: String? = nil            // обложка видео-истории (для сетки в профиле)
     var viewed: Bool
     let views: Int
     var likes: Int? = nil
@@ -58,6 +60,18 @@ private struct ViewerList: Decodable { let viewers: [StoryViewer]; let likes: In
 struct ExtrasAPI {
     let api: ServerAPI
 
+    /// Общие чаты с человеком: группы, где состоите оба
+    func commonChats(userID: String) async -> [ChatPeer] {
+        struct Item: Decodable { let id: String; let name: String; let members: Int?; let kind: String?; let type: String?; let handle: String? }
+        struct List: Decodable { let chats: [Item] }
+        guard let data = try? await api.request("GET", "/v1/users/\(userID)/common"),
+              let list = try? decodeAPI(List.self, from: data) else { return [] }
+        return list.chats.map {
+            ChatPeer(id: $0.id, name: $0.name, username: $0.handle, avatarID: nil, isGroup: true, kind: $0.kind,
+                     memberCount: $0.members ?? 0, type: $0.type ?? "group", handle: $0.handle)
+        }
+    }
+
     // Отложенные
     func schedule(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment], at date: Date) async throws {
         var body: [String: Any] = ["text": text, "entities": RemoteMessengerRepository.entityJSON(entities),
@@ -74,6 +88,13 @@ struct ExtrasAPI {
 
     func cancelScheduled(id: String) async {
         _ = try? await api.request("DELETE", "/v1/scheduled/\(id)")
+    }
+
+    // Предпросмотр ссылки
+    func linkPreview(url: String) async -> LinkPreviewData? {
+        let query = url.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        guard let data = try? await api.request("GET", "/v1/link_preview?url=\(query)") else { return nil }
+        return try? decodeAPI(LinkPreviewData.self, from: data)
     }
 
     // Истории
@@ -151,8 +172,15 @@ struct ExtrasAPI {
         _ = try await api.request("POST", "/v1/chats/\(peerID)/share-post", body: ServerAPI.json(body))
     }
 
-    func sendPoll(peerID: String, question: String, options: [String], multiple: Bool, anonymous: Bool) async throws {
-        let poll: [String: Any] = ["question": question, "options": options, "multiple": multiple, "anonymous": anonymous]
+    func sendPoll(peerID: String, question: String, options: [String], multiple: Bool, anonymous: Bool,
+                  quizCorrect: Int? = nil, explanation: String = "") async throws {
+        var poll: [String: Any] = ["question": question, "options": options, "multiple": multiple, "anonymous": anonymous]
+        if let quizCorrect {
+            poll["quiz"] = true
+            poll["correct"] = quizCorrect
+            poll["multiple"] = false
+            if !explanation.isEmpty { poll["explanation"] = explanation }
+        }
         let body: [String: Any] = ["text": question, "poll": poll]
         _ = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
     }
@@ -174,3 +202,12 @@ struct ExtrasAPI {
 }
 
 private struct ProfileStoryList: Decodable { let stories: [StoryItem] }
+
+
+struct LinkPreviewData: Decodable, Equatable {
+    let title: String
+    let description: String
+    let site: String
+    let image: String
+    let url: String
+}

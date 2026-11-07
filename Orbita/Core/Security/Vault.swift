@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import CryptoKit
 
 /// Шифрование данных перед записью в базу.

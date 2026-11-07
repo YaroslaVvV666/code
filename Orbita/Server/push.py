@@ -84,10 +84,12 @@ def _client(environment):
         return c
 
 
-def transport(environment, device_token, payload, collapse_id=None):
-    """Один запрос к APNs. Возвращает (HTTP-статус, причина). В тестах подменяется."""
-    headers = {"authorization": "bearer " + provider_token(), "apns-topic": env("ORBITA_APNS_TOPIC"),
-               "apns-push-type": "alert", "apns-priority": "10"}
+def transport(environment, device_token, payload, collapse_id=None, push_type="alert", topic=None, priority="10"):
+    """Один запрос к APNs. Возвращает (HTTP-статус, причина). В тестах подменяется.
+    push_type="voip" + topic="<bundle>.voip" — пуш для звонка: будит приложение даже закрытым,
+    оно сразу показывает системный входящий звонок (CallKit). Для VoIP нужен отдельный APNs-топик."""
+    headers = {"authorization": "bearer " + provider_token(), "apns-topic": topic or env("ORBITA_APNS_TOPIC"),
+               "apns-push-type": push_type, "apns-priority": priority}
     if collapse_id:
         headers["apns-collapse-id"] = collapse_id
     r = _client(environment).post("/3/device/" + device_token, content=payload, headers=headers)
@@ -113,9 +115,9 @@ def start(on_dead_token):
 
     def worker():
         while True:
-            environment, token, payload = _queue.get()
+            environment, token, payload, kw = _queue.get()
             try:
-                status, reason = transport(environment, token, payload)
+                status, reason = transport(environment, token, payload, **kw)
                 if status in (400, 410) and reason in ("BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"):
                     on_dead_token(token)
                 elif status != 200:
@@ -126,8 +128,20 @@ def start(on_dead_token):
     threading.Thread(target=worker, daemon=True, name="apns").start()
 
 
-def enqueue(environment, device_token, payload):
+def enqueue(environment, device_token, payload, **kw):
     try:
-        _queue.put_nowait((environment if environment in HOSTS else "production", device_token, payload))
+        _queue.put_nowait((environment if environment in HOSTS else "production", device_token, payload, kw))
     except queue.Full:
         pass
+
+
+def voip_topic():
+    """Топик VoIP-пуша = Bundle ID приложения + '.voip' (так требует Apple для PushKit)."""
+    base = env("ORBITA_APNS_TOPIC")
+    return base + ".voip" if base else ""
+
+
+def build_voip_payload(data):
+    """VoIP-пуш не показывает баннер сам — внутри только данные звонка, по которым приложение
+    немедленно поднимает системный экран входящего звонка."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()

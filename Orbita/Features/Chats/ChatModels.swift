@@ -1,15 +1,116 @@
 import SwiftUI
 import Combine
 
+/// Предзагрузка переписок: последние сообщения чатов из списка подтягиваются заранее (без пометки «прочитано»),
+/// и чат открывается уже с готовыми сообщениями, а не с пустым экраном и загрузкой
+@MainActor
+final class ThreadPrefetcher {
+    static let shared = ThreadPrefetcher()
+    private struct Entry { var thread: ChatThread; var stamp: Date }
+    private var store: [String: Entry] = [:]
+    private var inflight = Set<String>()
+    private var queue: [(summary: ChatSummary, limit: Int)] = []
+    private var running = 0
+    private let maxParallel = 3
+    private var repo: MessengerRepository?
+
+    func get(_ id: String) -> ChatThread? { store[id]?.thread }
+
+    /// При входе в «Чаты»: сначала самые свежие (список уже отсортирован). Сохраняются и на телефон —
+    /// поэтому переписки открываются сразу и без интернета
+    func warm(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 30, limit: Int = 30) {
+        self.repo = repo
+        for c in chats.prefix(count) { enqueue(c, limit: limit) }
+    }
+
+    /// Без сети: переписки из сохранённых на телефоне копий — сразу в память, чтобы открывались мгновенно
+    func warmFromDisk(_ chats: [ChatSummary], repo: MessengerRepository, count: Int = 30) {
+        self.repo = repo
+        for c in chats.prefix(count) where store[c.id] == nil {
+            if let t = repo.cachedThread(peerID: c.id) { store[c.id] = Entry(thread: t, stamp: .distantPast) }
+        }
+    }
+
+    /// Когда строка чата показалась на экране при прокрутке: по 5 сообщений
+    func visible(_ chat: ChatSummary, repo: MessengerRepository) {
+        self.repo = repo
+        enqueue(chat, limit: 5)
+    }
+
+    private func enqueue(_ c: ChatSummary, limit: Int) {
+        if let e = store[c.id], e.stamp >= c.updatedAt { return }            // уже есть и ничего нового
+        guard !inflight.contains(c.id) else { return }
+        inflight.insert(c.id)
+        queue.append((c, limit))
+        pump()
+    }
+
+    private func pump() {
+        while running < maxParallel, !queue.isEmpty, let repo {
+            let job = queue.removeFirst()
+            running += 1
+            Task { [weak self] in
+                let t = try? await repo.thread(peerID: job.summary.id, limit: job.limit, peek: true)
+                guard let self else { return }
+                self.running -= 1
+                self.inflight.remove(job.summary.id)
+                if let t { self.store[job.summary.id] = Entry(thread: t, stamp: job.summary.updatedAt) }
+                self.pump()
+            }
+        }
+    }
+}
+
 /// Список переписок (и счётчик непрочитанных для нижней панели)
 @MainActor
 final class ChatsModel: ObservableObject {
     @Published private(set) var chats: [ChatSummary] = []
     @Published private(set) var unread = 0
     @Published private(set) var loaded = false
+    /// Уже был ответ сервера (а не только сохранённая на телефоне копия)
+    private var gotFresh = false
     @Published var error: APIError?
     /// Открыта переписка — нижняя панель вкладок прячется (как в Telegram)
-    @Published var chatOpen = false
+    @Published private(set) var chatOpen = false
+    /// Сколько экранов переписки сейчас на экране. Считаем, а не ставим флаг: при быстром выходе и входе iOS может прислать
+    /// «появился» нового чата раньше, чем «исчез» старого, — флаг тогда застревал, и панель вкладок пропадала или мешала
+    private var openScreens = 0
+    /// Нажали на чат, и он выезжает: панель прячется сразу, ещё до появления экрана переписки
+    private var opening = false
+    /// На каких вкладках сейчас открыта переписка. «Чаты» живут в памяти и при переходе на другую вкладку
+    /// (например, открыли присланный шортс) переписка остаётся открытой — панель прячем только на её вкладке
+    @Published private(set) var chatOpenTabs: Set<MainTab> = []
+    private var screensByTab: [MainTab: Int] = [:]
+
+    /// tab — вкладка, внутри которой открыта переписка; nil — поверх всего (полноэкранно), панель её и так не видно
+    func chatScreenAppeared(_ peerID: String, tab: MainTab?) {
+        openScreens += 1
+        if let tab { screensByTab[tab, default: 0] += 1 }
+        openPeerID = peerID
+        syncChatOpen()
+    }
+
+    func chatScreenDisappeared(tab: MainTab?) {
+        openScreens = max(0, openScreens - 1)
+        if let tab { screensByTab[tab] = max(0, (screensByTab[tab] ?? 0) - 1) }
+        if openScreens == 0 { openPeerID = nil }
+        syncChatOpen()
+    }
+
+    /// Список чатов: какой чат сейчас открывается (nil — вернулись в список)
+    func setOpening(_ peerID: String?) {
+        opening = peerID != nil
+        if let peerID { openPeerID = peerID }
+        syncChatOpen()
+    }
+
+    private func syncChatOpen() {
+        let now = openScreens > 0 || opening
+        if chatOpen != now { chatOpen = now }
+        var tabs = Set(screensByTab.filter { $0.value > 0 }.keys)
+        if opening { tabs.insert(.chats) }                  // нажали на чат в списке «Чатов»
+        if chatOpenTabs != tabs { chatOpenTabs = tabs }
+    }
     /// Какая переписка открыта прямо сейчас (для неё баннер не нужен)
     var openPeerID: String?
     /// Всплывающее сообщение о новом сообщении в другом чате
@@ -37,10 +138,17 @@ final class ChatsModel: ObservableObject {
 
     func refresh() async {
         ticks += 1
+        // первый раз — сразу сохранённый список (без сети и без ожидания ответа), свежий приходит следом
+        if !loaded, chats.isEmpty, let cached = repo.cachedChats() {
+            chats = cached.chats
+            unread = cached.unread
+            loaded = true
+            ThreadPrefetcher.shared.warmFromDisk(cached.chats, repo: repo)
+        }
         if ticks % 3 == 1 { await refreshNotices() }
         do {
             let result = try await repo.chats()
-            if loaded {
+            if gotFresh {                    // баннер — только на новое после первого ответа сервера, а не на разницу с сохранённой копией
                 let old = Dictionary(chats.map { ($0.id, $0.unread) }, uniquingKeysWith: { a, _ in a })
                 let oldTags = Dictionary(chats.map { ($0.id, $0.mentions) }, uniquingKeysWith: { a, _ in a })
                 // если тегнули — баннер показывается, даже когда чат отключён
@@ -51,6 +159,8 @@ final class ChatsModel: ObservableObject {
                 }
             }
             if result.chats != chats { chats = result.chats }
+            gotFresh = true
+            ThreadPrefetcher.shared.warm(result.chats, repo: repo)
             if result.unread != unread {
                 unread = result.unread
                 PushManager.shared.setBadge(result.unread)
@@ -103,7 +213,7 @@ struct DraftAttachment: Identifiable {
         switch source {
         case .media(let m):
             return ChatAttachment(kind: m.isVideo ? .video : .photo, width: m.width, height: m.height,
-                                  duration: m.duration ?? 0, localPreview: m.thumbnail)
+                                  duration: m.duration ?? 0, localPreview: m.thumbnail, gif: m.gif)
         case .file(_, let name, let mime, let size):
             return ChatAttachment(kind: .file, size: size, name: name, mime: mime)
         case .audio(_, let name, let title, let artist, let duration, let cover, let size):
@@ -126,6 +236,12 @@ struct DraftAttachment: Identifiable {
 @MainActor
 final class ChatModel: ObservableObject {
     @Published private(set) var peer: ChatPeer
+    /// Сообщения, которые прямо сейчас «рассыпаются» (эффект удаления); из списка уходят после анимации
+    @Published var dissolving: Set<String> = []
+    /// Видео в этих сообщениях на миг показывает превью-кадр — чтобы рассыпалась картинка, а не чёрный видеослой
+    @Published var freezing: Set<String> = []
+    /// Экран чата подсказывает, где сообщение стоит на экране: оттуда оно и рассыпается
+    var frameOf: ((String) -> CGRect?)?
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var pending: [ChatMessage] = []
     @Published private(set) var typing: String?
@@ -143,18 +259,84 @@ final class ChatModel: ObservableObject {
     @Published private(set) var realName: String?
     @Published private(set) var pinned: [ChatMessage] = []
     @Published private(set) var isPreview = false
+    @Published private(set) var ttl = 0            // таймер исчезающих сообщений (секунды), 0 — выкл
+    /// Переписка с ботом: его команды (меню «/» слева от скрепки, нажимаемые /команды в тексте)
+    @Published private(set) var botCommands: [BotCommand] = []
+    /// Бот: «Что умеет этот бот?», нажат ли «Старт», сколько пользователей
+    @Published private(set) var bot: BotInfo?
+    var isBot: Bool { bot != nil || !botCommands.isEmpty }
+    /// Клавиатура бота вместо обычной (кнопки с готовыми ответами)
+    @Published private(set) var botKeyboard: BotKeyboard?
+    /// Чат открыли по ссылке с параметром (?start=abc): «Старт» показывается снова и отправит «/start abc»
+    @Published var startParam: String?
+    /// «Старт» ещё не нажимали — вместо поля ввода большая кнопка «Старт»
+    var needsStart: Bool { (bot.map { !$0.started } ?? false) || (startParam != nil && isBot) }
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
+    /// Растёт, когда поверх предзагруженных сообщений разом приходит длинная история: экран переписки создаётся заново
+    /// и сразу открывается внизу — вместо кадров, где список стоял на месте, а контент под ним вырос
+    @Published private(set) var generation = 0
+    private var refreshedOnce = false
 
     let peerID: String
     let repo: MessengerRepository
     private var lastTypingPing = Date.distantPast
 
-    init(peer: ChatPeer, repo: MessengerRepository) {
+    /// Тема группы-форума, открытая в этом экране (nil — обычная переписка)
+    let topic: ForumTopicRef?
+
+    init(peer: ChatPeer, repo: MessengerRepository, topic: ForumTopicRef? = nil) {
+        self.topic = topic
         self.peer = peer
         self.peerID = peer.id
         self.repo = repo
+        // предзагруженные (или сохранённые на телефоне) сообщения показываем сразу — и без интернета;
+        // свежие приходят следом обычным обновлением
+        let saved: ChatThread?
+        if let topic {
+            saved = repo.cachedThread(peerID: peer.id, topic: topic.id)
+        } else {
+            saved = ThreadPrefetcher.shared.get(peer.id) ?? repo.cachedThread(peerID: peer.id)
+        }
+        if let t = saved {
+            messages = t.messages
+            self.peer = t.peer
+            lastSeen = t.lastSeen
+            canWrite = t.canWrite
+            group = t.group
+            isContact = t.isContact
+            realName = t.realName
+            pinned = t.pinned
+            isPreview = t.isPreview
+            firstUnreadID = t.firstUnread
+            botCommands = BotCommand.resolve(t.botCommands, peerID: peer.id)
+            bot = t.bot
+            botKeyboard = t.botKeyboard
+            loaded = true
+        }
+        // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
+        if botCommands.isEmpty { botCommands = BotCommand.resolve([], peerID: peer.id) }
+        startParam = BotStartLinks.take(username: self.peer.username)
+        Task { [weak self] in await self?.loadStickers() }          // наборы (и свои эмодзи для реакций) — с телефона, сразу
+        // сообщения, написанные здесь без связи (в том числе до перезапуска приложения), снова в списке «Отправляется…»
+        let queue = PersistentOutbox.shared
+        queue.chatOpened(peer.id)
+        for e in queue.entries(for: peer.id) where topic == nil {
+            pending.append(ChatMessage(key: e.key, id: e.key, mine: true, text: e.text, entities: e.entities,
+                                       createdAt: e.createdAt, editedAt: nil, read: false, reply: nil,
+                                       attachments: e.media.map(queue.placeholder), isPending: true, failed: true))
+            outbox.append((e.key, Outgoing(text: e.text, entities: e.entities, media: e.media.map(queue.outgoing),
+                                           replyID: e.replyID, silent: e.silent, cleanup: nil)))
+        }
+    }
+
+    deinit {
+        let id = peerID
+        Task { @MainActor in
+            PersistentOutbox.shared.chatClosed(id)
+            await PersistentOutbox.shared.flush()       // недоотправленное из закрытого чата уйдёт фоном
+        }
     }
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
@@ -164,7 +346,7 @@ final class ChatModel: ObservableObject {
 
     func refresh() async {
         do {
-            let thread = try await repo.thread(peerID: peerID, limit: historyLimit)
+            let thread = try await repo.thread(peerID: peerID, limit: historyLimit, peek: false, topic: topic?.id)
             // Тот же ключ у тех же сообщений: список не перерисовывается и не «прыгает»
             let keys = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0.key) })
             let fresh = thread.messages.map { m -> ChatMessage in
@@ -172,22 +354,52 @@ final class ChatModel: ObservableObject {
                 if let key = keys[m.id] { m.key = key }
                 return m
             }
-            if loaded, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count { Haptics.impact(.soft) }
-            if fresh != messages { messages = fresh }
-            peer = thread.peer
-            typing = thread.typing
-            lastSeen = thread.lastSeen
-            canWrite = thread.canWrite
-            group = thread.group
-            isContact = thread.isContact
-            realName = thread.realName
+            if refreshedOnce, fresh.filter({ !$0.mine }).count > messages.filter({ !$0.mine }).count, fresh.count - messages.count <= 3 { Haptics.impact(.soft) }       // только на настоящее новое сообщение, не на подгрузку истории при входе
+            if fresh != messages {
+                announceIncomingReaction(in: fresh)
+                if abs(fresh.count - messages.count) > 3 {
+                    // длинная история разом (10 предзагруженных → 100): без анимации появления — иначе строки «въезжали» с нулевой прозрачностью
+                    // и экран на миг оставался пустым, пока не пролистаешь
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { messages = fresh }
+                } else {
+                    messages = fresh
+                }
+            }
+            // опрос идёт раз в секунду: присваиваем только изменившееся — каждое присваивание @Published перерисовывает
+            // весь экран чата (и открытое меню сообщения), даже если значение то же самое
+            if peer != thread.peer { peer = thread.peer }
+            if typing != thread.typing { typing = thread.typing }
+            if lastSeen != thread.lastSeen { lastSeen = thread.lastSeen }
+            if canWrite != thread.canWrite { canWrite = thread.canWrite }
+            if group != thread.group { group = thread.group }
+            if isContact != thread.isContact { isContact = thread.isContact }
+            if realName != thread.realName { realName = thread.realName }
             if thread.pinned != pinned { pinned = thread.pinned }
-            isPreview = thread.isPreview
+            if isPreview != thread.isPreview { isPreview = thread.isPreview }
+            if ttl != thread.ttl { ttl = thread.ttl }
+            let cmds = BotCommand.resolve(thread.botCommands, peerID: peerID)
+            if botCommands != cmds { botCommands = cmds }
+            if bot != thread.bot {
+                // нажали «Старт», а сервер ещё не успел это учесть — кнопка не возвращается
+                var fresh = thread.bot
+                if bot?.started == true { fresh?.started = true }
+                bot = fresh
+            }
+            if botKeyboard != thread.botKeyboard { botKeyboard = thread.botKeyboard }
             if !loaded { firstUnreadID = thread.firstUnread }
-            loaded = true
+            if !loaded { loaded = true }
+            refreshedOnce = true
+            if !outbox.isEmpty, !NetworkState.shared.offline { Task { await retryQueued() } }
         } catch let e as APIError {
             if !loaded { error = e }
         } catch {}
+    }
+
+    /// Пришло только событие «печатает» — обновляем лишь его, не загружая заново всю переписку
+    func refreshTyping() async {
+        guard let t = try? await repo.typingStatus(peerID: peerID) else { return }
+        if typing != t { typing = t }
     }
 
     /// Вступление из режима просмотра (подписка на канал / заявка)
@@ -198,9 +410,68 @@ final class ChatModel: ObservableObject {
         await refresh()
     }
 
+    /// Личная переписка: копирование и пересылка запрещены
+    var isProtected: Bool { !peer.isGroup && peer.noForward }
+
+    /// Запретить / разрешить копирование и пересылку (личная переписка)
+    func setProtected(_ on: Bool) async {
+        do {
+            _ = try await repo.setChatProtected(peerID: peerID, on: on)
+            Haptics.notify(.success)
+            await refresh()
+        } catch let e as APIError { error = e } catch {}
+    }
+
+    /// Таймер исчезающих сообщений для этого чата (секунды; 0 — выключить)
+    func setTTL(_ seconds: Int) async {
+        let before = ttl
+        ttl = seconds                               // сразу в UI, без ожидания сети
+        do { ttl = try await repo.setChatTTL(peerID: peerID, seconds: seconds) }
+        catch let e as APIError { error = e; ttl = before }
+        catch { ttl = before }
+    }
+
     // MARK: Реакции и закреп
 
+    /// Собеседник поставил реакцию — над сообщением проигрывается тот же крупный эффект, что и у своей (как в Telegram).
+    /// Сравниваем с тем, что было: реакций «не моих» на сообщении стало больше
+    private func announceIncomingReaction(in fresh: [ChatMessage]) {
+        guard refreshedOnce, reactionFX == nil else { return }
+        let before = Dictionary(messages.map { ($0.id, $0.reactions) }, uniquingKeysWith: { a, _ in a })
+        for m in fresh.reversed() {
+            guard let old = before[m.id] else { continue }
+            for r in m.reactions {
+                let prev = old.first { $0.emoji == r.emoji }
+                let othersNow = r.count - (r.mine ? 1 : 0)
+                let othersBefore = (prev?.count ?? 0) - ((prev?.mine ?? false) ? 1 : 0)
+                if othersNow > othersBefore {
+                    reactionFX = ReactionFX(emoji: r.emoji, messageID: m.id, incoming: true)
+                    Haptics.impact(.light)
+                    return
+                }
+            }
+        }
+    }
+
     /// Одна реакция на человека: новая заменяет старую, такая же — снимает
+    /// Своя заметка к сообщению (пустая — удалить). Видна только тебе, хранится на сервере зашифрованной
+    func setNote(_ message: ChatMessage, text: String) {
+        guard !message.isPending, let i = messages.firstIndex(where: { $0.id == message.id }) else { return }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = messages[i].note
+        messages[i].note = clean.isEmpty ? nil : clean
+        let repo = repo, id = message.id
+        Task {
+            do {
+                let updated = try await repo.setNote(messageID: id, text: clean)
+                if let k = messages.firstIndex(where: { $0.id == id }) { messages[k].note = updated.note }
+            } catch {
+                if let k = messages.firstIndex(where: { $0.id == id }) { messages[k].note = old }
+                Haptics.notify(.error)
+            }
+        }
+    }
+
     func react(_ message: ChatMessage, emoji: String) {
         guard !message.isPending, let i = messages.firstIndex(where: { $0.id == message.id }) else { return }
         let current = messages[i].reactions.first(where: \.mine)?.emoji
@@ -248,14 +519,23 @@ final class ChatModel: ObservableObject {
 
     /// Больше сообщений — для вкладок «Медиа», «Файлы», «Музыка» в профиле чата
     func loadFullHistory() async -> [ChatMessage] {
-        (try? await repo.thread(peerID: peerID, limit: 300).messages) ?? messages
+        (try? await repo.thread(peerID: peerID, limit: 300, peek: false, topic: topic?.id).messages) ?? messages
     }
 
     func rename(to name: String) { peer.name = name }
 
     func loadStickers() async {
         guard packs.isEmpty else { return }
-        packs = (try? await repo.stickers()) ?? []
+        // сохранённые на телефоне — сразу (и без сети), свежий список с сервера — следом
+        if let saved = repo.savedStickers(), !saved.isEmpty { packs = saved }
+        if let fresh = try? await repo.stickers(), fresh != packs { packs = fresh }
+        CustomEmojiStore.shared.register(packs)          // свои эмодзи из наборов — сразу, без отдельного запроса
+    }
+
+    /// Добавили или убрали набор — панель стикеров обновляется
+    func reloadStickers() async {
+        if let fresh = try? await repo.stickers() { packs = fresh }
+        CustomEmojiStore.shared.register(packs)
     }
 
     /// Сообщаем собеседнику, что мы печатаем / записываем (раз в 3 секунды)
@@ -268,10 +548,23 @@ final class ChatModel: ObservableObject {
 
     // MARK: Отправка
 
+    /// То, что нужно, чтобы повторить отправку, когда появится сеть
+    private struct Outgoing {
+        var text: String
+        var entities: [TextEntity]
+        var media: [OutgoingMedia]
+        var replyID: String?
+        var silent: Bool
+        var cleanup: URL?
+    }
+    private var outbox: [(key: String, item: Outgoing)] = []
+    private var retrying = false
+
     /// Загружает вложения и отправляет сообщение. Сначала в списке появляется «ожидающее» сообщение.
+    /// Нет сети — сообщение остаётся «Отправляется…» с красным значком и уходит само, как только связь вернётся.
     @discardableResult
     func deliver(text: String, entities: [TextEntity], media: [OutgoingMedia] = [],
-                 placeholders: [ChatAttachment] = [], silent: Bool = false) async -> Bool {
+                 placeholders: [ChatAttachment] = [], silent: Bool = false, cleanup: URL? = nil) async -> Bool {
         guard !text.isEmpty || !media.isEmpty else { return false }
         let reply = replyTo
         replyTo = nil
@@ -280,23 +573,64 @@ final class ChatModel: ObservableObject {
                                 reply: reply.map { ReplyRef(id: $0.id, name: "", text: String($0.summary.prefix(140)), fromMe: $0.mine) },
                                 attachments: placeholders, isPending: true)
         pending.append(local)
+        let item = Outgoing(text: text, entities: entities, media: media, replyID: reply?.id, silent: silent, cleanup: cleanup)
+        return await attempt(local.key, item, restoreReply: reply)
+    }
+
+    private func setFailed(_ key: String, _ value: Bool) {
+        if let i = pending.firstIndex(where: { $0.key == key }), pending[i].failed != value { pending[i].failed = value }
+    }
+
+    /// true — сообщение принято (отправлено или ждёт сеть), false — отклонено сервером
+    private func attempt(_ key: String, _ item: Outgoing, restoreReply: ChatMessage?) async -> Bool {
         do {
             var uploaded: [OutgoingAttachment] = []
-            for item in media {
-                if case .sticker = item {} else { ping(Self.action(for: item)) }
-                uploaded.append(try await repo.upload(item))
+            for m in item.media {
+                switch m {
+                case .sticker, .location: break
+                default: ping(Self.action(for: m))
+                }
+                uploaded.append(try await repo.upload(m))
             }
-            var sent = try await repo.send(peerID: peerID, text: text, entities: entities,
-                                           attachments: uploaded, replyTo: reply?.id, silent: silent)
-            sent.key = local.key
-            pending.removeAll { $0.key == local.key }
+            var sent = try await repo.send(peerID: peerID, text: item.text, entities: item.entities,
+                                           attachments: uploaded, replyTo: item.replyID, silent: item.silent,
+                                           topic: topic?.id)
+            sent.key = key
+            pending.removeAll { $0.key == key }
+            outbox.removeAll { $0.key == key }
+            PersistentOutbox.shared.remove(key)
             if let i = messages.firstIndex(where: { $0.id == sent.id }) { messages[i] = sent } else { messages.append(sent) }
+            if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             return true
         } catch {
-            pending.removeAll { $0.key == local.key }
+            if let e = error as? APIError, e == .offline {
+                if !outbox.contains(where: { $0.key == key }) { outbox.append((key, item)) }
+                // сохраняем на диск: уйдёт и после выхода из чата или перезапуска приложения (темы форума — только в памяти)
+                if topic == nil { PersistentOutbox.shared.add(key: key, peerID: peerID, text: item.text, entities: item.entities,
+                                            replyID: item.replyID, silent: item.silent, media: item.media) }
+                setFailed(key, true)
+                return true
+            }
+            pending.removeAll { $0.key == key }
+            outbox.removeAll { $0.key == key }
+            PersistentOutbox.shared.remove(key)
+            if let url = item.cleanup { try? FileManager.default.removeItem(at: url) }
             if let e = error as? APIError { self.error = e }
-            replyTo = reply
+            replyTo = restoreReply
             return false
+        }
+    }
+
+    /// Связь вернулась — отправляем накопившееся по порядку
+    func retryQueued() async {
+        guard !retrying, !outbox.isEmpty else { return }
+        retrying = true
+        defer { retrying = false }
+        for entry in outbox {
+            guard pending.contains(where: { $0.key == entry.key }) else { outbox.removeAll { $0.key == entry.key }; continue }
+            setFailed(entry.key, false)
+            _ = await attempt(entry.key, entry.item, restoreReply: nil)
+            if outbox.contains(where: { $0.key == entry.key }) { break }          // опять нет сети — остальное позже
         }
     }
 
@@ -306,22 +640,116 @@ final class ChatModel: ObservableObject {
         case .circle: return "video"
         case .voice: return "voice"
         case .file, .audio: return "file"
-        case .sticker: return "typing"
+        case .sticker, .location: return "typing"
         }
     }
 
     func sendSticker(_ sticker: Sticker) {
         Task {
             await deliver(text: "", entities: [], media: [.sticker(sticker.id)],
-                          placeholders: [ChatAttachment(kind: .sticker, sticker: sticker.id)])
+                          placeholders: [ChatAttachment(kind: .sticker, mediaID: sticker.mediaID,
+                                                        mime: sticker.animated ? "video/mp4" : nil, sticker: sticker.id,
+                                                        stickerPack: sticker.packID)])
+        }
+    }
+
+    /// «Старт»: кнопка сразу уступает место полю ввода, боту уходит /start
+    func startBot() {
+        bot?.started = true
+        let param = startParam
+        startParam = nil
+        sendCommand(param.map { "/start " + $0 } ?? "/start")
+    }
+
+    /// Нажали кнопку под сообщением бота: ссылка открывается (после подтверждения), callback уходит боту
+    func pressBotButton(_ message: ChatMessage, _ button: BotButton, lang: AppLanguage) {
+        let s = Strings(lang: lang)
+        if let raw = button.url {
+            guard let url = SafeLink.url(raw) else { return }
+            AppAlert.confirm(s.t("Открыть ссылку?", "Open this link?"), url.absoluteString,
+                             ok: s.t("Открыть", "Open"), cancel: s.t("Отмена", "Cancel")) { UIApplication.shared.open(url) }
+            return
+        }
+        guard let data = button.callbackData else { return }
+        let key = message.id + "|" + data
+        guard BotButtonProgress.shared.loading != key else { return }
+        BotButtonProgress.shared.loading = key
+        Task {
+            defer { if BotButtonProgress.shared.loading == key { BotButtonProgress.shared.loading = nil } }
+            guard let answer = try? await repo.botCallback(messageID: message.id, data: data) else {
+                AppToast.show(s.t("Бот не ответил", "The bot didn't respond"), icon: "exclamationmark.circle")
+                return
+            }
+            if let text = answer.text, !text.isEmpty {
+                if answer.showAlert == true { AppAlert.info(peer.name, text) } else { AppToast.show(text) }
+            }
+            if let raw = answer.url, let url = SafeLink.url(raw) { UIApplication.shared.open(url) }
+            await refresh()                     // бот мог сразу изменить сообщение или кнопки
+        }
+    }
+
+    /// Статья: сначала загружаются файлы из блоков (по порядку), потом уходит само сообщение.
+    /// nil — отправлено; иначе — ошибка (редактор остаётся открытым, ничего не теряется)
+    func sendArticle(blocks: [ArticleBlock], buttons: [ArticleButton]) async -> APIError? {
+        do {
+            var out: [[String: Any]] = []
+            for b in blocks {
+                var d = b.json
+                if b.kind == .media {
+                    guard let local = b.local else { continue }
+                    switch local.source {
+                    case .prepared(let m): ping(m.isVideo ? "video" : "photo")
+                    case .file: ping("file")
+                    case .location: break
+                    }
+                    d["media"] = try await repo.upload(local.outgoing).json
+                }
+                out.append(d)
+            }
+            let reply = replyTo
+            var sent = try await repo.sendArticle(peerID: peerID, blocks: out, buttons: buttons.map(\.json),
+                                                  replyTo: reply?.id, topic: topic?.id)
+            replyTo = nil
+            sent.key = sent.id
+            if let i = messages.firstIndex(where: { $0.id == sent.id }) { messages[i] = sent } else { messages.append(sent) }
+            return nil
+        } catch let e as APIError {
+            return e
+        } catch {
+            return .offline
+        }
+    }
+
+    /// Нажали кнопку клавиатуры бота: уходит её текст; одноразовая клавиатура прячется сразу
+    func pressBotKey(_ text: String) {
+        if botKeyboard?.oneTime == true { botKeyboard = nil }
+        sendCommand(text)
+    }
+
+    /// Отправить боту команду («/newpack»): из меню «/» или нажатием на команду в тексте
+    func sendCommand(_ command: String) {
+        Task { _ = await deliver(text: command, entities: []) }
+    }
+
+    /// Геопозиция: точка (live = 0) или трансляция на live секунд. Трансляцию после отправки ведёт LiveLocationManager
+    func sendLocation(_ point: GeoPoint, live: Int) {
+        Task {
+            var shown = point
+            if live > 0 { shown.liveUntil = Date().addingTimeInterval(TimeInterval(live)) }
+            let before = Set(messages.map(\.id))
+            let ok = await deliver(text: "", entities: [], media: [.location(point, live: live)],
+                                   placeholders: [ChatAttachment(kind: .location, geo: shown)])
+            guard ok, live > 0,
+                  let sent = messages.last(where: { $0.mine && !before.contains($0.id) && $0.attachments.contains { $0.kind == .location } }),
+                  let until = sent.attachments.first(where: { $0.kind == .location })?.geo?.liveUntil else { return }
+            LiveLocationManager.shared.start(messageID: sent.id, chatID: peerID, until: until, repo: repo)
         }
     }
 
     func sendVoice(url: URL, duration: Double, waveform: [Int]) {
         Task {
             await deliver(text: "", entities: [], media: [.voice(url: url, duration: duration, waveform: waveform)],
-                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform)])
-            try? FileManager.default.removeItem(at: url)
+                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform)], cleanup: url)
         }
     }
 
@@ -329,8 +757,7 @@ final class ChatModel: ObservableObject {
         Task {
             await deliver(text: "", entities: [], media: [.circle(url: url, thumb: thumb, duration: duration)],
                           placeholders: [ChatAttachment(kind: .circle, width: 480, height: 480, duration: duration,
-                                                        localPreview: thumb)])
-            try? FileManager.default.removeItem(at: url)
+                                                        localPreview: thumb)], cleanup: url)
         }
     }
 
@@ -352,8 +779,57 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    func delete(_ message: ChatMessage, forEveryone: Bool) async {
-        messages.removeAll { $0.id == message.id }
+    /// Админ удаляет чужое сообщение и заодно: все сообщения автора, запрет писать, блокировка
+    func moderate(_ message: ChatMessage, options: ModerationOptions) async {
+        guard let author = message.sender?.id else { return await delete(message, forEveryone: true) }
+        let gone = Set(messages.filter { $0.id == message.id || (options.deleteAll && $0.sender?.id == author && $0.system == nil) }.map(\.id))
+        await dissolve(Array(gone))
+        withAnimation(Self.closeGap) {
+            messages.removeAll { gone.contains($0.id) }
+            dissolving.subtract(gone)
+            freezing.subtract(gone)
+        }
+        do { try await repo.moderate(groupID: peerID, userID: author, messageID: message.id, options: options) }
+        catch let e as APIError { error = e } catch {}
+        await refresh()
+    }
+
+    /// Сообщения рассыпаются на частицы (как в Telegram); строки сразу можно убирать из списка — пыль летит поверх
+    func dissolve(_ ids: [String]) async {
+        Haptics.impact(.soft)
+        let frames = ids.compactMap { frameOf?($0) }
+        freezing.formUnion(ids)
+        try? await Task.sleep(nanoseconds: 40_000_000)            // превью вместо видео успевает отрисоваться
+        await MessageDust.burst(frames) { dissolving.formUnion(ids) }
+        try? await Task.sleep(nanoseconds: 90_000_000)            // пыль уже отрывается — теперь соседи плавно съезжают
+    }
+
+    /// Как соседние сообщения съезжают на место удалённого
+    static let closeGap = Animation.spring(response: 0.45, dampingFraction: 0.9)
+
+    /// Несколько выбранных: рассыпаются и уходят из списка разом, запросы на сервер — уже после
+    func deleteMany(_ list: [ChatMessage]) async {
+        let ids = Set(list.map(\.id))
+        await dissolve(Array(ids))
+        withAnimation(Self.closeGap) {
+            messages.removeAll { ids.contains($0.id) }
+            dissolving.subtract(ids)
+            freezing.subtract(ids)
+        }
+        for m in list {
+            do { try await repo.delete(messageID: m.id, forEveryone: false) }
+            catch let e as APIError { error = e } catch {}
+        }
+        await refresh()
+    }
+
+    func delete(_ message: ChatMessage, forEveryone: Bool, animated: Bool = true) async {
+        if animated { await dissolve([message.id]) }
+        withAnimation(Self.closeGap) {
+            messages.removeAll { $0.id == message.id }
+            dissolving.remove(message.id)
+            freezing.remove(message.id)
+        }
         do { try await repo.delete(messageID: message.id, forEveryone: forEveryone) }
         catch let e as APIError { error = e } catch {}
         await refresh()
@@ -362,5 +838,17 @@ final class ChatModel: ObservableObject {
 
 struct ChatRoute: Identifiable, Hashable {
     let peer: ChatPeer
-    var id: String { peer.id }
+    /// Тема группы-форума: открывается переписка только этой темы
+    var topic: ForumTopicRef? = nil
+    var id: String { peer.id + (topic.map { "#" + $0.id } ?? "") }
+}
+
+
+/// Найденное сообщение в глобальном поиске по чатам
+struct MessageHit: Identifiable, Hashable {
+    let id: String
+    let peer: ChatPeer
+    let text: String
+    let mine: Bool
+    let date: Date
 }

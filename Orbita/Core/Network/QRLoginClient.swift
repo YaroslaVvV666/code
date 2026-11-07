@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 struct QRLoginSession: Equatable {
     let id: String

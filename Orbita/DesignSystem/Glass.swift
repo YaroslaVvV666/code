@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Liquid Glass
 // На iOS 26 и Xcode 26 используется системное стекло (glassEffect).

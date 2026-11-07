@@ -1,4 +1,6 @@
+import Combine
 import Foundation
+import CryptoKit
 
 enum APIError: Error, Equatable {
     case notConfigured
@@ -25,6 +27,8 @@ actor ServerAPI {
     }
 
     private let userID: String
+    /// Чей это клиент — для данных, которые хранятся на телефоне по аккаунту (например, стикеры)
+    nonisolated var accountID: String { userID }
     private var displayName: String
     private var token: String?
     private var tokenBase: String?
@@ -54,6 +58,23 @@ actor ServerAPI {
 
     // MARK: Запросы
 
+    // MARK: Условные запросы (ETag)
+
+    /// Последний ответ на каждый GET и его отпечаток: сервер отвечает 304 без тела, если ничего не изменилось —
+    /// переписка, лента и список чатов при обновлении не гоняются по сети заново, а сервер их не сжимает
+    private var etags: [String: (tag: String, body: Data)] = [:]
+    private var etagOrder: [String] = []
+    private static let etagLimit = 150
+
+    private func rememberETag(_ key: String, tag: String, body: Data) {
+        guard body.count < 3_000_000 else { return }
+        if etags[key] == nil {
+            etagOrder.append(key)
+            if etagOrder.count > Self.etagLimit { etags[etagOrder.removeFirst()] = nil }
+        }
+        etags[key] = (tag, body)
+    }
+
     func request(_ method: String, _ path: String, query: [String: String] = [:], body: Data? = nil) async throws -> Data {
         for attempt in 0..<2 {
             do {
@@ -61,6 +82,11 @@ actor ServerAPI {
                 if let body {
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = body
+                }
+                if method == "GET", let key = req.url?.absoluteString {
+                    req.cachePolicy = .reloadIgnoringLocalCacheData        // кэшируем сами, системный кэш не мешает
+                    if let cached = etags[key] { req.setValue(cached.tag, forHTTPHeaderField: "If-None-Match") }
+                    return try await perform(req, upload: nil, etagKey: key)
                 }
                 return try await perform(req, upload: nil)
             } catch APIError.unauthorized where attempt == 0 {
@@ -71,9 +97,18 @@ actor ServerAPI {
     }
 
     func upload(_ path: String, query: [String: String], payload: Payload, contentType: String) async throws -> Data {
+        // большие файлы — частями, с докачкой после обрыва связи (видео, документы)
+        if path == "/v1/media", let size = Self.payloadSize(payload), size >= Self.resumableThreshold {
+            return try await uploadResumable(query: query, payload: payload, size: size, contentType: contentType)
+        }
+        return try await uploadOnce(path, method: "POST", query: query, payload: payload, contentType: contentType)
+    }
+
+    private func uploadOnce(_ path: String, method: String, query: [String: String], payload: Payload,
+                            contentType: String) async throws -> Data {
         for attempt in 0..<2 {
             do {
-                var req = try await authorized("POST", path, query: query)
+                var req = try await authorized(method, path, query: query)
                 req.setValue(contentType, forHTTPHeaderField: "Content-Type")
                 req.timeoutInterval = 300
                 return try await perform(req, upload: payload)
@@ -82,6 +117,87 @@ actor ServerAPI {
             }
         }
         throw APIError.unauthorized
+    }
+
+    // MARK: Загрузка частями (докачка)
+
+    /// С какого размера файл грузится частями: обрыв связи посередине не начинает загрузку заново
+    static let resumableThreshold = 3 * 1024 * 1024
+    private static let chunkSize = 1024 * 1024
+
+    private static func payloadSize(_ payload: Payload) -> Int? {
+        switch payload {
+        case .data(let d): return d.count
+        case .file(let url): return (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? nil
+        }
+    }
+
+    /// Номер незаконченной загрузки этого файла — переживает перезапуск приложения
+    private static func resumeKey(_ payload: Payload, size: Int, query: [String: String]) -> String? {
+        guard case .file(let url) = payload else { return nil }
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+        let raw = "\(url.path)|\(size)|\(mtime)|\(query["kind"] ?? "")"
+        let digest = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "upload.resume." + digest.prefix(32)
+    }
+
+    private struct UploadState: Decodable { let id: String; let received: Int; let size: Int }
+
+    private func uploadResumable(query: [String: String], payload: Payload, size: Int, contentType: String) async throws -> Data {
+        let key = Self.resumeKey(payload, size: size, query: query)
+        let mime = contentType.split(separator: ";").first.map(String.init) ?? contentType
+        var uploadID: String?
+        var offset = 0
+        if let key, let saved = UserDefaults.standard.string(forKey: key),
+           let data = try? await request("GET", "/v1/uploads/\(saved)"),
+           let state = try? JSONDecoder().decode(UploadState.self, from: data), state.size == size {
+            uploadID = saved                       // продолжаем с того, что уже дошло до сервера
+            offset = state.received
+        }
+        if uploadID == nil {
+            var body: [String: Any] = ["kind": query["kind"] ?? "file", "mime": mime, "size": size]
+            for k in ["w", "h", "dur", "thumb"] { if let v = query[k] { body[k] = v } }
+            let data = try await request("POST", "/v1/uploads", body: Self.json(body))
+            let state = try JSONDecoder().decode(UploadState.self, from: data)
+            uploadID = state.id
+            if let key { UserDefaults.standard.set(state.id, forKey: key) }
+        }
+        guard let id = uploadID else { throw APIError.invalidResponse }
+
+        let handle: FileHandle? = { if case .file(let url) = payload { return try? FileHandle(forReadingFrom: url) } else { return nil } }()
+        defer { try? handle?.close() }
+        var failures = 0
+        while offset < size {
+            let length = min(Self.chunkSize, size - offset)
+            let chunk: Data
+            switch payload {
+            case .data(let d): chunk = d.subdata(in: offset..<(offset + length))
+            case .file:
+                guard let handle else { throw APIError.invalidResponse }
+                try handle.seek(toOffset: UInt64(offset))
+                chunk = handle.readData(ofLength: length)
+            }
+            do {
+                let data = try await uploadOnce("/v1/uploads/\(id)", method: "PUT", query: ["offset": String(offset)],
+                                                payload: .data(chunk), contentType: "application/octet-stream")
+                offset = (try? JSONDecoder().decode(UploadState.self, from: data))?.received ?? (offset + length)
+                failures = 0
+            } catch APIError.server(let status, _) where status == 409 {
+                // сервер уже получил другое количество байт — сверяемся и продолжаем оттуда
+                let data = try await request("GET", "/v1/uploads/\(id)")
+                offset = try JSONDecoder().decode(UploadState.self, from: data).received
+            } catch APIError.offline {
+                // связь пропала: ждём и пробуем снова с того же места (уже отправленное не теряется)
+                failures += 1
+                if failures > 8 { throw APIError.offline }
+                try? await Task.sleep(nanoseconds: UInt64(min(30, 1 << min(failures, 5))) * 1_000_000_000)
+                if let data = try? await request("GET", "/v1/uploads/\(id)"),
+                   let state = try? JSONDecoder().decode(UploadState.self, from: data) { offset = state.received }
+            }
+        }
+        let result = try await request("POST", "/v1/uploads/\(id)/finish", body: Self.json([:] as [String: Any]))
+        if let key { UserDefaults.standard.removeObject(forKey: key) }
+        return result
     }
 
     // MARK: Внутреннее
@@ -100,14 +216,45 @@ actor ServerAPI {
         req.httpMethod = method
         let token = try await ensureToken()
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(Self.deviceLanguage, forHTTPHeaderField: "X-Orbita-Lang")     // для статистики «Языки» в каналах
         return req
     }
+
+    /// Язык телефона: "ru", "en", "uk"…
+    static let deviceLanguage: String = Locale.preferredLanguages.first.map { String($0.prefix(2)).lowercased() } ?? "ru"
 
     static func tokenAccount(for userID: String) -> String { "orbita.token.\(userID)@\(ServerConfig.urlString)" }
     private var tokenAccount: String { Self.tokenAccount(for: userID) }
 
+    /// GET с запасом на диске: пока сети нет, отдаём последний удачный ответ — чаты и переписки видны до момента пропадания связи.
+    /// slot — отдельная ячейка для разных видов одного запроса (быстрый просмотр и полная загрузка), fallback — откуда брать, если своя пуста
+    func requestCached(_ path: String, query: [String: String] = [:], slot: String = "", fallback: [String] = []) async throws -> Data {
+        do {
+            let data = try await request("GET", path, query: query)
+            OfflineStore.save(data, user: userID, path: path, slot: slot)
+            await NetworkState.shared.set(offline: false)
+            return data
+        } catch let error as APIError where error == .offline {
+            await NetworkState.shared.set(offline: true)
+            for s in [slot] + fallback {
+                if let cached = OfflineStore.load(user: userID, path: path, slot: s) { return cached }
+            }
+            throw error
+        }
+    }
+
+    /// Последний сохранённый ответ без обращения к сети: экран показывается сразу (и без интернета),
+    /// а свежие данные приходят следом обычным запросом
+    nonisolated func cachedResponse(_ path: String, slot: String = "", fallback: [String] = []) -> Data? {
+        for s in [slot] + fallback {
+            if let data = OfflineStore.load(user: userID, path: path, slot: s) { return data }
+        }
+        return nil
+    }
+
     /// Выход: завершаем свой сеанс на сервере и забываем токен
     func signOut() async {
+        OfflineStore.wipe(user: userID)
         if let data = try? await request("GET", "/v1/sessions"),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = object["sessions"] as? [[String: Any]],
@@ -133,10 +280,37 @@ actor ServerAPI {
         // Несколько запросов стартуют одновременно (профиль, лента…): регистрируемся один раз,
         // остальные ждут тот же результат. Иначе второй запрос получил бы «user_exists» и выкинул из аккаунта.
         if let pendingRegistration { return try await pendingRegistration.value }
-        let task = Task { try await self.register() }
+        let task = Task { () throws -> String in
+            if let moved = try await self.adoptPreviousToken() { return moved }
+            return try await self.register()
+        }
         pendingRegistration = task
         defer { pendingRegistration = nil }
         return try await task.value
+    }
+
+    /// Тот же сервер, но у компьютера сменился адрес (другой IP в Wi-Fi): токен хранится под старым адресом.
+    /// Пробуем токены этого аккаунта, сохранённые для прежних адресов: принял сервер — переносим токен на новый адрес.
+    /// Без этого приложение пыталось зарегистрироваться заново, получало «такой пользователь уже есть» и выходило из аккаунта.
+    /// Другой сервер чужие токены не примет, там всё как раньше — обычная регистрация
+    private func adoptPreviousToken() async throws -> String? {
+        let others = Keychain.accounts(withPrefix: "orbita.token.\(userID)@").filter { $0 != tokenAccount }
+        for account in others {
+            guard let candidate = Keychain.string(account) else { continue }
+            var req = URLRequest(url: try makeURL("/v1/me", query: [:]), timeoutInterval: 20)
+            req.setValue("Bearer \(candidate)", forHTTPHeaderField: "Authorization")
+            do {
+                _ = try await perform(req, upload: nil)
+            } catch APIError.unauthorized {
+                continue                                        // токен от другого сервера или отозван
+            } catch APIError.server {
+                continue
+            }
+            Keychain.setString(candidate, account: tokenAccount)
+            token = candidate
+            return candidate
+        }
+        return nil
     }
 
     private func register() async throws -> String {
@@ -163,7 +337,7 @@ actor ServerAPI {
         return issued
     }
 
-    private func perform(_ req: URLRequest, upload: Payload?) async throws -> Data {
+    private func perform(_ req: URLRequest, upload: Payload?, etagKey: String? = nil) async throws -> Data {
         do {
             let result: (Data, URLResponse)
             switch upload {
@@ -174,11 +348,21 @@ actor ServerAPI {
             let (data, response) = result
             guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
             switch http.statusCode {
-            case 200..<300: return data
+            case 304:
+                // не изменилось — отдаём сохранённый ответ
+                if let etagKey, let cached = etags[etagKey] { return cached.body }
+                throw APIError.invalidResponse
+            case 200..<300:
+                if let etagKey, let tag = http.value(forHTTPHeaderField: "ETag") { rememberETag(etagKey, tag: tag, body: data) }
+                return data
             case 401:       throw APIError.unauthorized
             default:
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                throw APIError.server(status: http.statusCode, code: (object?["error"] as? String) ?? "error")
+                let code = (object?["error"] as? String) ?? "error"
+                if code == "content_blocked" {                 // нейросеть отклонила файл — крупная плашка «Я понял»
+                    await MainActor.run { ContentNotice.show() }
+                }
+                throw APIError.server(status: http.statusCode, code: code)
             }
         } catch let error as APIError {
             throw error
@@ -186,4 +370,64 @@ actor ServerAPI {
             throw APIError.offline
         }
     }
+}
+
+
+/// Копия последних ответов сервера для работы без сети. Лежит в Application Support (не в iCloud-копии), под защитой данных iOS
+enum OfflineStore {
+    private static let dir: URL = {
+        var base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("offline", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? base.setResourceValues(values)
+        return base
+    }()
+
+    private static func hash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func file(user: String, path: String, slot: String) -> URL {
+        dir.appendingPathComponent(hash(user) + "_" + hash(path + "#" + slot) + ".json")
+    }
+
+    static func save(_ data: Data, user: String, path: String, slot: String) {
+        try? data.write(to: file(user: user, path: path, slot: slot), options: [.atomic, .completeFileProtection])
+    }
+
+    static func load(user: String, path: String, slot: String) -> Data? {
+        guard let data = try? Data(contentsOf: file(user: user, path: path, slot: slot)) else { return nil }
+        return scrubTyping(data)
+    }
+
+    /// Выход из аккаунта: чужие переписки на диске не остаются
+    static func wipe(user: String) {
+        let prefix = hash(user) + "_"
+        for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        where url.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// «Печатает…» из старого ответа без сети показывалось бы вечно — убираем
+    private static func scrubTyping(_ data: Data) -> Data {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }
+        if object["typing"] != nil { object["typing"] = NSNull() }
+        if var chats = object["chats"] as? [[String: Any]] {
+            for i in chats.indices where chats[i]["typing"] != nil { chats[i]["typing"] = NSNull() }
+            object["chats"] = chats
+        }
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? data
+    }
+}
+
+
+/// Есть ли связь с сервером: по результату опросов списка чатов и переписок. От него зависят «Соединение…» и повторная отправка
+@MainActor
+final class NetworkState: ObservableObject {
+    static let shared = NetworkState()
+    @Published private(set) var offline = false
+    func set(offline value: Bool) { if offline != value { offline = value } }
 }

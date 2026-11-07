@@ -8,12 +8,15 @@ final class ChatListPrefs: ObservableObject {
     @Published private(set) var pinned: [String]
     /// Чаты, помеченные вручную как «новое» (кружок без числа)
     @Published private(set) var marked: Set<String>
+    /// Архивированные чаты (прячутся из списка на отдельную полку сверху)
+    @Published private(set) var archived: Set<String>
     /// Меняется при смене «без звука» у личных переписок — чтобы список перерисовался
     @Published private(set) var muteTick = 0
 
     init() {
         pinned = UserDefaults.standard.stringArray(forKey: "chats.pinned") ?? []
         marked = Set(UserDefaults.standard.stringArray(forKey: "chats.marked") ?? [])
+        archived = Set(UserDefaults.standard.stringArray(forKey: "chats.archived") ?? [])
     }
 
     func isMarked(_ id: String) -> Bool { marked.contains(id) }
@@ -41,6 +44,22 @@ final class ChatListPrefs: ObservableObject {
         if let i = pinned.firstIndex(of: id) { pinned.remove(at: i) }
         else if pinned.count < 5 { pinned.insert(id, at: 0) }
         UserDefaults.standard.set(pinned, forKey: "chats.pinned")
+    }
+
+    func isArchived(_ id: String) -> Bool { archived.contains(id) }
+
+    func toggleArchive(_ id: String) {
+        if archived.contains(id) {
+            archived.remove(id)
+        } else {
+            archived.insert(id)
+            // архивированный не может быть одновременно закреплён сверху
+            if let i = pinned.firstIndex(of: id) {
+                pinned.remove(at: i)
+                UserDefaults.standard.set(pinned, forKey: "chats.pinned")
+            }
+        }
+        UserDefaults.standard.set(Array(archived), forKey: "chats.archived")
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// «5 секунд назад», «минуту назад», «2 часа назад», «месяц назад», «год назад»
 func agoText(_ date: Date, lang: AppLanguage, now: Date = Date()) -> String {

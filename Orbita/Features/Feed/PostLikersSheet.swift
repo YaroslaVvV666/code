@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Кто лайкнул пост — видит только автор
 struct PostLikersSheet: View {

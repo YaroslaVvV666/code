@@ -1,0 +1,9 @@
+# Боевые зависимости сервера. Базовое — cryptography (шифрование полей и медиа).
+# Остальные подключаются лениво и нужны только если включён соответствующий бэкенд:
+#   psycopg2-binary — при DATABASE_URL=postgres://...
+#   redis           — при REDIS_URL=redis://...
+#   boto3           — при ORBITA_S3_BUCKET=...
+cryptography>=42
+psycopg2-binary>=2.9
+redis>=5
+boto3>=1.34

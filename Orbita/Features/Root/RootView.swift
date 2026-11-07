@@ -10,6 +10,7 @@ struct RootView: View {
     @StateObject private var flow = AuthFlow()
     @StateObject private var router = LinkRouter()
     @ObservedObject private var appLock = AppLock.shared
+    @ObservedObject private var soundHint = SoundHint.shared
     @Environment(\.scenePhase) private var scenePhase
 
     private var lang: AppLanguage { AppLanguage(rawValue: langRaw) ?? .ru }
@@ -48,10 +49,19 @@ struct RootView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .onTapGesture { flow.inbox = nil }
             }
+
+            if soundHint.shown {
+                SoundHintBanner()
+                    .padding(.top, 54)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .onTapGesture { soundHint.dismiss() }
+                    .zIndex(50)
+            }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: soundHint.shown)
         .overlay {
             if appLock.locked && appLock.enabled {
-                AppLockView(lock: appLock).transition(.opacity)
+                AppLockView(lock: appLock, onForgot: { flow.logout() }).transition(.opacity)
             } else if appLock.enabled && scenePhase != .active {
                 // в переключателе приложений содержимое не видно
                 SpaceBackground(isDark: isDark, showStars: true).ignoresSafeArea()
@@ -59,7 +69,9 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: appLock.locked)
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { appLock.lockNow() }
+            // автоблокировка: «сразу» или после N минут в фоне; вернулись — Face ID спрашивается сам
+            if phase == .background { appLock.didEnterBackground() }
+            if phase == .active { appLock.didBecomeActive() }
         }
         .edgeSwipeBack(enabled: showsTopBar && flow.canGoBack) { flow.back() }
         .animation(.easeInOut(duration: 0.3), value: flow.step)
@@ -87,8 +99,21 @@ struct RootView: View {
         .onOpenURL { router.handle($0) }
         // ссылки внутри текста (посты, чаты): свои открываем внутри приложения, остальные — как обычно
         .environment(\.openURL, OpenURLAction { url in
+            // нажали на своё эмодзи в тексте — его набор («Добавить N эмодзи»)
+            if url.scheme == "orbita-emoji" {
+                EmojiPackPresenter.shared.open(emojiID: url.lastPathComponent)
+                return .handled
+            }
+            // ссылка, текст которой не совпадает с адресом, — сначала окно с настоящим адресом
+            if let hidden = HiddenLink.parse(url) {
+                HiddenLink.confirm(hidden.url, shown: hidden.shown) { real in
+                    if DeepLink(url: real) != nil { router.handle(real) } else { UIApplication.shared.open(real) }
+                }
+                return .handled
+            }
             if DeepLink(url: url) != nil { router.handle(url); return .handled }
-            return .systemAction
+            // чужие ссылки — только http(s)/mailto/tel/sms: shortcuts://, file:// и прочие схемы касанием не запустить
+            return SafeLink.isAllowed(url) ? .systemAction : .discarded
         })
         .onReceive(NotificationCenter.default.publisher(for: .orbitaSessionRevoked)
             .receive(on: DispatchQueue.main)) { _ in
