@@ -357,10 +357,7 @@ struct ArticleComposer: View {
                 }
             }
             .foregroundStyle(active ? theme.accentColor : theme.textTertiary)
-            .frame(width: 28, height: 30)
-            .overlay(alignment: .bottom) {
-                if active { Capsule().fill(theme.accentColor).frame(width: 2, height: 10).offset(y: 12) }
-            }
+            .frame(width: 28, height: 30)          // активный блок — только цвет значка, без черточки снизу
         }
     }
 
