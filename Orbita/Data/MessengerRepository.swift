@@ -552,6 +552,10 @@ protocol MessengerRepository: Sendable {
     func stickerPack(id: String) async throws -> CustomStickerPack
     func setStickerPack(id: String, installed: Bool) async throws -> CustomStickerPack
     func createStickerPack(title: String) async throws -> CustomStickerPack
+    /// Свои эмодзи прямо из приложения: набор, исходник (картинка или Lottie .tgs/.json), само эмодзи
+    func createEmojiPack(title: String) async throws -> CustomStickerPack
+    func uploadEmojiSource(_ data: Data, lottie: Bool) async throws -> String
+    func addEmoji(packID: String, mediaID: String, emoji: String) async throws -> CustomEmojiInfo
     func addSticker(packID: String, mediaID: String, emoji: String) async throws
     func deleteSticker(packID: String, stickerID: String) async throws
     func deleteStickerPack(id: String) async throws
@@ -1360,6 +1364,29 @@ struct RemoteMessengerRepository: MessengerRepository {
         let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
         StickerVault.shared.keep(result.pack, account: api.accountID)
         return result
+    }
+
+    func createEmojiPack(title: String) async throws -> CustomStickerPack {
+        let dto = try decodeAPI(PackDTO.self, from: try await api.request("POST", "/v1/stickers/packs",
+                                                                           body: ServerAPI.json(["title": title, "kind": "emoji"])))
+        let result = CustomStickerPack(pack: dto.model, installed: dto.installed ?? true, mine: dto.mine ?? true)
+        StickerVault.shared.keep(result.pack, account: api.accountID)
+        return result
+    }
+
+    func uploadEmojiSource(_ data: Data, lottie: Bool) async throws -> String {
+        let query = lottie ? ["kind": "file"] : ["kind": "image", "w": "100", "h": "100"]
+        let mime = lottie ? "application/octet-stream" : "image/png"
+        let res = try await api.upload("/v1/media", query: query, payload: .data(data), contentType: mime)
+        return try decodeAPI(UploadedDTO.self, from: res).id
+    }
+
+    func addEmoji(packID: String, mediaID: String, emoji: String) async throws -> CustomEmojiInfo {
+        struct R: Decodable { let id: String; let emoji: String; let mediaId: String; let lottie: Bool; let pack: String? }
+        let data = try await api.request("POST", "/v1/stickers/packs/\(packID)/emoji",
+                                         body: ServerAPI.json(["media_id": mediaID, "emoji": emoji]))
+        let r = try decodeAPI(R.self, from: data)
+        return CustomEmojiInfo(id: r.id, emoji: r.emoji, mediaID: r.mediaId, lottie: r.lottie, pack: r.pack)
     }
 
     func addSticker(packID: String, mediaID: String, emoji: String) async throws {

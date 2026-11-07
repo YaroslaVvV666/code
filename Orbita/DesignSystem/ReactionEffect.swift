@@ -164,7 +164,7 @@ struct ReactionEffectLayer: View {
                     draw(item, t: t, anchor: a, in: ctx, emoji: emoji, spark: spark)
                 }
             } symbols: {
-                Text(fx.emoji).font(.system(size: Self.emojiBase)).tag(0)
+                ReactionEffectSymbol(emoji: fx.emoji, size: Self.emojiBase).tag(0)
                 Text("✨").font(.system(size: Self.sparkBase)).tag(1)
             }
         }
@@ -200,6 +200,22 @@ struct ReactionEffectLayer: View {
             c.rotate(by: .degrees(Double(item.dx) * 0.12 * Double(p)))
             c.scaleBy(x: scale, y: scale)
             c.draw(emoji, at: .zero, anchor: .center)
+        }
+    }
+}
+
+/// Частица эффекта реакции: обычный эмодзи или своё (картинкой)
+private struct ReactionEffectSymbol: View {
+    let emoji: String
+    let size: CGFloat
+
+    var body: some View {
+        if emoji.hasPrefix("u:"), let img = CustomEmojiStore.shared.still(emoji) {
+            Image(uiImage: img).resizable().scaledToFit().frame(width: size * 1.15, height: size * 1.15)
+        } else if emoji.hasPrefix("u:") {
+            Text(CustomEmojiStore.shared.info(emoji)?.emoji ?? "✨").font(.system(size: size))
+        } else {
+            Text(emoji).font(.system(size: size))
         }
     }
 }

@@ -129,6 +129,7 @@ enum RichTextCodec {
             let piece = NSMutableAttributedString(attachment: att)
             var attrs = result.attributes(at: range.location, effectiveRange: nil)
             attrs[.attachment] = att
+            if attrs[.link] == nil, let url = URL(string: "orbita-emoji://pack/" + id) { attrs[.link] = url }   // нажатие — набор
             piece.addAttributes(attrs, range: NSRange(location: 0, length: piece.length))
             result.replaceCharacters(in: range, with: piece)
         }

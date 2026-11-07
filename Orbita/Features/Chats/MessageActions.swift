@@ -345,6 +345,26 @@ struct MessageActionOverlay: View {
                 }
             }
             .padding(10)
+            // свои эмодзи из эмодзи-паков — тоже реакции
+            let custom = model.packs.filter(\.isEmoji).flatMap(\.stickers)
+            if !custom.isEmpty {
+                Text(s.t("Свои эмодзи", "Your emoji")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: cols), spacing: 6) {
+                    ForEach(custom) { e in
+                        Button {
+                            model.react(message, emoji: e.id)
+                            dismiss()
+                        } label: {
+                            CustomEmojiView(id: e.id, fallback: e.emoji, size: 34, animate: false)
+                                .frame(width: 44, height: 46)
+                                .background(current == e.id ? theme.accentColor.opacity(0.25) : Color.clear, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10).padding(.bottom, 10)
+            }
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(width: width, height: height)

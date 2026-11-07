@@ -102,6 +102,33 @@ def main():
     check("друг получает эмодзи по id (даже без набора)", len(found) == 1 and found[0]["lottie"] and found[0]["emoji"] == "😺", found)
     check("эмодзи нельзя отправить стикером", req("POST", "/v1/chats/%s/messages" % friend, t,
                                                   {"attachments": [{"type": "sticker", "sticker": emoji_id}]})[0] == 400)
+    # реакция своим эмодзи
+    mid = m.get("id")
+    s, b, _ = req("PUT", "/v1/messages/%s/reaction" % mid, tf, {"emoji": emoji_id})
+    reacts = (jbody(b) or {}).get("reactions", [])
+    check("реакция своим эмодзи", s == 200 and reacts and reacts[0]["emoji"] == emoji_id, (s, reacts))
+    check("несуществующее своё эмодзи в реакции — отказ",
+          req("PUT", "/v1/messages/%s/reaction" % mid, tf, {"emoji": "u:" + "1" * 32})[0] == 400)
+
+    # набор эмодзи прямо из приложения
+    s, b, _ = req("POST", "/v1/stickers/packs", tf, {"title": "Из приложения", "kind": "emoji"})
+    pack = jbody(b) or {}
+    check("создан набор эмодзи из приложения", s == 201 and pack.get("kind") == "emoji", b[:200])
+    pid = pack.get("id", "")
+    s, b, _ = req("POST", "/v1/media?kind=image&w=64&h=64", tf, raw=png(64), ctype="image/png")
+    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🔥"})
+    e1 = jbody(b) or {}
+    check("картинка → эмодзи (PNG 100×100)", s == 201 and not e1.get("lottie") and e1.get("emoji") == "🔥", (s, b[:200]))
+    s, b, _ = req("POST", "/v1/media?kind=file", tf, raw=gzip.compress(json.dumps(lottie()).encode()), ctype="application/octet-stream")
+    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🎉"})
+    check(".tgs → анимированное эмодзи", s == 201 and (jbody(b) or {}).get("lottie"), (s, b[:200]))
+    s, b, _ = req("POST", "/v1/media?kind=file", tf, raw=gzip.compress(json.dumps(lottie(9)).encode()), ctype="application/octet-stream")
+    s, b, _ = req("POST", "/v1/stickers/packs/%s/emoji" % pid, tf, {"media_id": (jbody(b) or {}).get("id"), "emoji": "🎉"})
+    check("длинная анимация — понятная ошибка", s == 400 and "не дольше" in (jbody(b) or {}).get("message", ""), b[:200])
+    check("в стикерпак эмодзи не добавить", req("POST", "/v1/stickers/packs/%s/stickers" % pid, tf,
+                                                 {"media_id": e1.get("media_id"), "emoji": "🔥"})[0] == 404)
+    s, b, _ = req("PUT", "/v1/stickers/packs/%s/install" % ep[0]["id"], tf)
+    check("друг добавил чужой набор эмодзи", s == 200 and (jbody(b) or {}).get("installed"))
     print("FAILS: %d" % fails)
     sys.exit(1 if fails else 0)
 

@@ -318,6 +318,7 @@ final class ChatModel: ObservableObject {
         // бот @stickers: меню «/» есть сразу, даже до первого ответа сервера
         if botCommands.isEmpty { botCommands = BotCommand.resolve([], peerID: peer.id) }
         startParam = BotStartLinks.take(username: self.peer.username)
+        Task { [weak self] in await self?.loadStickers() }          // наборы (и свои эмодзи для реакций) — с телефона, сразу
         // сообщения, написанные здесь без связи (в том числе до перезапуска приложения), снова в списке «Отправляется…»
         let queue = PersistentOutbox.shared
         queue.chatOpened(peer.id)

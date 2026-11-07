@@ -66,7 +66,13 @@ struct ReactionWhoOverlay: View {
             VStack(alignment: mine ? .trailing : .leading, spacing: 12) {
                 Spacer(minLength: 60)
                 if let emoji = route.emoji {
-                    LottieEmojiView(emoji: emoji, size: 120, loop: true)
+                    Group {
+                        if emoji.hasPrefix("u:") {
+                            CustomEmojiView(id: emoji, fallback: CustomEmojiStore.shared.info(emoji)?.emoji ?? "", size: 120, animate: true)
+                        } else {
+                            LottieEmojiView(emoji: emoji, size: 120, loop: true)
+                        }
+                    }
                         .frame(width: 140, height: 140)
                         .scaleEffect(appear ? (bounce ? 1.0 : 1.08) : 0.3, anchor: .bottom)
                         .rotationEffect(.degrees(appear ? 0 : -18))
@@ -99,7 +105,7 @@ struct ReactionWhoOverlay: View {
     /// Плашка как под сообщением: эмодзи и аватарки тех, кто её поставил
     private func chip(_ emoji: String) -> some View {
         HStack(spacing: 6) {
-            Text(emoji).font(.system(size: 22))
+            ReactionGlyph(emoji: emoji, size: 26)
             HStack(spacing: -10) {
                 ForEach(Array(entries.prefix(3).enumerated()), id: \.element.id) { i, e in
                     AvatarView(name: e.user.name, size: 30, avatarID: e.user.avatarID)
@@ -202,7 +208,7 @@ struct ReactionWhoOverlay: View {
                 }
                 Spacer(minLength: 8)
                 if route.emoji == nil, let emoji = e.emoji {
-                    Text(emoji).font(.system(size: 28))
+                    ReactionGlyph(emoji: emoji, size: 32, animate: true)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 8)

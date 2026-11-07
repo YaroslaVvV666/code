@@ -48,6 +48,7 @@ struct ChatInputBar: View {
     @State private var kbVisible = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
     @State private var showArticle = false              // редактор статьи (сообщение из блоков)
+    @State private var showEmojiCreator = false         // свои эмодзи прямо в приложении
     @State private var articleSeed = ""                 // текст из поля, с которым открывается редактор
     @State private var articleHint = false              // длинный текст: над «Отправить» значок «развернуть в статью»
     @Environment(\.theme) private var theme
@@ -165,6 +166,12 @@ struct ChatInputBar: View {
         }
         .sheet(isPresented: $showStickerCreator) {
             StickerCreatorSheet(onChanged: { Task { await model.loadStickers() } })
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationBackground(theme.sheet)
+        }
+        .sheet(isPresented: $showEmojiCreator) {
+            EmojiCreatorSheet { Task { await model.reloadStickers() } }
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationBackground(theme.sheet)
@@ -1029,7 +1036,8 @@ struct ChatInputBar: View {
                 onSent()
             },
             onCreateStickers: { showStickerCreator = true },
-            onCustomEmoji: { controller.insertCustomEmoji($0) })
+            onCustomEmoji: { controller.insertCustomEmoji($0) },
+            onCreateEmoji: { controller.unfocus(); showEmojiCreator = true })
             .environment(\.theme, theme)
             .environment(\.lang, lang)
         controller.setInputPanel(panel)

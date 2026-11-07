@@ -270,3 +270,7 @@ while True:
   `GET /v1/custom-emoji?ids=u:…,u:…` — сведения для отрисовки (даже если набора у человека нет).
 - Наборы эмодзи приходят в `GET /v1/stickers` с `"kind": "emoji"`, у анимированных — `"lottie": true`.
 Проверка: `python3 tests/test_custom_emoji.py`.
+
+Из приложения: `POST /v1/stickers/packs` с `"kind": "emoji"` — набор эмодзи; `POST /v1/stickers/packs/u:<id>/emoji`
+с `media_id` (загруженная картинка или Lottie-файл) и `emoji` — добавить эмодзи (ошибка — `bad_emoji` с понятным `message`).
+Реакции: `PUT /v1/messages/<id>/reaction` принимает и `"emoji": "u:<id>"` — своё эмодзи.

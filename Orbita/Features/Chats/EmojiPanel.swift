@@ -202,6 +202,8 @@ struct EmojiStickerPanel: View {
     var onCreateStickers: () -> Void = {}
     /// Свои эмодзи из эмодзи-паков: вставляются прямо в текст
     var onCustomEmoji: ((CustomEmojiRef) -> Void)? = nil
+    /// «Создать свои эмодзи» — экран создания в приложении (nil — переписка с ботом @stickers)
+    var onCreateEmoji: (() -> Void)? = nil
 
     private enum Tab: Hashable { case emoji, stickers }
 
@@ -303,7 +305,8 @@ struct EmojiStickerPanel: View {
                 Button {
                     // эмодзи делаются в боте @stickers: открываем переписку с ним (/newemojipack)
                     Haptics.impact(.light)
-                    if let url = URL(string: "orbita://u/stickers?start=emoji") { UIApplication.shared.open(url) }
+                    if let onCreateEmoji { onCreateEmoji() }
+                    else if let url = URL(string: "orbita://u/stickers?start=emoji") { UIApplication.shared.open(url) }
                 } label: {
                     Label(s.t("Создать свои эмодзи", "Create your emoji"), systemImage: "face.dashed")
                         .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor)

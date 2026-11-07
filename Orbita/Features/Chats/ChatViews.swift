@@ -824,6 +824,7 @@ struct ChatScreen: View {
     @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
     @State private var reactionWho: ReactionWhoRoute?      // кто поставил реакции (окно поверх чата)
+    @ObservedObject private var emojiPacks = EmojiPackPresenter.shared   // нажали на своё эмодзи — его набор
     @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
     @State private var noteTarget: ChatMessage?             // своя заметка к сообщению: добавить / изменить
     @State private var reportTarget: ChatMessage?           // пожаловаться на чужое сообщение
@@ -875,6 +876,12 @@ struct ChatScreen: View {
                             .transition(.opacity)
                             .zIndex(50)
                     }
+                }
+                .sheet(item: $emojiPacks.route) { r in
+                    EmojiPackSheet(packID: r.id) { Task { await model.reloadStickers() } }
+                        .environmentObject(session)
+                        .environment(\.theme, theme).environment(\.lang, lang)
+                        .presentationDetents([.medium, .large])
                 }
                 .environment(\.theme, theme)
         }

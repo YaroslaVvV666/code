@@ -4623,11 +4623,13 @@ def create_sticker_pack(req, me):
     uid = me["id"]
     if q1("SELECT COUNT(*) c FROM user_sticker_packs WHERE owner = ?", (uid,))["c"] >= MAX_USER_PACKS:
         raise ApiError(400, "too_many_packs")
-    title = " ".join(str(req.body_json().get("title", "")).split())[:64]
+    body = req.body_json()
+    title = " ".join(str(body.get("title", "")).split())[:64]
     if not title:
         raise ApiError(400, "bad_value")
+    kind = "emoji" if body.get("kind") == "emoji" else "sticker"       # набор стикеров или своих эмодзи
     pid, now = uuid.uuid4().hex, time.time()
-    run("INSERT INTO user_sticker_packs(id, owner, title, created_at) VALUES (?,?,?,?)", (pid, uid, title, now))
+    run("INSERT INTO user_sticker_packs(id, owner, title, created_at, kind) VALUES (?,?,?,?,?)", (pid, uid, title, now, kind))
     run("INSERT OR IGNORE INTO sticker_installs(user_id, pack_id, created_at) VALUES (?,?,?)", (uid, pid, now))
     req.send_json(201, user_pack_json(q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,)), uid))
 
@@ -4636,7 +4638,7 @@ def create_sticker_pack(req, me):
 def add_user_sticker(req, me, pid):
     """Добавить стикер (картинку или короткое видео) в свой набор. Файл уже загружен через /v1/media."""
     uid = me["id"]
-    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, uid)):
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ? AND kind != 'emoji'", (pid, uid)):
         raise ApiError(404, "not_found")
     if q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (pid,))["c"] >= MAX_PACK_STICKERS:
         raise ApiError(400, "pack_full")
@@ -4794,6 +4796,52 @@ def prepare_static_emoji(data):
         raise
     except Exception:
         raise ValueError("Не получается открыть картинку — пришлите PNG 100×100.")
+
+
+def emoji_from_media(uid, mid, lottie):
+    """Свой загруженный файл → файл эмодзи: Lottie проверяется и ужимается, картинка → PNG 100×100.
+    Возвращает id нового файла; ошибка — ValueError с понятным текстом"""
+    import io
+    if lottie:
+        data = read_media_bytes(mid, LOTTIE_MAX_RAW)
+        if data is None:
+            raise ValueError("Файл слишком большой.")
+        packed, info = parse_lottie(data)
+        return ingest_media(uid, "file", LOTTIE_MIME, {"w": str(info["w"]), "h": str(info["h"]),
+                                                       "dur": str(info["duration"])}, io.BytesIO(packed).read, len(packed))["id"]
+    data = read_media_bytes(mid, 20 * 1024 * 1024)
+    if data is None:
+        raise ValueError("Не получается прочитать картинку.")
+    png = prepare_static_emoji(data)
+    return ingest_media(uid, "image", "image/png", {"w": str(EMOJI_SIDE), "h": str(EMOJI_SIDE)},
+                        io.BytesIO(png).read, len(png))["id"]
+
+
+@route("POST", r"/v1/stickers/packs/u:([a-f0-9]+)/emoji")
+def add_user_emoji(req, me, pid):
+    """Добавить своё эмодзи в свой эмодзи-пак прямо из приложения: картинка (→ PNG 100×100) или Lottie (.tgs/.json)"""
+    uid = me["id"]
+    rate_limit("emoji:" + uid, 60, 60)
+    if not q1("SELECT 1 FROM user_sticker_packs WHERE id = ? AND owner = ? AND kind = 'emoji'", (pid, uid)):
+        raise ApiError(404, "not_found")
+    if q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (pid,))["c"] >= MAX_PACK_EMOJI:
+        raise ApiError(400, "pack_full")
+    body = req.body_json()
+    m = q1("SELECT * FROM media WHERE id = ? AND owner = ?", (str(body.get("media_id", "")), uid))
+    if not m:
+        raise ApiError(400, "media_not_found")
+    emoji = first_emoji(str(body.get("emoji", ""))) or "🙂"
+    try:
+        media = emoji_from_media(uid, m["id"], m["kind"] == "file")
+    except ValueError as e:
+        raise ApiError(400, "bad_emoji", message=str(e))
+    pos = q1("SELECT COALESCE(MAX(position), -1) + 1 p FROM user_stickers WHERE pack_id = ?", (pid,))["p"]
+    sid = uuid.uuid4().hex
+    run("INSERT INTO user_stickers(id, pack_id, media_id, emoji, position, created_at) VALUES (?,?,?,?,?,?)",
+        (sid, pid, media, emoji, pos, time.time()))
+    r = q1("SELECT s.*, m.mime, p.title FROM user_stickers s JOIN media m ON m.id = s.media_id "
+           "JOIN user_sticker_packs p ON p.id = s.pack_id WHERE s.id = ?", (sid,))
+    req.send_json(201, custom_emoji_json(r))
 
 
 def bot_emoji_media(uid, atts):
@@ -8463,7 +8511,10 @@ def set_reaction(req, me, mid):
     if not emoji:
         run("DELETE FROM reactions WHERE message_id = ? AND user_id = ?", (mid, me["id"]))
     else:
-        if len(emoji) > 12 or emoji.isascii():
+        if emoji.startswith("u:"):
+            if not custom_emoji_exists(emoji):              # своё эмодзи из эмодзи-пака
+                raise ApiError(400, "bad_value")
+        elif len(emoji) > 12 or emoji.isascii():
             raise ApiError(400, "bad_value")
         run("INSERT OR REPLACE INTO reactions(message_id, user_id, emoji, created_at) VALUES (?,?,?,?)",
             (mid, me["id"], emoji, time.time()))

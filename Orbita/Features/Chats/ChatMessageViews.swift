@@ -445,7 +445,12 @@ struct MessageRow: View {
             ForEach(message.reactions, id: \.emoji) { r in
                 Button { if interactive && !blocked { onReact?(r.emoji) } } label: {
                     HStack(spacing: 4) {
-                        AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
+                        if r.emoji.hasPrefix("u:") {
+                            CustomEmojiView(id: r.emoji, fallback: CustomEmojiStore.shared.info(r.emoji)?.emoji ?? "", size: 20,
+                                            animate: false)                          // своё эмодзи из эмодзи-пака
+                        } else {
+                            AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
+                        }
                         if r.count > 1 || !r.mine {
                             Text("\(r.count)").font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(r.mine ? Color.white : theme.text)
@@ -497,6 +502,7 @@ struct MessageRow: View {
                     ForEach(Array(big.enumerated()), id: \.offset) { _, id in
                         CustomEmojiView(id: id, fallback: CustomEmojiStore.shared.info(id)?.emoji ?? "",
                                         size: big.count == 1 ? 120 : 84, animate: true)
+                            .onTapGesture { if interactive && !blocked { EmojiPackPresenter.shared.open(emojiID: id) } }
                     }
                 }
                 MessageMeta(message: message, color: .white, onMedia: true)

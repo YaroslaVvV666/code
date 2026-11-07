@@ -97,6 +97,11 @@ struct RootView: View {
         .onOpenURL { router.handle($0) }
         // ссылки внутри текста (посты, чаты): свои открываем внутри приложения, остальные — как обычно
         .environment(\.openURL, OpenURLAction { url in
+            // нажали на своё эмодзи в тексте — его набор («Добавить N эмодзи»)
+            if url.scheme == "orbita-emoji" {
+                EmojiPackPresenter.shared.open(emojiID: url.lastPathComponent)
+                return .handled
+            }
             // ссылка, текст которой не совпадает с адресом, — сначала окно с настоящим адресом
             if let hidden = HiddenLink.parse(url) {
                 HiddenLink.confirm(hidden.url, shown: hidden.shown) { real in
