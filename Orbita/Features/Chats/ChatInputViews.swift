@@ -45,6 +45,8 @@ struct ChatInputBar: View {
 
     @EnvironmentObject private var session: AppSession
     @State private var showSchedule = false
+    @State private var showCapsule = false               // капсула времени: когда откроется
+    @State private var showSecretPlace = false           // секрет: где откроется
     @State private var showStickerCreator = false
     @State private var kbVisible = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
@@ -157,6 +159,16 @@ struct ChatInputBar: View {
                     editingDraft = nil
                 }, onCancel: { editingDraft = nil })
             }
+        }
+        .sheet(isPresented: $showCapsule) {
+            CapsuleSheet { date in sendLocked(OutgoingLock(openAt: date)) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showSecretPlace) {
+            SecretPlaceSheet { place, radius in sendLocked(OutgoingLock(place: place, radius: radius)) }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.large])
         }
         .sheet(isPresented: $showSchedule) {
             ScheduleSheet { date in showSchedule = false; scheduleSend(at: date) }
@@ -650,6 +662,15 @@ struct ChatInputBar: View {
                         Button { showSchedule = true } label: {
                             Label(s.t("Отправить позже", "Send later"), systemImage: "clock")
                         }
+                        if drafts.isEmpty {
+                            // текст уходит запечатанным: откроется в выбранный момент или в нужном месте
+                            Button { showCapsule = true } label: {
+                                Label(s.t("Капсула времени", "Time capsule"), systemImage: "hourglass")
+                            }
+                            Button { showSecretPlace = true } label: {
+                                Label(s.t("Секрет на месте", "Secret at a place"), systemImage: "mappin.and.ellipse")
+                            }
+                        }
                     }
                 }
                 .transition(.scale.combined(with: .opacity))
@@ -1039,6 +1060,21 @@ struct ChatInputBar: View {
     // MARK: Отправка
 
     /// Отложенная отправка: вложения загружаются сразу, сообщение уйдёт в выбранное время
+    /// Текст из поля уходит капсулой / секретом; не ушёл — возвращаем в поле
+    private func sendLocked(_ lock: OutgoingLock) {
+        let snap = controller.snapshot()
+        guard !snap.text.isEmpty else { return }
+        controller.clear()
+        Task { @MainActor in
+            if await model.sendLocked(text: snap.text, entities: snap.entities, lock: lock) {
+                ChatDraftStore.save(chat: model.peer.id, text: "", entities: [])
+                flash(lock.place != nil ? s.t("Секрет запечатан 📍", "Secret sealed 📍") : s.t("Капсула запечатана ⏳", "Capsule sealed ⏳"))
+            } else {
+                controller.load(text: snap.text, entities: snap.entities, color: UIColor(theme.text))
+            }
+        }
+    }
+
     private func scheduleSend(at date: Date) {
         let snap = controller.snapshot()
         guard preparing == 0, !snap.text.isEmpty || !drafts.isEmpty else { return }

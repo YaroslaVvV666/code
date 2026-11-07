@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import CoreLocation
 
 /// Предзагрузка переписок: последние сообщения чатов из списка подтягиваются заранее (без пометки «прочитано»),
 /// и чат открывается уже с готовыми сообщениями, а не с пустым экраном и загрузкой
@@ -758,6 +759,42 @@ final class ChatModel: ObservableObject {
                   let sent = messages.last(where: { $0.mine && !before.contains($0.id) && $0.attachments.contains { $0.kind == .location } }),
                   let until = sent.attachments.first(where: { $0.kind == .location })?.geo?.liveUntil else { return }
             LiveLocationManager.shared.start(messageID: sent.id, chatID: peerID, until: until, repo: repo)
+        }
+    }
+
+    /// Капсула времени / секрет на месте: текст уходит запечатанным
+    func sendLocked(text: String, entities: [TextEntity], lock: OutgoingLock) async -> Bool {
+        do {
+            var sent = try await repo.sendLocked(peerID: peerID, text: text, entities: entities, lock: lock)
+            sent.key = sent.id
+            if !messages.contains(where: { $0.id == sent.id }) { messages.append(sent) }
+            Haptics.notify(.success)
+            return true
+        } catch {
+            self.error = (error as? APIError) ?? .offline
+            return false
+        }
+    }
+
+    /// Получатель на месте: сервер проверяет расстояние и отдаёт содержимое секрета
+    func unlock(_ message: ChatMessage, at point: GeoPoint) async -> UnlockOutcome {
+        do {
+            var opened = try await repo.unlock(messageID: message.id, point: point)
+            opened.key = message.key
+            if let i = messages.firstIndex(where: { $0.id == message.id }) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { messages[i] = opened }
+            }
+            return .opened
+        } catch APIError.server(let status, _) where status == 403 {
+            // далеко: сколько осталось — считаем сами
+            if let place = message.lock?.place {
+                let d = CLLocation(latitude: point.lat, longitude: point.lon).distance(from: CLLocation(latitude: place.lat, longitude: place.lon))
+                return .tooFar(Int(d))
+            }
+            return .tooFar(0)
+        } catch {
+            return .failed(Strings(lang: AppLanguage(rawValue: UserDefaults.standard.string(forKey: "lang") ?? "") ?? .ru)
+                .api((error as? APIError) ?? .offline))
         }
     }
 

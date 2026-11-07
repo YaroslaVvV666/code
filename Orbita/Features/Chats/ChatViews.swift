@@ -895,6 +895,7 @@ struct ChatScreen: View {
                 .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
                                                          peer: model.peer.avatarID, peerName: model.peer.name))
                 .environment(\.chatLive, liveContext)
+                .environment(\.unlockSecret, { [model] message, point in await model.unlock(message, at: point) })
                 .fullScreenCover(isPresented: $showLiveMap) {
                     LiveMapScreen(context: liveContext)
                         .environment(\.theme, theme).environment(\.lang, lang)

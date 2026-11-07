@@ -526,6 +526,8 @@ struct MessageRow: View {
             }
         } else {
             bubble
+                // капсула / секрет только что открылись — сообщение проявляется из размытия с искрами (один раз)
+                .modifier(RevealOnOpen(id: message.id, active: message.lock?.open == true && !message.sealed && !mine))
         }
     }
 
@@ -597,6 +599,16 @@ struct MessageRow: View {
                     .frame(maxWidth: 230, alignment: .leading)
                 }
                 .buttonStyle(.plain)
+            }
+            // капсула времени / секрет на месте: у получателя — запечатано, у отправителя и после открытия — пометка
+            if let lock = message.lock {
+                if message.sealed {
+                    LockedBubble(message: message, lock: lock, mine: mine)
+                    HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
+                        .padding(.horizontal, 11).padding(.bottom, 6)
+                } else {
+                    LockBadge(lock: lock, mine: mine)
+                }
             }
             if let story = message.storyReply {
                 Button { if !blocked { Haptics.impact(.light); onOpenStory?(story.id) } } label: {

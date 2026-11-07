@@ -338,6 +338,34 @@ struct MessageInfo: Equatable {
     var sentAt: Date
 }
 
+/// Замок на сообщении: капсула времени (openAt) и/или секрет на расстоянии (place + radius)
+struct MessageLock: Equatable {
+    var openAt: Date?
+    var open: Bool
+    var timeOK: Bool
+    var placeOK: Bool
+    var place: GeoPoint?
+    var radius: Double
+    var isCapsule: Bool { openAt != nil }
+    var isPlace: Bool { place != nil }
+}
+
+/// Что запечатать при отправке
+struct OutgoingLock {
+    var openAt: Date? = nil
+    var place: GeoPoint? = nil
+    var radius: Double = 150
+    var json: [String: Any] {
+        var d: [String: Any] = [:]
+        if let openAt { d["open_at"] = openAt.timeIntervalSince1970 }
+        if let place {
+            d["lat"] = place.lat; d["lon"] = place.lon; d["radius"] = radius
+            if let t = place.title { d["title"] = t }
+        }
+        return d
+    }
+}
+
 struct ChatMessage: Identifiable, Equatable {
     var key: String                 // устойчивый идентификатор для списка (не меняется при отправке)
     var id: String
@@ -363,10 +391,13 @@ struct ChatMessage: Identifiable, Equatable {
     var commenters: [ChatPeer] = [] // пост канала: последние комментаторы (аватарки под постом)
     var markup: [[BotButton]] = []  // кнопки под сообщением (бота или кнопки-ссылки человека)
     var blocks: [ArticleBlock] = [] // статья: заголовки, текст, цитаты, таблицы, медиа — по порядку
+    var lock: MessageLock? = nil    // капсула времени / секрет на расстоянии
+    var sealed = false              // замок ещё закрыт: содержимое сервер не прислал
     var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
         if system != nil { return "" }
+        if sealed, let lock { return lock.place != nil && lock.timeOK ? "📍 Секрет" : "⏳ Капсула времени" }
         if poll != nil { return "📊 " + text }
         if text.hasPrefix("\u{200B}call:") { return "Звонок" }
         if !text.isEmpty { return text }
@@ -532,6 +563,10 @@ protocol MessengerRepository: Sendable {
     func send(peerID: String, text: String, entities: [TextEntity], attachments: [OutgoingAttachment],
               replyTo: String?, silent: Bool, topic: String?) async throws -> ChatMessage
     func upload(_ media: OutgoingMedia) async throws -> OutgoingAttachment
+    /// Капсула времени / секрет на расстоянии (текст)
+    func sendLocked(peerID: String, text: String, entities: [TextEntity], lock: OutgoingLock) async throws -> ChatMessage
+    /// Получатель на месте — открыть секрет. Далеко — ошибка с расстоянием
+    func unlock(messageID: String, point: GeoPoint) async throws -> ChatMessage
     // темы в группах
     func topics(groupID: String) async throws -> ForumTopicList
     func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
@@ -783,6 +818,23 @@ private struct MessageDTO: Decodable {
     let commenters: [PeerDTO]?
     let markup: [[BotButton]]?
     let blocks: [ArticleBlockDTO]?
+    let lock: LockDTO?
+    let sealed: Bool?
+
+    struct LockDTO: Decodable {
+        struct Place: Decodable { let lat: Double; let lon: Double; let title: String? }
+        let openAt: Double?
+        let open: Bool
+        let timeOk: Bool?
+        let placeOk: Bool?
+        let place: Place?
+        let radius: Double?
+        var model: MessageLock {
+            MessageLock(openAt: openAt.map { Date(timeIntervalSince1970: $0) }, open: open, timeOK: timeOk ?? true,
+                        placeOK: placeOk ?? true, place: place.map { GeoPoint(lat: $0.lat, lon: $0.lon, title: $0.title) },
+                        radius: radius ?? 150)
+        }
+    }
 
     var model: ChatMessage {
         ChatMessage(key: id, id: id, mine: mine, text: text, entities: entities,
@@ -795,7 +847,8 @@ private struct MessageDTO: Decodable {
                     system: system, poll: poll?.model,
                     storyReply: storyReply.map { StoryReplyRef(id: $0.id, mediaID: $0.mediaId, isVideo: $0.kind == "video") },
                     comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
-                    markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model))
+                    markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model),
+                    lock: lock?.model, sealed: sealed ?? false)
     }
 }
 
@@ -1233,6 +1286,19 @@ struct RemoteMessengerRepository: MessengerRepository {
         if !attachments.isEmpty { body["attachments"] = attachments.map(\.json) }
         if let replyTo { body["reply_to"] = replyTo }
         let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func sendLocked(peerID: String, text: String, entities: [TextEntity], lock: OutgoingLock) async throws -> ChatMessage {
+        let body: [String: Any] = ["text": text, "entities": Self.entityJSON(entities), "lock": lock.json]
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages", body: ServerAPI.json(body))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    func unlock(messageID: String, point: GeoPoint) async throws -> ChatMessage {
+        var body: [String: Any] = ["lat": point.lat, "lon": point.lon]
+        if let acc = point.accuracy { body["acc"] = acc }
+        let data = try await api.request("POST", "/v1/messages/\(messageID)/unlock", body: ServerAPI.json(body))
         return try decodeAPI(MessageDTO.self, from: data).model
     }
 
