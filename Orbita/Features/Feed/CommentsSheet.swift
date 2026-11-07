@@ -7,6 +7,9 @@ struct CommentsSheet: View {
     let post: Post
     @ObservedObject var vm: FeedViewModel
     var onClose: (() -> Void)? = nil              // задано — панель показана не системной шторкой, а поверх экрана
+    /// Задано — вместо поля ввода кнопка «Добавить комментарий…», которая открывает обычную панель
+    /// (комментарии сбоку повёрнутого видео: системная клавиатура не поворачивается вместе с ним)
+    var onWriteElsewhere: (() -> Void)? = nil
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.dismiss) private var dismiss
@@ -304,6 +307,7 @@ struct CommentsSheet: View {
     }
 
     private func startReply(to comment: Comment) {
+        if let onWriteElsewhere { onWriteElsewhere(); return }      // сбоку повёрнутого видео — отвечаем в обычной панели
         replyTarget = comment
         inputFocused = true
     }
@@ -333,6 +337,17 @@ struct CommentsSheet: View {
                     AvatarView(name: session.profile.profile?.name ?? "", size: 34,
                                avatarID: session.profile.profile?.avatarID)
 
+                    if let onWriteElsewhere {
+                        Button(action: onWriteElsewhere) {
+                            Text(s.writeComment)
+                                .foregroundStyle(theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .frame(height: 42)
+                                .background(theme.surface, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                     TextField(s.writeComment, text: $draft)
                         .focused($inputFocused)
                         .foregroundStyle(theme.text)
@@ -351,6 +366,7 @@ struct CommentsSheet: View {
                                         in: Circle())
                     }
                     .disabled(empty)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)

@@ -394,7 +394,7 @@ struct ReelsView: View {
     }
 
     private func rotatedSwipe(_ v: DragGesture.Value) {
-        guard rotatedNow, !sliding, abs(v.translation.width) > 50, abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
+        guard rotatedNow, !sliding, !landscapeMode.commentsOpen, abs(v.translation.width) > 50, abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
         let step = v.translation.width > 0 ? 1 : -1
         var i = currentIndex + step
         while model.reels.indices.contains(i), !isLandscape(model.reels[i]) { i += step }
@@ -528,6 +528,7 @@ struct ReelsView: View {
         .animation(.easeOut(duration: 0.2), value: model.notice)
         .onChange(of: model.reels.first?.id) { _, id in if current == nil || !model.reels.contains(where: { $0.id == current }) { current = id } }
         .onChange(of: current) { _, new in
+            if landscapeMode.commentsOpen { landscapeMode.commentsOpen = false }
             if fixed == nil, let new { model.resumeID = new }
             if fixed == nil, currentIndex >= model.reels.count - 3 { Task { await model.loadMore(session: session) } }
         }
@@ -808,6 +809,7 @@ struct ReelPage: View {
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
     @Environment(\.openURL) private var systemOpenURL
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @ObservedObject private var scrubBus = ReelScrubBus.shared
@@ -829,6 +831,13 @@ struct ReelPage: View {
     @State private var lsHideTask: Task<Void, Never>?
     /// «На весь экран» для горизонтального видео: режим общий — следующее горизонтальное видео тоже откроется повёрнутым
     private var forceFill: Bool { mode.on && landscape }
+    /// Комментарии рядом с видео (только у текущего ролика в повёрнутом режиме)
+    private var sideComments: Bool { forceFill && active && mode.commentsOpen }
+    /// Доля ширины (в повёрнутом положении), которую занимает видео
+    private var videoShare: CGFloat { sideComments ? 0.5 : 1 }
+    /// Скорость воспроизведения: в повёрнутом режиме — выбранная кнопкой, иначе обычная
+    private var rateNow: Float { forceFill ? mode.speed : 1 }
+    @State private var lsMenu = false
     @State private var repostSpin = 0
     @State private var repostsOpen = false
     // учёт просмотра
@@ -856,8 +865,10 @@ struct ReelPage: View {
             if forceFill {
                 // «На весь экран»: видео не растягивается, а поворачивается — 16:9 занимает весь экран в горизонтальном положении
                 GeometryReader { geo in
+                    // комментарии открыты — видео уменьшается и занимает левую половину, справа комментарии
                     videoLayer
-                        .frame(width: geo.size.height, height: geo.size.width)
+                        .frame(width: geo.size.height * videoShare, height: geo.size.width)
+                        .frame(width: geo.size.height, height: geo.size.width, alignment: .leading)
                         .rotationEffect(.degrees(90))
                         .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
@@ -894,11 +905,11 @@ struct ReelPage: View {
                     }, onPressingChanged: { pressing in
                         if !pressing, fast {
                             fast = false
-                            if !userPaused { player?.rate = 1 }
+                            if !userPaused { player?.rate = rateNow }
                         }
                     })
                 ForEach(hearts) { h in
-                    TapHeart(tilt: h.tilt).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
+                    TapHeart(tilt: h.tilt, size: forceFill ? 150 : 86).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
                 }
             }
 
@@ -930,6 +941,7 @@ struct ReelPage: View {
             }
 
             if forceFill { landscapeUI }
+            if sideComments { sideCommentsPanel.transition(.opacity) }
 
             Color.clear.frame(width: 0, height: 0)
                 .onChange(of: fast) { _, v in onHold(v) }
@@ -991,7 +1003,11 @@ struct ReelPage: View {
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: userPaused)
         .onChange(of: forceFill && active) { _, on in
-            if !on { lsControls = false }
+            if !on { lsControls = false; lsMenu = false }
+        }
+        .onChange(of: rateNow) { _, r in
+            player?.defaultRate = r
+            if playing, !userPaused, !fast { player?.rate = r }
         }
         .onChange(of: near) { _, now in now ? makePlayer() : destroyPlayer() }
         .onChange(of: active) { _, now in now ? activate() : deactivate() }
@@ -1049,6 +1065,7 @@ struct ReelPage: View {
         let item = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: item)
         p.actionAtItemEnd = .none
+        p.defaultRate = rateNow                       // play() сразу идёт с выбранной скоростью
         p.automaticallyWaitsToMinimizeStalling = true
         timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { t in
             let d = p.currentItem?.duration.seconds ?? 0
@@ -1087,6 +1104,7 @@ struct ReelPage: View {
         // продолжаем с той секунды, на которой остановились (ушли в поиск/на «Главную»/снимать видео)
         let resume = ReelResume.shared.time(post.id)
         player?.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player?.defaultRate = rateNow
         player?.play()
         startClock()
     }
@@ -1134,7 +1152,7 @@ struct ReelPage: View {
         lsHideTask = Task {
             try? await Task.sleep(nanoseconds: 3_500_000_000)
             guard !Task.isCancelled else { return }
-            await MainActor.run { if !scrubbing && !userPaused { withAnimation(.easeOut(duration: 0.25)) { lsControls = false } } }
+            await MainActor.run { if !scrubbing && !userPaused && !lsMenu { withAnimation(.easeOut(duration: 0.25)) { lsControls = false } } }
         }
     }
 
@@ -1189,6 +1207,18 @@ struct ReelPage: View {
                         }
                         .padding(.top, 6)
                         Spacer()
+                        // три точки: «Не интересно» и остальное
+                        Button {
+                            Haptics.impact(.light)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { lsMenu.toggle() }
+                            scheduleHide()
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
+                                .frame(width: 48, height: 48).contentShape(Rectangle())
+                                .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                        .buttonStyle(.plain)
                     }
                     Spacer()
                     VStack(spacing: 4) {
@@ -1202,7 +1232,7 @@ struct ReelPage: View {
                             lsAction(count: short(post.likes), action: { if !post.likedByMe { burst += 1; Haptics.impact(.medium) }; onLike() }) {
                                 StoryHeart(liked: post.likedByMe, burst: burst, size: 24, solidWhenIdle: true)
                             }
-                            lsAction(count: short(post.comments), action: { exitThen(onComments) }) { ReelCommentIcon().frame(width: 19, height: 18) }
+                            lsAction(count: short(post.comments), action: { toggleSideComments() }) { ReelCommentIcon().frame(width: 19, height: 18) }
                                 .opacity(post.commentsEnabled ? 1 : 0.4)
                                 .disabled(!post.commentsEnabled)
                             lsAction(count: short(bookmarks.count(for: post)), action: { bookmarks.toggle(post.id); Haptics.impact(.light) }) {
@@ -1210,6 +1240,20 @@ struct ReelPage: View {
                                     .frame(width: 14, height: 18)
                             }
                             Spacer()
+                            // скорость: 1× → 1.5× → 2× → 0.5× → 1×
+                            Button {
+                                Haptics.select()
+                                mode.nextSpeed()
+                                scheduleHide()
+                            } label: {
+                                Text(LandscapeMode.label(mode.speed))
+                                    .font(.system(size: 17, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(mode.speed == 1 ? .white : Color(red: 1, green: 0.8, blue: 0.2))
+                                    .frame(minWidth: 48, minHeight: 40).contentShape(Rectangle())
+                                    .shadow(color: .black.opacity(0.5), radius: 3)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(s.t("Скорость", "Speed"))
                         }
                     }
                 }
@@ -1223,12 +1267,82 @@ struct ReelPage: View {
                         .background(Color.black.opacity(0.35), in: Circle())
                 }
                 .buttonStyle(.plain)
+
+                if lsMenu { lsMenuCard.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(.top, 70).padding(.trailing, 24) }
             }
-            .frame(width: w, height: h)
+            .frame(width: w * videoShare, height: h)                  // кнопки — только поверх видео, не над комментариями
+            .frame(width: w, height: h, alignment: .leading)
             .opacity(lsControls ? 1 : 0)
             .allowsHitTesting(lsControls)
             .rotationEffect(.degrees(90))
             .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+    }
+
+    /// Меню трёх точек в повёрнутом режиме
+    private var lsMenuCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            lsMenuRow(s.t("Не интересно", "Not interested"), icon: "eye.slash") {
+                lsMenu = false
+                lsControls = false
+                onHide()
+            }
+            Rectangle().fill(.white.opacity(0.12)).frame(height: 0.5)
+            lsMenuRow(s.t("Поделиться", "Share"), icon: "arrowshape.turn.up.right") {
+                lsMenu = false
+                exitThen(onShare)
+            }
+        }
+        .frame(width: 230)
+        .background(Color(white: 0.13).opacity(0.96), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+        .transition(.scale(scale: 0.85, anchor: .topTrailing).combined(with: .opacity))
+    }
+
+    private func lsMenuRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.easeOut(duration: 0.18)) { action() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 17, weight: .semibold)).frame(width: 24)
+                Text(title).font(.system(size: 16, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).frame(height: 50)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Комментарии сбоку: видео уменьшается до левой половины, справа — список. Писать комментарий удобнее в обычном
+    /// положении (клавиатура системная и не поворачивается), поэтому поле ввода возвращает экран и открывает обычную панель
+    private func toggleSideComments() {
+        Haptics.impact(.light)
+        lsMenu = false
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.88)) {
+            mode.commentsOpen.toggle()
+            lsControls = false
+        }
+    }
+
+    private var sideCommentsPanel: some View {
+        GeometryReader { geo in
+            let w = geo.size.height, h = geo.size.width          // размеры в повёрнутой системе
+            CommentsSheet(post: post, vm: session.feed,
+                          onClose: { toggleSideComments() },
+                          onWriteElsewhere: {
+                              withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) { mode.commentsOpen = false }
+                              exitThen(onComments)
+                          })
+                .frame(width: w * 0.5, height: h)
+                .background(theme.sheet)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, bottomLeadingRadius: 20, style: .continuous))
+                .frame(width: w, height: h, alignment: .trailing)
+                .rotationEffect(.degrees(90))
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }
     }
 
@@ -1643,17 +1757,18 @@ private struct RailPress: ButtonStyle {
 
 struct TapHeart: View {
     let tilt: Double
+    var size: CGFloat = 86
     @State private var go = false
 
     var body: some View {
         Image(systemName: "heart.fill")
-            .font(.system(size: 86))
+            .font(.system(size: size))
             .foregroundStyle(LinearGradient(colors: [Color(red: 1, green: 0.4, blue: 0.55), Color(red: 1, green: 0.1, blue: 0.3)],
                                             startPoint: .top, endPoint: .bottom))
             .shadow(color: .red.opacity(0.5), radius: 14)
             .rotationEffect(.degrees(tilt))
             .scaleEffect(go ? 1.0 : 0.3)
-            .offset(y: go ? -50 : 0)
+            .offset(y: go ? -size * 0.58 : 0)
             .opacity(go ? 0 : 1)
             .onAppear {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) { go = false }
@@ -1770,5 +1885,23 @@ struct RepostRipple: View {
 /// Общий режим «на весь экран» для горизонтальных шортсов
 final class LandscapeMode: ObservableObject {
     static let shared = LandscapeMode()
-    @Published var on = false
+    /// Вышли из повёрнутого режима — комментарии сбоку закрываются, скорость возвращается к обычной
+    @Published var on = false { didSet { if !on { commentsOpen = false; speed = 1 } } }
+    /// Комментарии открыты рядом с видео (половина экрана — видео, половина — комментарии)
+    @Published var commentsOpen = false
+    /// Скорость в повёрнутом режиме: 1 → 1.5 → 2 → 0.5 → 1
+    @Published var speed: Float = 1
+
+    func nextSpeed() {
+        switch speed {
+        case 1: speed = 1.5
+        case 1.5: speed = 2
+        case 2: speed = 0.5
+        default: speed = 1
+        }
+    }
+
+    static func label(_ v: Float) -> String {
+        (v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)) + "×"
+    }
 }
