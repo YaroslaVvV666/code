@@ -1068,18 +1068,21 @@ struct UserPageView: View {
             ProfileInfoRow(label: s.birthday, value: s.birthdayText(profile.birthday) ?? ""),
         ].filter { !$0.value.isEmpty }
         // и в той же карточке — «Добавить в контакты» и «Заблокировать»
-        var actions: [ProfileInfoAction] = []
-        if !model.isMe {
-            actions.append(ProfileInfoAction(title: profile.isContact ? s.t("Изменить контакт", "Edit contact")
-                                                                      : s.t("Добавить в контакты", "Add to contacts")) { showContact = true })
-            if !profile.blockedByMe {
-                actions.append(ProfileInfoAction(title: s.blockUser, danger: true) { confirmBlock = true })
-            }
-        }
-
+        let actions = infoActions(profile)
         if !rows.isEmpty || !actions.isEmpty {
             ProfileInfoCard(rows: rows, actions: actions).padding(.horizontal, 16)
         }
+    }
+
+    /// Кнопки под данными профиля (собираются вне @ViewBuilder: там нельзя изменять массив)
+    private func infoActions(_ profile: UserProfile) -> [ProfileInfoAction] {
+        guard !model.isMe else { return [] }
+        var actions = [ProfileInfoAction(title: profile.isContact ? s.t("Изменить контакт", "Edit contact")
+                                                                  : s.t("Добавить в контакты", "Add to contacts")) { showContact = true }]
+        if !profile.blockedByMe {
+            actions.append(ProfileInfoAction(title: s.blockUser, danger: true) { confirmBlock = true })
+        }
+        return actions
     }
 
     // MARK: Фото
