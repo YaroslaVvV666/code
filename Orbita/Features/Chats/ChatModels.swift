@@ -528,11 +528,13 @@ final class ChatModel: ObservableObject {
         // сохранённые на телефоне — сразу (и без сети), свежий список с сервера — следом
         if let saved = repo.savedStickers(), !saved.isEmpty { packs = saved }
         if let fresh = try? await repo.stickers(), fresh != packs { packs = fresh }
+        CustomEmojiStore.shared.register(packs)          // свои эмодзи из наборов — сразу, без отдельного запроса
     }
 
     /// Добавили или убрали набор — панель стикеров обновляется
     func reloadStickers() async {
         if let fresh = try? await repo.stickers() { packs = fresh }
+        CustomEmojiStore.shared.register(packs)
     }
 
     /// Сообщаем собеседнику, что мы печатаем / записываем (раз в 3 секунды)

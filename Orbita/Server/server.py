@@ -80,7 +80,7 @@ MAX_BIO = 70
 MAX_AVATARS = 50
 QR_TTL = 120
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
-ENTITY_TYPES = {"bold", "italic", "underline", "strike", "mono", "quote", "link", "highlight"}
+ENTITY_TYPES = {"bold", "italic", "underline", "strike", "mono", "quote", "link", "highlight", "custom_emoji"}
 ALLOWED_MIME = {"image/jpeg", "image/png", "video/mp4", "video/quicktime",
                 "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/aac"}
 MAX_AUDIO_BYTES = 40 * 1024 * 1024
@@ -659,6 +659,7 @@ def clean_entities(raw, text):
     if not isinstance(raw, list):
         return out
     total = u16len(text)
+    custom = 0
     for e in raw[:300]:
         if not isinstance(e, dict):
             continue
@@ -671,6 +672,13 @@ def clean_entities(raw, text):
         if t == "link":
             url = str(e.get("url", ""))[:500]
             if not re.match(r"^https?://", url, re.I):
+                continue
+            item["url"] = url
+        if t == "custom_emoji":
+            # своё эмодзи: в тексте стоит обычный эмодзи-заменитель, а url — id картинки/анимации из эмодзи-пака
+            url = str(e.get("url", ""))
+            custom += 1
+            if custom > 100 or not custom_emoji_exists(url):
                 continue
             item["url"] = url
         out.append(item)
@@ -4549,7 +4557,8 @@ MAX_ANIMATED_SECONDS = 10
 
 def user_sticker_attachment(sid):
     """Свой стикер во вложении: id, набор, файл (картинка или видео) и эмодзи"""
-    st = q1("SELECT * FROM user_stickers WHERE id = ?", (sid,))
+    st = q1("SELECT s.* FROM user_stickers s JOIN user_sticker_packs p ON p.id = s.pack_id "
+            "WHERE s.id = ? AND p.kind != 'emoji'", (sid,))          # эмодзи из эмодзи-пака стикером не отправить
     if not st:
         return None
     m = q1("SELECT * FROM media WHERE id = ?", (st["media_id"],))
@@ -4564,9 +4573,12 @@ def user_pack_json(p, viewer):
     items = []
     for st in q("SELECT s.*, m.mime, m.width, m.height FROM user_stickers s JOIN media m ON m.id = s.media_id "
                 "WHERE s.pack_id = ? ORDER BY s.position", (p["id"],)):
+        lottie = st["mime"] == LOTTIE_MIME
         items.append({"id": "u:" + st["id"], "emoji": st["emoji"], "media_id": st["media_id"], "mime": st["mime"],
-                      "animated": (st["mime"] or "").startswith("video"), "width": st["width"] or 0, "height": st["height"] or 0})
+                      "animated": (st["mime"] or "").startswith("video") or lottie, "lottie": lottie,
+                      "width": st["width"] or 0, "height": st["height"] or 0})
     return {"id": "u:" + p["id"], "title": p["title"], "icon": items[0]["id"] if items else "", "stickers": items,
+            "kind": p["kind"] if "kind" in p.keys() else "sticker",
             "mine": p["owner"] == viewer, "custom": True,
             "installed": q1("SELECT 1 FROM sticker_installs WHERE user_id = ? AND pack_id = ?", (viewer, p["id"])) is not None}
 
@@ -4664,6 +4676,187 @@ def delete_user_pack(req, me, pid):
     req.send_json(200, {"ok": True})
 
 
+# ---------- свои эмодзи (как custom emoji в Telegram) ----------
+# Эмодзи-паки делаются в том же боте @stickers. Статичный эмодзи — картинка 100×100 (PNG с прозрачностью),
+# анимированный — Lottie: файл .tgs из Telegram (это сжатый gzip Lottie-JSON) или обычный .json из After Effects/LottieFiles.
+# На сервере анимация проверяется (размер, длительность, без картинок и скриптов внутри), ужимается
+# и хранится сжатой — наш аналог .tgs: до 64 КБ на эмодзи, в 5–10 раз меньше исходного JSON.
+
+ensure_column("user_sticker_packs", "kind", "kind TEXT NOT NULL DEFAULT 'sticker'")    # sticker | emoji
+LOTTIE_MIME = "application/x-orbita-lottie"          # gzip Lottie, как .tgs
+EMOJI_SIDE = 100
+EMOJI_MAX_SECONDS = 3.0
+LOTTIE_MAX_GZIP = 64 * 1024
+LOTTIE_MAX_RAW = 1024 * 1024
+MAX_PACK_EMOJI = 200
+CUSTOM_EMOJI_RE = re.compile(r"^u:[a-f0-9]{32}$")
+
+
+def read_media_bytes(mid, limit):
+    """Открытые байты своего файла (для проверки и перекодирования). None — нет файла или он больше limit"""
+    m = q1("SELECT * FROM media WHERE id = ?", (mid,))
+    if not m or m["size"] > limit or not STORE.exists(mid):
+        return None
+    out = bytearray()
+    with STORE.reader(mid, m["size"]) as f:
+        for piece in decrypt_range(media_key(m["owner"], mid), mid, f, m["size"], 0, m["size"] - 1):
+            out.extend(piece)
+    return bytes(out)
+
+
+def parse_lottie(data):
+    """Проверка Lottie (.tgs или .json) → (сжатые байты, сведения). Ошибка — ValueError с понятным текстом"""
+    import zlib
+    raw = data
+    if data[:2] == b"\x1f\x8b":
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            raw = d.decompress(data, LOTTIE_MAX_RAW + 1)
+        except zlib.error:
+            raise ValueError("Файл повреждён — не получается распаковать .tgs.")
+        if len(raw) > LOTTIE_MAX_RAW or d.unconsumed_tail:
+            raise ValueError("Анимация слишком большая (больше 1 МБ в распакованном виде).")
+    elif len(raw) > LOTTIE_MAX_RAW:
+        raise ValueError("Анимация слишком большая (больше 1 МБ).")
+    try:
+        j = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("Это не Lottie: нужен файл .tgs или .json с анимацией.")
+    if not isinstance(j, dict) or not all(k in j for k in ("fr", "ip", "op", "w", "h", "layers")):
+        raise ValueError("Это не Lottie: нужен файл .tgs или .json с анимацией.")
+    try:
+        fr, ip, op, w, h = float(j["fr"]), float(j["ip"]), float(j["op"]), int(j["w"]), int(j["h"])
+    except (TypeError, ValueError):
+        raise ValueError("В анимации неверные размеры или частота кадров.")
+    if not 1 <= fr <= 60:
+        raise ValueError("Частота кадров должна быть до 60.")
+    duration = (op - ip) / fr
+    if not 0 < duration <= EMOJI_MAX_SECONDS + 0.05:
+        raise ValueError("Анимация эмодзи — не дольше %d секунд." % EMOJI_MAX_SECONDS)
+    if w != h or not 100 <= w <= 512:
+        raise ValueError("Холст анимации должен быть квадратным: 100×100 (или до 512×512).")
+    if not isinstance(j["layers"], list) or not j["layers"] or len(j["layers"]) > 300:
+        raise ValueError("В анимации нет слоёв или их слишком много.")
+    # внутри — только векторная анимация: без вставленных картинок, шрифтов и выражений (скриптов)
+    stack, seen = [(j, 0)], 0
+    while stack:
+        node, depth = stack.pop()
+        seen += 1
+        if depth > 64 or seen > 400000:
+            raise ValueError("Анимация слишком сложная.")
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "x" and isinstance(v, str):
+                    raise ValueError("Выражения (скрипты) в анимации не поддерживаются.")
+                if k == "p" and isinstance(v, str) and ("data:" in v or "/" in v or "." in v):
+                    raise ValueError("Картинки внутри анимации не поддерживаются — только векторная графика.")
+                if k == "fonts" and v:
+                    raise ValueError("Шрифты внутри анимации не поддерживаются — переведите текст в кривые.")
+                if isinstance(v, (dict, list)):
+                    stack.append((v, depth + 1))
+        elif isinstance(node, list):
+            stack.extend((x, depth + 1) for x in node if isinstance(x, (dict, list)))
+    j.pop("meta", None)
+    minified = json.dumps(j, separators=(",", ":"), ensure_ascii=False).encode()
+    packed = gzip.compress(minified, 9, mtime=0)
+    if len(packed) > LOTTIE_MAX_GZIP:
+        raise ValueError("После сжатия анимация весит %d КБ — максимум 64 КБ. Упростите её." % (len(packed) // 1024))
+    return packed, {"w": w, "h": h, "duration": round(duration, 2), "fr": fr}
+
+
+def prepare_static_emoji(data):
+    """Картинка → PNG 100×100 с прозрачностью. Ошибка — ValueError"""
+    try:
+        from PIL import Image
+        import io
+    except Exception:
+        Image = None
+    if Image is None:
+        if data[:8] != b"\x89PNG\r\n\x1a\n" or _image_size(data) != (EMOJI_SIDE, EMOJI_SIDE):
+            raise ValueError("Нужна картинка PNG ровно 100×100 пикселей.")
+        return data
+    try:
+        Image.MAX_IMAGE_PIXELS = 4096 * 4096
+        with Image.open(io.BytesIO(data)) as im:
+            if im.format not in ("PNG", "JPEG", "WEBP"):
+                raise ValueError("Нужна картинка PNG (лучше с прозрачным фоном).")
+            im = im.convert("RGBA")
+            side = max(im.size)
+            if side < 32:
+                raise ValueError("Картинка слишком маленькая — нужна 100×100.")
+            square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            square.paste(im, ((side - im.size[0]) // 2, (side - im.size[1]) // 2))
+            square = square.resize((EMOJI_SIDE, EMOJI_SIDE), Image.LANCZOS)
+            out = io.BytesIO()
+            square.save(out, "PNG", optimize=True)
+            return out.getvalue()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("Не получается открыть картинку — пришлите PNG 100×100.")
+
+
+def bot_emoji_media(uid, atts):
+    """Файл для эмодзи из сообщения боту → (media_id, анимированный, ошибка)"""
+    import io
+    for a in atts:
+        t, mime, name = a.get("type"), str(a.get("mime") or ""), str(a.get("name") or "").lower()
+        mid = a.get("media_id")
+        if not mid:
+            continue
+        if t == "file" and (name.endswith(".tgs") or name.endswith(".json") or "json" in mime or "gzip" in mime
+                            or "tgsticker" in mime):
+            data = read_media_bytes(mid, LOTTIE_MAX_RAW)
+            if data is None:
+                return None, True, "Файл слишком большой."
+            try:
+                packed, info = parse_lottie(data)
+            except ValueError as e:
+                return None, True, str(e)
+            res = ingest_media(uid, "file", LOTTIE_MIME, {"w": str(info["w"]), "h": str(info["h"]),
+                                                           "dur": str(info["duration"])}, io.BytesIO(packed).read, len(packed))
+            return res["id"], True, None
+        if t == "photo" or (t == "file" and mime.startswith("image/")) or t == "sticker":
+            data = read_media_bytes(mid, 20 * 1024 * 1024)
+            if data is None:
+                return None, False, "Не получается прочитать картинку."
+            try:
+                png = prepare_static_emoji(data)
+            except ValueError as e:
+                return None, False, str(e)
+            res = ingest_media(uid, "image", "image/png", {"w": str(EMOJI_SIDE), "h": str(EMOJI_SIDE)},
+                               io.BytesIO(png).read, len(png))
+            return res["id"], False, None
+        if t in ("video", "circle"):
+            return None, False, ("Видео для эмодзи не подходит. Анимированный эмодзи — файл Lottie (.tgs или .json), "
+                                 "статичный — картинка PNG 100×100.")
+    return None, False, None
+
+
+def custom_emoji_json(row):
+    return {"id": "u:" + row["id"], "emoji": row["emoji"], "media_id": row["media_id"],
+            "lottie": row["mime"] == LOTTIE_MIME, "pack": "u:" + row["pack_id"], "pack_title": row["title"]}
+
+
+@route("GET", r"/v1/custom-emoji")
+def custom_emoji_lookup(req, me):
+    """Свои эмодзи по id (для отрисовки в сообщениях, даже если набора у человека нет)"""
+    ids = [x[2:] for x in str(req.query().get("ids", "")).split(",")[:100] if CUSTOM_EMOJI_RE.match(x)]
+    out = []
+    for i in ids:
+        r = q1("SELECT s.*, m.mime, p.title FROM user_stickers s JOIN media m ON m.id = s.media_id "
+               "JOIN user_sticker_packs p ON p.id = s.pack_id WHERE s.id = ? AND p.kind = 'emoji'", (i,))
+        if r:
+            out.append(custom_emoji_json(r))
+    req.send_json(200, {"emoji": out})
+
+
+def custom_emoji_exists(url):
+    return bool(CUSTOM_EMOJI_RE.match(url)) and q1(
+        "SELECT 1 FROM user_stickers s JOIN user_sticker_packs p ON p.id = s.pack_id WHERE s.id = ? AND p.kind = 'emoji'",
+        (url[2:],)) is not None
+
+
 def ensure_sticker_bot():
     """Бот @stickers: создаётся один раз при запуске сервера"""
     if q1("SELECT 1 FROM users WHERE id = ?", (STICKER_BOT_ID,)):
@@ -4687,6 +4880,9 @@ BOT_COMMANDS = {
         {"command": "newpack", "description": "Создать новый набор"},
         {"command": "addsticker", "description": "Добавить стикер в набор"},
         {"command": "delsticker", "description": "Удалить стикер из набора"},
+        {"command": "newemojipack", "description": "Создать набор эмодзи"},
+        {"command": "addemoji", "description": "Добавить эмодзи в набор"},
+        {"command": "delemoji", "description": "Удалить эмодзи из набора"},
         {"command": "mypacks", "description": "Мои наборы"},
         {"command": "delpack", "description": "Удалить набор"},
         {"command": "done", "description": "Закончить набор"},
@@ -4695,16 +4891,20 @@ BOT_COMMANDS = {
     ],
 }
 
-BOT_HELP = ("Привет! Я помогу сделать свои стикеры — обычные и анимированные.\n\n"
-            "/newpack — создать новый набор\n"
-            "/addsticker — добавить стикеры в набор\n"
-            "/delsticker — удалить стикер из набора\n"
-            "/mypacks — мои наборы\n"
-            "/delpack — удалить набор\n"
-            "/cancel — отменить\n\n"
-            "Все команды — в меню «/» слева от скрепки. "
-            "Стикер — это картинка (лучше PNG с прозрачным фоном — пришлите его как файл, чтобы фон не пропал) "
-            "или короткое видео до %d секунд: оно станет анимированным стикером, без звука." % MAX_ANIMATED_SECONDS)
+BOT_HELP = ("Привет! Я помогу сделать свои стикеры и эмодзи — обычные и анимированные.\n\n"
+            "Стикеры:\n"
+            "/newpack — создать набор стикеров\n"
+            "/addsticker — добавить стикеры\n"
+            "/delsticker — удалить стикер\n\n"
+            "Эмодзи (как в Telegram — прямо в тексте сообщений):\n"
+            "/newemojipack — создать набор эмодзи\n"
+            "/addemoji — добавить эмодзи\n"
+            "/delemoji — удалить эмодзи\n\n"
+            "/mypacks — ваши наборы, /delpack — удалить набор, /cancel — отменить.\n\n"
+            "Стикер — картинка (лучше PNG с прозрачным фоном) или видео до 10 секунд.\n"
+            "Статичный эмодзи — картинка PNG 100×100 с прозрачным фоном (больше — уменьшу сам).\n"
+            "Анимированный эмодзи — файл Lottie: .tgs (как в Telegram) или .json, до 3 секунд, холст 100×100 "
+            "(или до 512×512), до 64 КБ после сжатия. Отправляйте его файлом.")
 
 
 @route("GET", r"/v1/bots/([A-Za-z0-9_\-]+)/commands")
@@ -5814,8 +6014,8 @@ def botgod_handle(uid, text, atts):
     return botgod_say(uid, BOTGOD_HELP)
 
 
-def bot_say(uid, text, attachments=None):
-    deliver_dm(STICKER_BOT_ID, uid, text, [], attachments or [], None, silent=True)
+def bot_say(uid, text, attachments=None, entities=None):
+    deliver_dm(STICKER_BOT_ID, uid, text, entities or [], attachments or [], None, silent=True)
 
 
 def bot_sticker_media(atts):
@@ -5833,9 +6033,20 @@ def bot_sticker_media(atts):
     return None, None
 
 
-def bot_pack_list(uid):
-    return q("SELECT p.*, (SELECT COUNT(*) FROM user_stickers s WHERE s.pack_id = p.id) n FROM user_sticker_packs p "
+def bot_pack_list(uid, kind=None):
+    """Наборы человека: kind — "sticker" / "emoji" / все"""
+    rows = q("SELECT p.*, (SELECT COUNT(*) FROM user_stickers s WHERE s.pack_id = p.id) n FROM user_sticker_packs p "
              "WHERE p.owner = ? ORDER BY p.created_at", (uid,))
+    return [r for r in rows if kind is None or (r["kind"] or "sticker") == kind]
+
+
+def pack_label(p):
+    return ("😀 " if (p["kind"] or "sticker") == "emoji" else "") + p["title"]
+
+
+def emoji_preview(sid, fallback, lead=""):
+    """Текст с одним своим эмодзи (заменитель + сущность custom_emoji) — так бот показывает добавленный эмодзи"""
+    return lead + fallback, [{"type": "custom_emoji", "offset": u16len(lead), "length": u16len(fallback), "url": "u:" + sid}]
 
 
 def first_emoji(text):
@@ -5875,11 +6086,26 @@ def sticker_bot_handle(uid, text, atts):
             return bot_say(uid, "У вас уже %d наборов — это максимум. Удалите ненужный: /delpack." % MAX_USER_PACKS)
         BOT_STATE[uid] = {"step": "title"}
         return bot_say(uid, "Как назовём новый набор? Пришлите название.")
-    if cmd in ("/addsticker", "/delpack", "/mypacks"):
-        packs = bot_pack_list(uid)
+    if cmd == "/newemojipack":
+        if q1("SELECT COUNT(*) c FROM user_sticker_packs WHERE owner = ?", (uid,))["c"] >= MAX_USER_PACKS:
+            return bot_say(uid, "У вас уже %d наборов — это максимум. Удалите ненужный: /delpack." % MAX_USER_PACKS)
+        BOT_STATE[uid] = {"step": "emoji_title"}
+        return bot_say(uid, "Как назовём набор эмодзи? Пришлите название.")
+    if cmd in ("/addemoji", "/delemoji"):
+        packs = bot_pack_list(uid, "emoji")
         if not packs:
-            return bot_say(uid, "У вас пока нет наборов. Создайте первый: /newpack")
+            return bot_say(uid, "У вас пока нет наборов эмодзи. Создайте первый: /newemojipack")
         lines = "\n".join("%d. %s — %d шт." % (i + 1, p["title"], p["n"]) for i, p in enumerate(packs))
+        BOT_STATE[uid] = {"step": "choose_emoji_add" if cmd == "/addemoji" else "choose_emoji_del",
+                          "choices": [p["id"] for p in packs]}
+        return bot_say(uid, ("В какой набор добавить эмодзи? Пришлите номер:\n" if cmd == "/addemoji"
+                             else "Из какого набора удалить эмодзи? Пришлите номер:\n") + lines)
+    if cmd in ("/addsticker", "/delpack", "/mypacks"):
+        packs = bot_pack_list(uid, "sticker" if cmd == "/addsticker" else None)
+        if not packs:
+            return bot_say(uid, "У вас пока нет наборов. Создайте первый: /newpack" + ("" if cmd == "/addsticker"
+                                                                                  else " или /newemojipack"))
+        lines = "\n".join("%d. %s — %d шт." % (i + 1, pack_label(p), p["n"]) for i, p in enumerate(packs))
         if cmd == "/mypacks":
             BOT_STATE.pop(uid, None)
             return bot_say(uid, "Ваши наборы:\n" + lines + "\n\nОни уже есть у вас в панели стикеров. "
@@ -5899,6 +6125,9 @@ def sticker_bot_handle(uid, text, atts):
             return bot_say(uid, BOT_HELP)
         p = q1("SELECT * FROM user_sticker_packs WHERE id = ?", (pid,))
         n = q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (pid,))["c"]
+        if p and (p["kind"] or "sticker") == "emoji":
+            return bot_say(uid, "Набор эмодзи «%s» готов: %d шт. Он уже в вашей панели эмодзи — вставляйте их прямо "
+                                "в текст сообщений." % (p["title"], n))
         return bot_say(uid, "Набор «%s» готов: %d шт. Он уже в вашей панели стикеров. "
                             "Отправьте другу любой стикер из него — друг сможет добавить весь набор себе." % (p["title"] if p else "", n))
     if cmd:
@@ -5915,6 +6144,75 @@ def sticker_bot_handle(uid, text, atts):
         BOT_STATE[uid] = {"step": "sticker", "pack": pid}
         return bot_say(uid, "Набор «%s» создан! Теперь пришлите первый стикер: картинку или видео до %d секунд."
                        % (title, MAX_ANIMATED_SECONDS))
+    if step == "emoji_title":
+        title = " ".join(text.split())[:64]
+        if not title:
+            return bot_say(uid, "Пришлите название набора текстом.")
+        pid, now = uuid.uuid4().hex, time.time()
+        run("INSERT INTO user_sticker_packs(id, owner, title, created_at, kind) VALUES (?,?,?,?,?)", (pid, uid, title, now, "emoji"))
+        run("INSERT OR IGNORE INTO sticker_installs(user_id, pack_id, created_at) VALUES (?,?,?)", (uid, pid, now))
+        BOT_STATE[uid] = {"step": "emoji_item", "pack": pid}
+        return bot_say(uid, "Набор эмодзи «%s» создан! Пришлите первый эмодзи:\n"
+                            "• анимированный — файл Lottie .tgs или .json (до 3 секунд, до 64 КБ);\n"
+                            "• статичный — картинку PNG 100×100 с прозрачным фоном." % title)
+    if step in ("choose_emoji_add", "choose_emoji_del"):
+        try:
+            pid = st["choices"][int(text) - 1]
+        except (ValueError, IndexError):
+            return bot_say(uid, "Пришлите номер набора из списка или /cancel.")
+        p = q1("SELECT * FROM user_sticker_packs WHERE id = ? AND owner = ?", (pid, uid))
+        if not p:
+            BOT_STATE.pop(uid, None)
+            return bot_say(uid, "Этого набора больше нет.")
+        if step == "choose_emoji_add":
+            BOT_STATE[uid] = {"step": "emoji_item", "pack": pid}
+            return bot_say(uid, "Присылайте эмодзи для «%s»: файл .tgs/.json или PNG 100×100. Закончить — /done." % p["title"])
+        items = q("SELECT * FROM user_stickers WHERE pack_id = ? ORDER BY position", (pid,))
+        if not items:
+            BOT_STATE.pop(uid, None)
+            return bot_say(uid, "В наборе «%s» пока нет эмодзи." % p["title"])
+        BOT_STATE[uid] = {"step": "emoji_delete", "pack": pid, "choices": [x["id"] for x in items]}
+        lead = "Какой эмодзи удалить? Пришлите номер:\n"
+        out, ents = lead, []
+        for k, x in enumerate(items[:60]):
+            num = "%d. " % (k + 1)
+            ents.append({"type": "custom_emoji", "offset": u16len(out + num), "length": u16len(x["emoji"]), "url": "u:" + x["id"]})
+            out += num + x["emoji"] + "\n"
+        return bot_say(uid, out.rstrip(), entities=ents)
+    if step == "emoji_delete":
+        try:
+            sid = st["choices"][int(text) - 1]
+        except (ValueError, IndexError):
+            return bot_say(uid, "Пришлите номер эмодзи из списка или /cancel.")
+        run("DELETE FROM user_stickers WHERE id = ? AND pack_id = ?", (sid, st["pack"]))
+        BOT_STATE.pop(uid, None)
+        return bot_say(uid, "Эмодзи удалён. Ещё один — /delemoji.")
+    if step == "emoji_item":
+        if q1("SELECT COUNT(*) c FROM user_stickers WHERE pack_id = ?", (st["pack"],))["c"] >= MAX_PACK_EMOJI:
+            return bot_say(uid, "В наборе уже %d эмодзи — это максимум. /done — закончить." % MAX_PACK_EMOJI)
+        media, animated, error = bot_emoji_media(uid, atts)
+        if error:
+            return bot_say(uid, error)
+        if not media:
+            return bot_say(uid, "Пришлите файл Lottie (.tgs или .json) для анимированного эмодзи или картинку PNG 100×100 "
+                                "для статичного. Закончить — /done.")
+        BOT_STATE[uid] = {"step": "emoji_char", "pack": st["pack"], "media": media}
+        return bot_say(uid, ("Анимация принята! " if animated else "Картинка принята! ") +
+                       "Какой обычный эмодзи ей соответствует? Пришлите один эмодзи — он будет виден там, "
+                       "где свои эмодзи не поддерживаются, и по нему эмодзи найдётся в поиске.")
+    if step == "emoji_char":
+        emoji = first_emoji(text)
+        if not emoji:
+            return bot_say(uid, "Пришлите один эмодзи — например 😂 или ❤️.")
+        pid = st["pack"]
+        pos = q1("SELECT COALESCE(MAX(position), -1) + 1 p FROM user_stickers WHERE pack_id = ?", (pid,))["p"]
+        sid = uuid.uuid4().hex
+        run("INSERT INTO user_stickers(id, pack_id, media_id, emoji, position, created_at) VALUES (?,?,?,?,?,?)",
+            (sid, pid, st["media"], emoji, pos, time.time()))
+        BOT_STATE[uid] = {"step": "emoji_item", "pack": pid}
+        text_out, ents = emoji_preview(sid, emoji, "Готово: ")
+        bot_say(uid, text_out, entities=ents)
+        return bot_say(uid, "Эмодзи добавлен (%d шт. в наборе). Присылайте следующий или /done, чтобы закончить." % (pos + 1))
     if step in ("choose_add", "choose_del"):
         try:
             pid = st["choices"][int(text) - 1]

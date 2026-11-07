@@ -142,7 +142,7 @@ struct StickerCreatorSheet: View {
     private func load() async {
         loading = true
         let all = (try? await repo.stickers()) ?? []
-        packs = all.filter { $0.mine }
+        packs = all.filter { $0.mine && !$0.isEmoji }        // эмодзи-паки делаются в боте @stickers
         loading = false
     }
 

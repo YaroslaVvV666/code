@@ -146,7 +146,8 @@ struct ComposerView: View {
             EmojiStickerPanel(packs: packs,
                               onEmoji: { controller.insert($0) },
                               onBackspace: { controller.backspace() },
-                              onSticker: { addSticker($0) })
+                              onSticker: { addSticker($0) },
+                              onCustomEmoji: { controller.insertCustomEmoji($0) })
                 .environment(\.theme, theme)
                 .environment(\.lang, lang)
                 .presentationDetents([.height(320)])
@@ -321,7 +322,7 @@ struct ComposerView: View {
     private func publish() {
         Task { @MainActor in
             if let post = editing {
-                guard let saved = await vm.saveEdit(post, text: controller.plainText, entities: controller.entities,
+                guard let saved = await vm.saveEdit(post, text: controller.sendText, entities: controller.entities,
                                                     kept: kept, added: picked) else {
                     Haptics.notify(.error)
                     return
@@ -334,7 +335,7 @@ struct ComposerView: View {
             }
             var opts = options
             opts.wallOnly = wallOnly
-            let ok = await vm.publish(text: controller.plainText, entities: controller.entities, media: picked, options: opts)
+            let ok = await vm.publish(text: controller.sendText, entities: controller.entities, media: picked, options: opts)
             if ok {
                 if let post = vm.lastPublished { onSaved?(post) }
                 for media in picked {

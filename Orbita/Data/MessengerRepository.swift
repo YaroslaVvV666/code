@@ -405,8 +405,9 @@ struct Sticker: Identifiable, Equatable, Hashable {
     let id: String                  // "пак/имя" — встроенный, "u:<id>" — свой (созданный через бота @stickers)
     let emoji: String
     var mediaID: String? = nil      // свой стикер: файл на сервере (картинка или видео)
-    var animated = false            // свой анимированный: видео без звука по кругу
+    var animated = false            // свой анимированный: видео без звука по кругу (или Lottie у эмодзи)
     var packID: String? = nil
+    var lottie = false              // своё эмодзи: анимация Lottie (сжатая, как .tgs)
     var url: URL? { ServerConfig.baseURL.flatMap { URL(string: $0.absoluteString + "/stickers/" + id + ".png") } }
 }
 
@@ -430,6 +431,8 @@ struct StickerPack: Identifiable, Equatable {
     let icon: String
     let stickers: [Sticker]
     var mine = false            // мой набор (можно редактировать/удалять)
+    var kind = "sticker"        // "sticker" — стикеры, "emoji" — свои эмодзи (вставляются прямо в текст)
+    var isEmoji: Bool { kind == "emoji" }
 }
 
 /// Что загрузить на сервер перед отправкой
@@ -1059,15 +1062,16 @@ private struct ThreadDTO: Decodable {
 private struct PinnedDTO: Decodable { let pinned: [MessageDTO] }
 
 private struct StickerDTO: Decodable {
-    let id: String; let emoji: String; let mediaId: String?; let animated: Bool?
+    let id: String; let emoji: String; let mediaId: String?; let animated: Bool?; let lottie: Bool?
 }
 private struct PackDTO: Decodable {
     let id: String; let title: String; let icon: String; let stickers: [StickerDTO]
-    let mine: Bool?; let installed: Bool?
+    let mine: Bool?; let installed: Bool?; let kind: String?
     var model: StickerPack {
         StickerPack(id: id, title: title, icon: icon,
-                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false, packID: id) },
-                    mine: mine ?? false)
+                    stickers: stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaId, animated: $0.animated ?? false,
+                                                     packID: id, lottie: $0.lottie ?? false) },
+                    mine: mine ?? false, kind: kind ?? "sticker")
     }
 }
 private struct PackListDTO: Decodable { let packs: [PackDTO] }

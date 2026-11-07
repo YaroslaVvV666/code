@@ -36,6 +36,7 @@ final class StickerVault: @unchecked Sendable {
         let emoji: String
         let mediaID: String?
         let animated: Bool
+        var lottie: Bool? = nil
     }
 
     private struct PackRecord: Codable {
@@ -44,6 +45,7 @@ final class StickerVault: @unchecked Sendable {
         let icon: String
         let mine: Bool
         let stickers: [StickerRecord]
+        var kind: String? = nil
     }
 
     private func listURL(_ account: String) -> URL {
@@ -53,13 +55,16 @@ final class StickerVault: @unchecked Sendable {
 
     private static func record(_ p: StickerPack) -> PackRecord {
         PackRecord(id: p.id, title: p.title, icon: p.icon, mine: p.mine,
-                   stickers: p.stickers.map { StickerRecord(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated) })
+                   stickers: p.stickers.map { StickerRecord(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated,
+                                                            lottie: $0.lottie) },
+                   kind: p.kind)
     }
 
     private static func model(_ r: PackRecord) -> StickerPack {
         StickerPack(id: r.id, title: r.title, icon: r.icon,
-                    stickers: r.stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated, packID: r.id) },
-                    mine: r.mine)
+                    stickers: r.stickers.map { Sticker(id: $0.id, emoji: $0.emoji, mediaID: $0.mediaID, animated: $0.animated,
+                                                       packID: r.id, lottie: $0.lottie ?? false) },
+                    mine: r.mine, kind: r.kind ?? "sticker")
     }
 
     private func readRecords(_ account: String) -> [PackRecord] {
@@ -88,7 +93,7 @@ final class StickerVault: @unchecked Sendable {
             list += readRecords(account).filter { !freshIDs.contains($0.id) }
             writeRecords(list, account)
         }
-        download(fresh.flatMap(\.stickers))
+        download(fresh.filter { !$0.isEmoji }.flatMap(\.stickers))      // свои эмодзи хранит CustomEmojiStore
     }
 
     /// Человек добавил набор — сразу на телефон

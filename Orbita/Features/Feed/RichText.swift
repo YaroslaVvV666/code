@@ -8,6 +8,10 @@ import ContactsUI
 enum RichTextCodec {
     static let quoteKey = NSAttributedString.Key("orbita.quote")
     static let highlightKey = NSAttributedString.Key("orbita.highlight")
+    /// Своё эмодзи в редакторе: значение — "u:<id>#<уникальный хвост>" (два одинаковых эмодзи подряд не склеиваются)
+    static let customEmojiKey = NSAttributedString.Key("orbita.customEmoji")
+    /// Обычный эмодзи-заменитель своего эмодзи
+    static let customFallbackKey = NSAttributedString.Key("orbita.customFallback")
     static let markerColor = UIColor(red: 1.0, green: 0.84, blue: 0.2, alpha: 0.5)
 
     static func baseFont(_ size: CGFloat) -> UIFont { UIFont.systemFont(ofSize: size) }
@@ -52,6 +56,11 @@ enum RichTextCodec {
                     let url = display ? HiddenLink.wrap(real, shown: shown) : real
                     result.addAttributes([.link: url, .foregroundColor: linkColor,
                                           .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
+                }
+            case "custom_emoji":
+                if let url = e.url {
+                    result.addAttributes([customEmojiKey: url + "#" + UUID().uuidString,
+                                          customFallbackKey: (text as NSString).substring(with: range)], range: range)
                 }
             default:
                 break
@@ -99,7 +108,47 @@ enum RichTextCodec {
                 result.addAttributes([.link: url, .foregroundColor: linkColor], range: match.range)
             }
         }
+        if display { replaceCustomEmoji(in: result, size: size) }
         return result
+    }
+
+    /// Свои эмодзи в показанном тексте — картинкой на месте заменителя (с конца, чтобы не сбивались позиции)
+    static func replaceCustomEmoji(in result: NSMutableAttributedString, size: CGFloat) {
+        var spots: [(NSRange, String)] = []
+        result.enumerateAttribute(customEmojiKey, in: NSRange(location: 0, length: result.length)) { value, range, _ in
+            if let v = value as? String { spots.append((range, String(v.split(separator: "#").first ?? ""))) }
+        }
+        guard !spots.isEmpty else { return }
+        let font = baseFont(size)
+        for (range, id) in spots.reversed() {
+            guard let image = MainActor.assumeIsolated({ CustomEmojiStore.shared.still(id) }) else { continue }
+            let att = NSTextAttachment()
+            att.image = image
+            let side = font.lineHeight * 1.05
+            att.bounds = CGRect(x: 0, y: font.descender - 1, width: side, height: side)
+            let piece = NSMutableAttributedString(attachment: att)
+            var attrs = result.attributes(at: range.location, effectiveRange: nil)
+            attrs[.attachment] = att
+            piece.addAttributes(attrs, range: NSRange(location: 0, length: piece.length))
+            result.replaceCharacters(in: range, with: piece)
+        }
+    }
+
+    /// Текст редактора → обычный текст и сущности: картинки своих эмодзи превращаются обратно в заменители
+    static func flatten(_ text: NSAttributedString) -> (text: String, entities: [TextEntity]) {
+        let copy = NSMutableAttributedString(attributedString: text)
+        var spots: [(NSRange, String)] = []
+        copy.enumerateAttribute(.attachment, in: NSRange(location: 0, length: copy.length)) { value, range, _ in
+            guard value != nil else { return }
+            let fallback = copy.attribute(customFallbackKey, at: range.location, effectiveRange: nil) as? String ?? ""
+            spots.append((range, fallback))
+        }
+        for (range, fallback) in spots.reversed() {
+            var attrs = copy.attributes(at: range.location, effectiveRange: nil)
+            attrs[.attachment] = nil
+            copy.replaceCharacters(in: range, with: NSAttributedString(string: fallback, attributes: attrs))
+        }
+        return (copy.string, entities(from: copy))
     }
 
     private static func addTrait(_ trait: UIFontDescriptor.SymbolicTraits, to string: NSMutableAttributedString,
@@ -118,7 +167,8 @@ enum RichTextCodec {
         var result: [TextEntity] = []
         text.enumerateAttributes(in: NSRange(location: 0, length: text.length), options: []) { attrs, range, _ in
             for (type, url) in activeTypes(attrs) {
-                if let i = result.lastIndex(where: { $0.type == type && $0.url == url && $0.offset + $0.length == range.location }) {
+                if type != "custom_emoji",
+                   let i = result.lastIndex(where: { $0.type == type && $0.url == url && $0.offset + $0.length == range.location }) {
                     result[i].length += range.length
                 } else {
                     result.append(TextEntity(type: type, offset: range.location, length: range.length, url: url))
@@ -146,6 +196,9 @@ enum RichTextCodec {
         if let strike = attrs[.strikethroughStyle] as? Int, strike != 0 { out.append(("strike", nil)) }
         if attrs[quoteKey] != nil { out.append(("quote", nil)) }
         if attrs[highlightKey] != nil { out.append(("highlight", nil)) }
+        if let v = attrs[customEmojiKey] as? String, let id = v.split(separator: "#").first {
+            out.append(("custom_emoji", String(id)))
+        }
         return out
     }
 
@@ -250,6 +303,7 @@ struct FormattedText: View {
     var color: Color? = nil          // свой цвет текста (например, белый в исходящих сообщениях)
 
     @Environment(\.theme) private var theme
+    @ObservedObject private var customEmoji = CustomEmojiStore.shared      // своё эмодзи загрузилось — перерисовать
 
     var body: some View {
         let textColor = UIColor(color ?? theme.text)
@@ -291,6 +345,7 @@ struct RichInlineText: View {
     var detect = false
     /// Переписка с ботом: /команды подсвечиваются и нажимаются
     @Environment(\.botCommandLinks) private var commandLinks
+    @ObservedObject private var customEmoji = CustomEmojiStore.shared      // своё эмодзи загрузилось — перерисовать
 
     var body: some View {
         let segments = RichTextCodec.segments(text: text, entities: entities)
@@ -329,7 +384,9 @@ final class RichComposerController: ObservableObject {
     private var linkColor: UIColor = .systemBlue
 
     var plainText: String { textView?.text ?? "" }
-    var entities: [TextEntity] { textView.map { RichTextCodec.entities(from: $0.attributedText) } ?? [] }
+    var entities: [TextEntity] { textView.map { RichTextCodec.flatten($0.attributedText).entities } ?? [] }
+    /// Текст для отправки: свои эмодзи — их заменителями (в plainText на их месте символ картинки)
+    var sendText: String { textView.map { RichTextCodec.flatten($0.attributedText).text } ?? "" }
     var isBlank: Bool { plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     /// Сколько строк сейчас видно в поле (с учётом переносов длинных строк)
     var visualLines: Int {
@@ -488,7 +545,8 @@ final class RichComposerController: ObservableObject {
     /// Текст и сущности без пробелов по краям (смещения подправлены)
     func snapshot() -> (text: String, entities: [TextEntity]) {
         guard let tv = textView else { return ("", []) }
-        let ns = tv.text as NSString
+        let flat = RichTextCodec.flatten(tv.attributedText)
+        let ns = flat.text as NSString
         var start = 0
         var end = ns.length
         let ws = CharacterSet.whitespacesAndNewlines
@@ -496,7 +554,7 @@ final class RichComposerController: ObservableObject {
         while end > start, let scalar = Unicode.Scalar(ns.character(at: end - 1)), ws.contains(scalar) { end -= 1 }
         let text = ns.substring(with: NSRange(location: start, length: end - start))
         var out: [TextEntity] = []
-        for e in RichTextCodec.entities(from: tv.attributedText) {
+        for e in flat.entities {
             let lo = max(e.offset, start), hi = min(e.offset + e.length, end)
             if hi > lo { out.append(TextEntity(type: e.type, offset: lo - start, length: hi - lo, url: e.url)) }
         }
@@ -521,6 +579,36 @@ final class RichComposerController: ObservableObject {
 
     func backspace() {
         textView?.deleteBackward()
+        refresh()
+    }
+
+    /// Вставить своё эмодзи: в поле — его картинкой, при отправке — заменитель + сущность custom_emoji
+    @MainActor
+    func insertCustomEmoji(_ ref: CustomEmojiRef) {
+        guard let tv = textView else { return }
+        let font = (tv.typingAttributes[.font] as? UIFont) ?? RichTextCodec.baseFont(17)
+        var attrs = tv.typingAttributes
+        attrs[RichTextCodec.customEmojiKey] = ref.id + "#" + UUID().uuidString
+        attrs[RichTextCodec.customFallbackKey] = ref.fallback
+        let piece: NSMutableAttributedString
+        if let image = CustomEmojiStore.shared.still(ref.id) {
+            let att = NSTextAttachment()
+            att.image = image
+            let side = font.lineHeight * 1.05
+            att.bounds = CGRect(x: 0, y: font.descender - 1, width: side, height: side)
+            piece = NSMutableAttributedString(attachment: att)
+            attrs[.attachment] = att
+        } else {
+            piece = NSMutableAttributedString(string: ref.fallback)       // ещё не загрузилось — заменитель, но это всё равно своё эмодзи
+        }
+        piece.addAttributes(attrs, range: NSRange(location: 0, length: piece.length))
+        let range = tv.selectedRange
+        tv.textStorage.replaceCharacters(in: range, with: piece)
+        tv.selectedRange = NSRange(location: range.location + piece.length, length: 0)
+        attrs[.attachment] = nil
+        attrs[RichTextCodec.customEmojiKey] = nil
+        attrs[RichTextCodec.customFallbackKey] = nil
+        tv.typingAttributes = attrs                                     // дальше печатается обычный текст
         refresh()
     }
 

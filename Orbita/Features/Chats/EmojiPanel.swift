@@ -200,6 +200,8 @@ struct EmojiStickerPanel: View {
     let onBackspace: () -> Void
     let onSticker: (Sticker) -> Void
     var onCreateStickers: () -> Void = {}
+    /// Свои эмодзи из эмодзи-паков: вставляются прямо в текст
+    var onCustomEmoji: ((CustomEmojiRef) -> Void)? = nil
 
     private enum Tab: Hashable { case emoji, stickers }
 
@@ -273,9 +275,49 @@ struct EmojiStickerPanel: View {
 
     // MARK: Эмодзи
 
+    /// Наборы своих эмодзи (сделанные в @stickers и добавленные)
+    private var emojiPacks: [StickerPack] { packs.filter { $0.isEmoji && !$0.stickers.isEmpty } }
+    private var stickerPacks: [StickerPack] { packs.filter { !$0.isEmoji } }
+
     private var emojiTab: some View {
         // для отправки доступны только эмодзи с анимацией
         ScrollView {
+            if let onCustomEmoji {
+                ForEach(emojiPacks) { pack in
+                    Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 10)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {
+                        ForEach(pack.stickers) { e in
+                            Button {
+                                Haptics.impact(.light)
+                                onCustomEmoji(CustomEmojiRef(id: e.id, fallback: e.emoji))
+                            } label: {
+                                CustomEmojiView(id: e.id, fallback: e.emoji, size: 34, animate: true)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+                Button {
+                    // эмодзи делаются в боте @stickers: открываем переписку с ним (/newemojipack)
+                    Haptics.impact(.light)
+                    if let url = URL(string: "orbita://u/stickers?start=emoji") { UIApplication.shared.open(url) }
+                } label: {
+                    Label(s.t("Создать свои эмодзи", "Create your emoji"), systemImage: "face.dashed")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor)
+                        .padding(.horizontal, 14).frame(height: 32)
+                        .background(theme.accentColor.opacity(0.1), in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.top, emojiPacks.isEmpty ? 10 : 6)
+                if !emojiPacks.isEmpty {
+                    Text(s.t("Эмодзи", "Emoji")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 10)
+                }
+            }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 8), spacing: 6) {      // плотная сетка в 8 колонок, как в системной клавиатуре эмодзи
                 ForEach(AnimatedEmoji.all, id: \.self) { emoji in
                     Button {
@@ -346,14 +388,14 @@ struct EmojiStickerPanel: View {
 
     private var stickerTab: some View {
         VStack(spacing: 0) {
-            if packs.isEmpty {
+            if stickerPacks.isEmpty {
                 VStack(spacing: 14) {
                     Text(s.noStickers).font(.system(size: 15)).foregroundStyle(theme.textSecondary)
                     createStickersButton
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                let current = packID ?? packs.first?.id
+                let current = packID ?? stickerPacks.first?.id
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         if !favs.isEmpty {
@@ -365,7 +407,7 @@ struct EmojiStickerPanel: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        ForEach(packs) { pack in
+                        ForEach(stickerPacks) { pack in
                             let selected = current == pack.id
                             Button { packID = pack.id } label: {
                                 Group {
@@ -389,7 +431,7 @@ struct EmojiStickerPanel: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
                         stickerGrid(favs)
                     } else {
-                        let pack = packs.first { $0.id == current } ?? packs[0]
+                        let pack = stickerPacks.first { $0.id == current } ?? stickerPacks[0]
                         Text(pack.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 4)
                         stickerGrid(pack.stickers)

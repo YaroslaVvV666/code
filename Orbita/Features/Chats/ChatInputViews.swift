@@ -1028,7 +1028,8 @@ struct ChatInputBar: View {
                 model.sendSticker(sticker)
                 onSent()
             },
-            onCreateStickers: { showStickerCreator = true })
+            onCreateStickers: { showStickerCreator = true },
+            onCustomEmoji: { controller.insertCustomEmoji($0) })
             .environment(\.theme, theme)
             .environment(\.lang, lang)
         controller.setInputPanel(panel)

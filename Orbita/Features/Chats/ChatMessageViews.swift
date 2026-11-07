@@ -490,6 +490,17 @@ struct MessageRow: View {
             }
         } else if let circle = circleOnly {
             CircleVideoBubble(attachment: circle, message: message)
+            } else if let big = message.bigCustomEmoji {
+            // только свои эмодзи (1–3) — крупно и анимированно, как в Telegram
+            VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    ForEach(Array(big.enumerated()), id: \.offset) { _, id in
+                        CustomEmojiView(id: id, fallback: CustomEmojiStore.shared.info(id)?.emoji ?? "",
+                                        size: big.count == 1 ? 120 : 84, animate: true)
+                    }
+                }
+                MessageMeta(message: message, color: .white, onMedia: true)
+            }
             } else if emojiOnly {
             VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
                 let value = message.text.trimmingCharacters(in: .whitespacesAndNewlines)

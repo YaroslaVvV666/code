@@ -82,6 +82,7 @@ final class AppSession: ObservableObject {
         LiveLocationManager.shared.attach(repo: messengerRepo, userID: serverID)    // продолжить трансляции геопозиции после перезапуска
         PersistentOutbox.shared.attach(repo: messengerRepo, account: serverID)      // написанное без связи уйдёт само
         GroupCallManager.shared.attach(api: api, userID: serverID)                  // групповые звонки и видеочаты
+        CustomEmojiStore.shared.attach(api: api)                                    // свои эмодзи в сообщениях
     }
 
     /// Пока играет музыка, сервер знает «человек слушает» (раз в 20 с) — у других на его странице аватарка оживает
