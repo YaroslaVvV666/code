@@ -12,6 +12,8 @@ struct ComposerView: View {
     /// Запись на своей стене: в ленту публикаций не попадает, видна только в профиле
     var wallOnly = false
     var onSaved: ((Post) -> Void)? = nil
+    /// Публикация от имени своего бота: (id, имя) — запись появится на странице бота
+    var asBot: (id: String, name: String)? = nil
 
     @EnvironmentObject private var flow: AuthFlow
     @EnvironmentObject private var session: AppSession
@@ -107,7 +109,7 @@ struct ComposerView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
-            .navigationTitle(editing == nil ? s.newPost : s.editPost)
+            .navigationTitle(editing == nil ? (asBot.map { s.t("Запись от «\($0.name)»", "Post as \($0.name)") } ?? s.newPost) : s.editPost)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -386,7 +388,8 @@ struct ComposerView: View {
             }
             var opts = options
             opts.wallOnly = wallOnly
-            let ok = await vm.publish(text: controller.sendText, entities: controller.entities, media: picked, options: opts)
+            let ok = await vm.publish(text: controller.sendText, entities: controller.entities, media: picked, options: opts,
+                                      asBot: asBot?.id)
             if ok {
                 if let post = vm.lastPublished { onSaved?(post) }
                 for media in picked {

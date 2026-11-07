@@ -115,6 +115,10 @@ await call.message.edit_text("Выбрано ✅")
 `download`, `get_chat`, `get_me`, `set_my_commands`, `get_my_commands`, `set_my_description`, `set_webhook`,
 `delete_webhook`, `get_webhook_info`. Любой метод Bot API: `await bot.request("methodName", **params)`.
 
+Записи на странице бота (как посты канала): `await bot.send_post("Новость дня", media=[file_id])` →
+`{"post_id": …, "url": "/p/…"}`, удалить — `await bot.delete_post(post_id)`. Владелец бота может публиковать
+от его имени и прямо из приложения: на странице своего бота — «Что у вас нового?».
+
 Ссылка на бота с параметром: `bot.start_link("ref_42")` → `https://…/u/my_bot?start=ref_42`.
 
 > Если обработчик не ответил на нажатие кнопки, библиотека сама отправит пустой ответ, поэтому

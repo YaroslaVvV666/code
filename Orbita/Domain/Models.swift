@@ -232,6 +232,7 @@ struct UserProfile: Equatable {
     var listening: Bool = false         // человек прямо сейчас слушает музыку
     var orbit: [OrbitFriend] = []       // лучшие друзья (если человек это включил)
     var isBot: Bool = false             // бот: вместо «был(а) в сети» — ничего или «N пользователей в месяц»
+    var botOwned = false                // это мой бот: могу публиковать от его имени
     var monthlyUsers: Int? = nil        // у бота: сколько пишут за месяц (только если владелец разрешил и их 10 000+)
     /// Имя с эмодзи-статусом (для шапок профиля)
     var displayName: String { statusEmoji.flatMap { $0.isEmpty ? nil : name + " " + $0 } ?? name }

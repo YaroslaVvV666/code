@@ -13,6 +13,8 @@ protocol FeedRepository: Sendable {
     func topUpAds(amountCents: Int) async throws -> Int
     func uploadMedia(_ media: PreparedMedia) async throws -> MediaItem
     func createPost(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post
+    /// Запись от имени своего бота (на его странице)
+    func createBotPost(botID: String, text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post
     func setLike(postID: String, liked: Bool) async throws
     func likers(postID: String) async throws -> [FriendUser]
     func deletePost(id: String) async throws
@@ -176,6 +178,12 @@ struct RemoteFeedRepository: FeedRepository {
 
     func createPost(text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post {
         let data = try await api.request("POST", "/v1/posts", body: postBody(text: text, entities: entities, media: media, options: options))
+        return try decodeAPI(PostDTO.self, from: data).model
+    }
+
+    func createBotPost(botID: String, text: String, entities: [TextEntity], media: [MediaItem], options: PostOptions) async throws -> Post {
+        let data = try await api.request("POST", "/v1/bots/\(botID)/posts",
+                                         body: postBody(text: text, entities: entities, media: media, options: options))
         return try decodeAPI(PostDTO.self, from: data).model
     }
 

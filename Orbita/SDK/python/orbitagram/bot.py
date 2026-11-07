@@ -207,6 +207,20 @@ class Bot:
         """sticker: id стикера из набора (из входящего message.sticker.file_id) или PNG-файл"""
         return await self._send_file("sendSticker", "sticker", chat_id, sticker, None, **kw)
 
+    async def send_post(self, text: str = "", *, media: list[str] | None = None, wall_only: bool = False) -> dict:
+        """Запись на странице бота (как пост канала). media — file_id своих фото/видео (до 10).
+        Возвращает {"post_id": ..., "url": "/p/..."}"""
+        params: dict = {"text": text}
+        if media:
+            params["media"] = list(media)[:10]
+        if wall_only:
+            params["wall_only"] = True
+        return await self.request("sendPost", **params)
+
+    async def delete_post(self, post_id: str) -> bool:
+        """Удалить запись бота"""
+        return await self.request("deletePost", post_id=post_id)
+
     async def send_chat_action(self, chat_id: str, action: str = "typing") -> bool:
         """«печатает…», «записывает голосовое…»: typing, upload_photo, record_voice, record_video, upload_document"""
         return await self.request("sendChatAction", chat_id=chat_id, action=action)

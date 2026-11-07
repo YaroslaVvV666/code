@@ -914,7 +914,29 @@ def profile_json(r, me_id=None):
         out["bot"] = True
         out["last_seen"] = None
         out["monthly_users"] = bot_users_shown(uid)
+        # владелец бота может публиковать от его имени — на странице бота у него есть «Что у вас нового?»
+        out["bot_owned"] = bool(me_id and owns_bot(me_id, uid))
     return out
+
+
+def owns_bot(user_id, bot_id):
+    """user_id — владелец бота bot_id"""
+    try:
+        return q1("SELECT 1 FROM bots WHERE id = ? AND owner = ?", (bot_id, user_id)) is not None
+    except Exception:
+        return False
+
+
+def owned_bot_ids(user_id):
+    try:
+        return {r["id"] for r in q("SELECT id FROM bots WHERE owner = ?", (user_id,))} if user_id else set()
+    except Exception:
+        return set()
+
+
+def can_manage_post(user_id, author):
+    """Свой пост или пост своего бота"""
+    return author == user_id or owns_bot(user_id, author)
 
 
 def media_json(m):
@@ -996,7 +1018,7 @@ def post_json(p, me_id):
         "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
         "media": media, "created_at": p["created_at"], "likes": likes, "liked_by_me": liked,
         "views": (q1("SELECT views FROM post_stats WHERE post_id = ?", (pid,)) or {"views": 0})["views"],
-        "comments": comments, "mine": author == me_id, "edited_at": p["edited_at"],
+        "comments": comments, "mine": author == me_id or (me_id and owns_bot(me_id, author)), "edited_at": p["edited_at"],
         "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
         "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
     }
@@ -1013,6 +1035,7 @@ def posts_json(rows, me_id):
         return []
     ids = [p["id"] for p in rows]
     authors = list({p["author"] for p in rows})
+    my_bots = owned_bot_ids(me_id)              # записи своих ботов — тоже «мои» (можно править и удалять)
     marks = _in(ids)
     media, likes, liked, comments, saves, saved = {}, {}, set(), {}, {}, set()
     reposts, reposted, views = {}, set(), {}
@@ -1053,7 +1076,7 @@ def posts_json(rows, me_id):
             "entities": json.loads(dec(author, "posts", COL["post_entities"], pid, p["entities_enc"]) or "[]"),
             "media": media.get(pid, []), "created_at": p["created_at"],
             "likes": p["likes_seed"] + likes.get(pid, 0), "liked_by_me": pid in liked, "views": views.get(pid, 0),
-            "comments": comments.get(pid, 0), "mine": author == me_id, "edited_at": p["edited_at"],
+            "comments": comments.get(pid, 0), "mine": author == me_id or author in my_bots, "edited_at": p["edited_at"],
             "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
             "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
         })
@@ -3442,6 +3465,20 @@ def drop_orphan_media(owner, ids):
 
 @route("POST", r"/v1/posts")
 def create_post(req, me):
+    make_post(req, me, me["id"])
+
+
+@route("POST", r"/v1/bots/([A-Za-z0-9\-]+)/posts")
+def create_bot_post(req, me, bot_id):
+    """Владелец бота публикует от имени бота: запись появляется на странице бота (и в ленте, если не «только на стене»)"""
+    if not owns_bot(me["id"], bot_id):
+        raise ApiError(403, "forbidden")
+    rate_limit("botpost:" + bot_id, 30, 3600)
+    make_post(req, me, bot_id)
+
+
+def make_post(req, me, author):
+    """Новая запись: автор — сам человек или его бот (файлы и музыка — загруженные владельцем)"""
     body = req.body_json()
     text, entities, items = parse_post_body(body, me)
     reel = 1 if body.get("reel") else 0
@@ -3461,7 +3498,7 @@ def create_post(req, me):
         if not t:
             raise ApiError(400, "track_not_found")
         tj = track_json(t)
-        music_enc = enc(uid, "posts", COL["post_music"], pid, json.dumps(
+        music_enc = enc(author, "posts", COL["post_music"], pid, json.dumps(
             {"title": tj["title"], "artist": tj["artist"], "media": tj["media"]}, ensure_ascii=False))
         music_media, mkey = str(tj["media"]), music_key(tj["title"], tj["artist"])
     else:
@@ -3478,8 +3515,8 @@ def create_post(req, me):
         try:
             run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel, music_enc, music_media, music_key, "
                 "comments_off, no_repost, wall_only, sensitive) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (pid, uid, enc(uid, "posts", COL["post_text"], pid, text),
-                 enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
+                (pid, author, enc(author, "posts", COL["post_text"], pid, text),
+                 enc(author, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)), time.time(), reel,
                  music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
                  1 if (not reel and body.get("wall_only")) else 0, sensitive))
             write_post_media(pid, items)
@@ -3764,7 +3801,7 @@ def edit_post(req, me, pid):
     p = q1("SELECT * FROM posts WHERE id = ?", (pid,))
     if not p:
         raise ApiError(404, "not_found")
-    if p["author"] != me["id"]:
+    if not can_manage_post(me["id"], p["author"]):
         raise ApiError(403, "forbidden")
     text, entities, items = parse_post_body(req.body_json(), me)
     uid = me["id"]
@@ -3774,8 +3811,8 @@ def edit_post(req, me, pid):
         run("BEGIN")
         try:
             run("UPDATE posts SET text_enc = ?, entities_enc = ?, edited_at = ? WHERE id = ?",
-                (enc(uid, "posts", COL["post_text"], pid, text),
-                 enc(uid, "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)),
+                (enc(p["author"], "posts", COL["post_text"], pid, text),          # запись бота шифруется ключом бота
+                 enc(p["author"], "posts", COL["post_entities"], pid, json.dumps(entities, ensure_ascii=False)),
                  time.time(), pid))
             run("DELETE FROM post_media WHERE post_id = ?", (pid,))
             write_post_media(pid, items)
@@ -3792,7 +3829,7 @@ def delete_post(req, me, pid):
     p = q1("SELECT * FROM posts WHERE id = ?", (pid,))
     if not p:
         raise ApiError(404, "not_found")
-    if p["author"] != me["id"]:
+    if not can_manage_post(me["id"], p["author"]):
         raise ApiError(403, "forbidden")
     gone = [m["media_id"] for m in q("SELECT media_id FROM post_media WHERE post_id = ?", (pid,))]
     gone += [m["thumb"] for m in q("SELECT thumb FROM post_media WHERE post_id = ?", (pid,))]
@@ -5594,6 +5631,43 @@ def bot_api_extra(req, bot, m, p, files):
             return bot_api_err(req, 400, "Bad Request: chat not found")
         brief = user_brief(chat)
         return bot_api_ok(req, {"id": chat, "type": "private", "first_name": brief["name"], "username": brief.get("username")})
+    if m == "sendpost":
+        # запись на странице бота (как пост канала): текст и до 10 фото/видео (file_id своих файлов бота)
+        text = str(p.get("text") or p.get("caption") or "")[:MAX_TEXT]
+        ids = p.get("media") or ([p.get("photo")] if p.get("photo") else [])
+        if isinstance(ids, str):
+            try:
+                ids = json.loads(ids)
+            except ValueError:
+                ids = [ids]
+        items = []
+        for fid in [str(x) for x in (ids or [])][:MAX_MEDIA_PER_POST]:
+            md = q1("SELECT * FROM media WHERE id = ? AND kind IN ('image','video')", (fid,)) if re.fullmatch(r"[a-f0-9]{32}", fid) else None
+            if not md or not (md["owner"] == bid or q1("SELECT 1 FROM bot_files WHERE bot_id = ? AND media_id = ?", (bid, fid))):
+                return bot_api_err(req, 400, "Bad Request: wrong file_id in media")
+            items.append((fid, md["kind"], md["width"], md["height"], md["duration"], md["thumb"], 0))
+        if not text.strip() and not items:
+            return bot_api_err(req, 400, "Bad Request: post is empty")
+        rate_limit("botpost:" + bid, 30, 3600)
+        pid = uuid.uuid4().hex
+        with LOCK:
+            run("BEGIN")
+            try:
+                run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, wall_only) VALUES (?,?,?,?,?,?)",
+                    (pid, bid, enc(bid, "posts", COL["post_text"], pid, text),
+                     enc(bid, "posts", COL["post_entities"], pid, "[]"), time.time(), 1 if p.get("wall_only") else 0))
+                write_post_media(pid, items)
+                run("COMMIT")
+            except Exception:
+                run("ROLLBACK")
+                raise
+        return bot_api_ok(req, {"post_id": pid, "url": "/p/" + pid})
+    if m == "deletepost":
+        pid = str(p.get("post_id") or "")
+        if not q1("SELECT 1 FROM posts WHERE id = ? AND author = ?", (pid, bid)):
+            return bot_api_err(req, 400, "Bad Request: post not found")
+        run("DELETE FROM posts WHERE id = ?", (pid,))
+        return bot_api_ok(req, True)
     if m == "getwebhookinfo":
         n = q1("SELECT COUNT(*) c FROM bot_updates WHERE bot_id = ?", (bid,))["c"]
         return bot_api_ok(req, {"url": bot["webhook"] or "", "has_custom_certificate": False, "pending_update_count": n})

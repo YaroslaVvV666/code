@@ -370,6 +370,7 @@ struct UserPageView: View {
     @State private var avatarViewer: AvatarViewerRoute?
     @State private var showPlaylist = false
     @State private var showComposer = false
+    @State private var showBotComposer = false              // запись от имени своего бота
     @State private var editingPost: Post?
     @State private var commentsPost: Post?
     @State private var confirmBlock = false
@@ -634,6 +635,15 @@ struct UserPageView: View {
         .sheet(isPresented: $showPlaylist) {
             PlaylistSheet(model: model, player: player, isMine: model.isMe)
                 .preferredColorScheme(theme.dark ? .dark : .light)
+        }
+        .sheet(isPresented: $showBotComposer) {
+            if let p = model.profile {
+                ComposerView(vm: feed, wallOnly: true, onSaved: { model.added($0) }, asBot: (p.id, p.name))
+                    .environmentObject(session)
+                    .environmentObject(flow)
+                    .preferredColorScheme(theme.dark ? .dark : .light)
+                    .presentationBackground(theme.sheet)
+            }
         }
         .sheet(isPresented: $showComposer) {
             ComposerView(vm: feed, wallOnly: true, onSaved: { model.added($0) })      // со своей страницы — только на стену, не в ленту
@@ -1158,8 +1168,9 @@ struct UserPageView: View {
     @ViewBuilder
     private func wall(_ profile: UserProfile) -> some View {
         VStack(spacing: 12) {
-            if model.isMe {
-                Button { showComposer = true } label: {
+            if model.isMe || (profile.isBot && profile.botOwned) {
+                // своя страница или страница своего бота — запись от его имени
+                Button { if model.isMe { showComposer = true } else { showBotComposer = true } } label: {
                     HStack(spacing: 12) {
                         AvatarView(name: profile.name, size: 38, avatarID: profile.avatarID)
                         Text(s.wallWhatsNew)

@@ -247,6 +247,11 @@ while True:
 Входящие сообщения приходят в формате Telegram: `photo`, `document`, `video`, `animation`, `video_note`, `voice`,
 `audio`, `sticker`, `location`, `caption`, `reply_to_message`.
 
+Записи от имени бота: `sendPost` (`text`, `media` — до 10 file_id своих фото/видео, `wall_only`) и `deletePost` (`post_id`).
+Владелец бота публикует из приложения: `POST /v1/bots/<bot_id>/posts` (тело как у `/v1/posts`); записи своего бота
+он может править и удалять (`mine: true`), а в профиле бота приходит `bot_owned: true`.
+Проверка: `python3 tests/test_bot_posts.py`.
+
 
 ## Статьи в сообщениях
 
