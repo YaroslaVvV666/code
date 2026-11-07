@@ -379,6 +379,7 @@ struct CodeStepView: View {
                 Haptics.notify(.success)
             } else {
                 Haptics.notify(.error)
+                for t in [0.12, 0.24] { DispatchQueue.main.asyncAfter(deadline: .now() + t) { Haptics.impact(.heavy) } }
                 withAnimation(.linear(duration: 0.4)) { shake += 1 }
                 code = ""
                 focused = true

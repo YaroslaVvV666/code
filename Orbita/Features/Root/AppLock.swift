@@ -297,8 +297,9 @@ struct PasscodePad: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var code = ""
-    @State private var shake: CGFloat = 0
+    @State private var shake: CGFloat = 0           // растёт на 1 при каждой ошибке — замок и точки трясутся
     @State private var wrong = false
+    @State private var busy = false                 // идёт тряска: нажатия не принимаем
 
     private static let letters = ["", "A B C", "D E F", "G H I", "J K L", "M N O", "P Q R S", "T U V", "W X Y Z"]
 
@@ -306,8 +307,10 @@ struct PasscodePad: View {
         VStack(spacing: 0) {
             if showsLock {
                 Image(systemName: wrong ? "lock.trianglebadge.exclamationmark.fill" : "lock.fill")
-                    .font(.system(size: 34, weight: .semibold)).foregroundStyle(.white)
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : .white)
                     .contentTransition(.symbolEffect(.replace))
+                    .modifier(LockWobble(animatableData: shake))       // замок качается из стороны в сторону
                     .padding(.bottom, 26)
             }
             Text(title).font(.system(size: 21, weight: .semibold)).foregroundStyle(.white)
@@ -318,14 +321,14 @@ struct PasscodePad: View {
             }
             HStack(spacing: length > 4 ? 22 : 26) {
                 ForEach(0..<length, id: \.self) { i in
-                    Circle().fill(i < code.count ? Color.white : Color.clear)
-                        .overlay(Circle().stroke(Color.white, lineWidth: 1.4))
+                    Circle().fill(i < code.count ? (wrong ? Color(red: 1, green: 0.38, blue: 0.36) : Color.white) : Color.clear)
+                        .overlay(Circle().stroke(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : Color.white, lineWidth: 1.4))
                         .frame(width: 13, height: 13)
                         .scaleEffect(i == code.count - 1 ? 1.15 : 1)
                         .animation(.spring(response: 0.2, dampingFraction: 0.5), value: code.count)
                 }
             }
-            .offset(x: shake)
+            .modifier(ShakeEffect(travel: 16, shakes: 4, animatableData: shake))
             .padding(.top, 26)
             .padding(.bottom, 46)
 
@@ -384,21 +387,44 @@ struct PasscodePad: View {
     }
 
     private func tap(_ d: String) {
-        guard code.count < length else { return }
+        guard code.count < length, !busy else { return }
         Haptics.impact(.light)
-        wrong = false
+        if wrong { withAnimation(.easeOut(duration: 0.2)) { wrong = false } }
         code += d
         guard code.count == length else { return }
         let entered = code
+        busy = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if onComplete(entered) { code = "" } else {
-                Haptics.notify(.error)
-                wrong = true
-                withAnimation(.default) { shake = 14 }
-                withAnimation(.interpolatingSpring(stiffness: 600, damping: 6).delay(0.05)) { shake = 0 }
-                code = ""
+            if onComplete(entered) { code = ""; busy = false; return }
+            // неверный код: вибрация «тук-тук-тук», замок и точки трясутся красным, потом точки гаснут
+            Haptics.notify(.error)
+            for (i, t) in [0.12, 0.24, 0.36].enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + t) { Haptics.impact(i == 2 ? .medium : .heavy) }
+            }
+            withAnimation(.easeOut(duration: 0.15)) { wrong = true }
+            withAnimation(.linear(duration: 0.5)) { shake += 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                withAnimation(.easeOut(duration: 0.2)) { code = "" }
+                busy = false
             }
         }
+    }
+}
+
+/// Замок при неверном коде: качается вокруг верхней дужки и чуть сдвигается, затухая
+private struct LockWobble: GeometryEffect {
+    var animatableData: CGFloat
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let p = animatableData - animatableData.rounded(.down)             // 0…1 внутри текущей тряски
+        let fade = 1 - p                                                     // к концу — тише
+        let angle = sin(p * .pi * 8) * 0.32 * fade                           // ~18°
+        let dx = sin(p * .pi * 8) * 6 * fade
+        let pivot = CGPoint(x: size.width / 2, y: 0)
+        let t = CGAffineTransform(translationX: pivot.x + dx, y: pivot.y)
+            .rotated(by: angle)
+            .translatedBy(x: -pivot.x, y: -pivot.y)
+        return ProjectionTransform(t)
     }
 }
 
