@@ -203,12 +203,13 @@ struct ComposerView: View {
                     showStickers = true
                     Task { if packs.isEmpty { packs = (try? await session.messengerRepo.stickers()) ?? [] } }
                 } label: {
-                    Label(s.t("Стикеры", "Stickers"), systemImage: "face.smiling")
+                    // «Эмодзи»: та же панель, что в чате — эмодзи первыми, стикеры на второй вкладке
+                    Label(s.t("Эмодзи", "Emoji"), systemImage: "face.smiling")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(theme.accentColor)
                         .padding(.leading, 10)
                 }
-                .disabled(mediaCount >= maxMedia || uploading)
+                .disabled(uploading)
 
                 if preparing { ProgressView().padding(.leading, 6) }
 
@@ -345,8 +346,12 @@ struct ComposerView: View {
 
     /// Стикер уходит как обычная картинка (PNG с прозрачностью)
     private func addSticker(_ sticker: Sticker) {
-        guard mediaCount < maxMedia, let url = sticker.url else { return }
         showStickers = false
+        guard mediaCount < maxMedia else {
+            mediaError = s.t("Можно добавить до \(maxMedia) фото и видео", "Up to \(maxMedia) photos and videos")
+            return
+        }
+        guard let url = sticker.url else { return }
         Task { @MainActor in
             preparing = true
             defer { preparing = false }
