@@ -1909,6 +1909,7 @@ struct ChatScreen: View {
                 }
             }
             .onReceive(scrollRequests) { _ in
+                scrollAnchor.id = list.last?.id
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onChange(of: scrollTarget) { _, id in
@@ -1935,9 +1936,17 @@ struct ChatScreen: View {
                 }
                 if !atBottom {
                     Button {
-                        // прыжок вниз = всё ниже прочитано: сразу гасим счётчик, кнопка уедет сама (atBottom)
-                        withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
-                        withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                        // Прыжок вниз. Сначала якорь прокрутки (scrollPosition) переставляем на последнее сообщение:
+                        // иначе перерисовка (гаснет счётчик, уезжает кнопка) возвращала экран к старому сообщению
+                        // и вниз доезжало только со второго нажатия
+                        scrollAnchor.id = list.last?.id
+                        withAnimation(.easeOut(duration: 0.3)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                        // всё ниже прочитано: счётчик гаснет уже после прыжка; и добиваем до самого низа, если высоты строк догрузились
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
+                            scrollAnchor.id = list.last?.id
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
                     } label: {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 15, weight: .semibold))
