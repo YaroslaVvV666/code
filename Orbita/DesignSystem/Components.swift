@@ -12,6 +12,11 @@ struct PressStyle: ButtonStyle {
     }
 }
 
+/// Экраны входа на iPad: всё крупнее (логотип, текст, поля, кнопки), чтобы не было пустоты
+extension Optional where Wrapped == UserInterfaceSizeClass {
+    var authScale: CGFloat { self == .regular ? 1.3 : 1 }
+}
+
 struct ShakeEffect: GeometryEffect {
     var travel: CGFloat = 10
     var shakes: CGFloat = 3
@@ -34,13 +39,21 @@ struct StaticPage<Content: View>: View {
         self.content = content()
     }
 
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
     var body: some View {
+        let wide = sizeClass == .regular
         GeometryReader { geo in
             ScrollView {
-                VStack(spacing: spacing) { content }
+                VStack(spacing: spacing * sizeClass.authScale) {
+                    // iPad: блок по центру экрана (нижний Spacer страницы делит место поровну), ширина — как у формы
+                    if wide { Spacer(minLength: 24) }
+                    content
+                }
+                    .frame(maxWidth: wide ? 620 : .infinity)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 56)
-                    .padding(.bottom, 16)
+                    .padding(.top, wide ? 40 : 56)
+                    .padding(.bottom, wide ? 36 : 16)
                     .frame(minHeight: geo.size.height, alignment: .top)
             }
             .scrollBounceBehavior(.basedOnSize)
@@ -57,19 +70,21 @@ struct PrimaryButton: View {
     var loading = false
     let action: () -> Void
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
+        let k = sizeClass.authScale
         Button(action: action) {
             ZStack {
                 Text(title).opacity(loading ? 0 : 1)
                 if loading { ProgressView().tint(.white) }
             }
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17 * k, weight: .semibold))
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(height: 54 * k)
             .background(enabled ? AnyShapeStyle(theme.accent) : AnyShapeStyle(Color.gray.opacity(0.35)),
-                        in: RoundedRectangle(cornerRadius: 16))
+                        in: RoundedRectangle(cornerRadius: 16 * k))
             .shadow(color: enabled ? theme.accentColor.opacity(theme.glow) : .clear, radius: 16, y: 6)
         }
         .buttonStyle(PressStyle())
@@ -120,27 +135,29 @@ struct StepHeader: View {
     let subtitle: String
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        VStack(spacing: 12) {
+        let k = sizeClass.authScale
+        VStack(spacing: 12 * k) {
             // при открытой клавиатуре иконка прячется, чтобы всё помещалось
-            if !flow.keyboardVisible {
+            if !flow.keyboardVisible || sizeClass == .regular {
                 Image(systemName: icon)
-                    .font(.system(size: 32, weight: .light))
+                    .font(.system(size: 32 * k, weight: .light))
                     .foregroundStyle(theme.accentColor)
-                    .frame(width: 84, height: 84)
-                    .card(theme, radius: 42)
+                    .frame(width: 84 * k, height: 84 * k)
+                    .card(theme, radius: 42 * k)
                     .padding(.bottom, 6)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
 
             Text(title)
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: 26 * k, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
 
             Text(subtitle)
-                .font(.system(size: 15))
+                .font(.system(size: 15 * k))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
@@ -356,10 +373,12 @@ struct InputField: View {
     var keyboard: UIKeyboardType = .default
 
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var reveal = false
     @State private var focused = false
 
     var body: some View {
+        let k = sizeClass.authScale
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .foregroundStyle(theme.textSecondary)
@@ -377,11 +396,12 @@ struct InputField: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 56)
-        .card(theme, radius: 16)
+        .font(.system(size: 17 * k))
+        .padding(.horizontal, 16 * k)
+        .frame(height: 56 * k)
+        .card(theme, radius: 16 * k)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 16 * k)
                 .stroke(theme.accentColor.opacity(focused ? 0.8 : 0), lineWidth: 1.2)
         )
         .animation(.easeOut(duration: 0.2), value: focused)
@@ -395,8 +415,10 @@ struct NameField: View {
     @Binding var text: String
     @Environment(\.theme) private var theme
     @FocusState private var focused: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
+        let k = sizeClass.authScale
         HStack(spacing: 12) {
             Image(systemName: "person")
                 .foregroundStyle(theme.textSecondary)
@@ -409,12 +431,12 @@ struct NameField: View {
                 .foregroundStyle(theme.text)
                 .tint(theme.accentColor)
         }
-        .font(.system(size: 17))
-        .padding(.horizontal, 16)
-        .frame(height: 56)
-        .card(theme, radius: 16)
+        .font(.system(size: 17 * k))
+        .padding(.horizontal, 16 * k)
+        .frame(height: 56 * k)
+        .card(theme, radius: 16 * k)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 16 * k)
                 .stroke(theme.accentColor.opacity(focused ? 0.8 : 0), lineWidth: 1.2)
         )
         .animation(.easeOut(duration: 0.2), value: focused)

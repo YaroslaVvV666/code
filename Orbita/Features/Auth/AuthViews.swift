@@ -27,9 +27,12 @@ struct PhoneStepView: View {
     @State private var codePulse = false
     @State private var activeSheet: ActiveSheet?
     @FocusState private var phoneFocused: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private var s: Strings { Strings(lang: lang) }
-    private var compact: Bool { flow.keyboardVisible }
+    /// iPad — всё крупнее; клавиатура на iPad места не отнимает — логотип не прячем
+    private var k: CGFloat { sizeClass.authScale }
+    private var compact: Bool { flow.keyboardVisible && sizeClass != .regular }
 
     private var canContinue: Bool {
         !flow.phone.hasPrefix("+") && flow.code.count > 1 && flow.phoneDigits.count >= 5
@@ -38,18 +41,18 @@ struct PhoneStepView: View {
     var body: some View {
         StaticPage {
             if !compact {
-                OrbitLogo(size: 150)
+                OrbitLogo(size: sizeClass == .regular ? 230 : 150)
                     .padding(.bottom, -6)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
 
             Text(s.title)
-                .font(.system(size: 30, weight: .semibold))
+                .font(.system(size: 30 * k, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .tracking(0.3)
 
             Text(s.subtitle)
-                .font(.system(size: 15))
+                .font(.system(size: 15 * k))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
@@ -63,7 +66,7 @@ struct PhoneStepView: View {
                 phoneFocused = false
                 Task { @MainActor in await flow.submitPhone() }
             }
-            .padding(.top, 6)
+            .padding(.top, 6 * k)
 
             Spacer(minLength: 12)
 
@@ -90,21 +93,21 @@ struct PhoneStepView: View {
     }
 
     private var bottomButtons: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 16 * k) {
             Button { activeSheet = .qr } label: {
                 Label(s.qrButton, systemImage: "qrcode")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 15 * k, weight: .medium))
                     .foregroundStyle(theme.text)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .card(theme, radius: 14)
+                    .frame(height: 50 * k)
+                    .card(theme, radius: 14 * k)
             }
             .buttonStyle(PressStyle())
             .padding(.horizontal, 24)
 
             Button { activeSheet = .language } label: {
                 Label(s.changeLanguage, systemImage: "globe")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 14 * k, weight: .medium))
                     .foregroundStyle(theme.accentColor)
             }
             .buttonStyle(PressStyle())
@@ -122,7 +125,7 @@ struct PhoneStepView: View {
             } label: {
                 HStack(spacing: 12) {
                     if let country = flow.country {
-                        Text(country.flag).font(.system(size: 22))
+                        Text(country.flag).font(.system(size: 22 * k))
                         Text(country.name(lang)).foregroundStyle(theme.text)
                     } else {
                         Image(systemName: "globe").foregroundStyle(theme.textSecondary)
@@ -133,9 +136,9 @@ struct PhoneStepView: View {
                         .font(.footnote.bold())
                         .foregroundStyle(theme.textTertiary)
                 }
-                .font(.system(size: 17))
-                .padding(.horizontal, 16)
-                .frame(height: 56)
+                .font(.system(size: 17 * k))
+                .padding(.horizontal, 16 * k)
+                .frame(height: 56 * k)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -145,33 +148,33 @@ struct PhoneStepView: View {
             HStack(spacing: 0) {
                 TextField("+", text: $flow.code)
                     .keyboardType(.phonePad)
-                    .frame(width: 68)
-                    .padding(.leading, 16)
+                    .frame(width: 68 * k)
+                    .padding(.leading, 16 * k)
                     .foregroundStyle(codePulse ? theme.accentColor : theme.text)
                     .scaleEffect(codePulse ? 1.25 : 1, anchor: .leading)
                     .onChange(of: flow.code) { _, new in handleCodeChange(new) }
 
-                Rectangle().fill(theme.stroke).frame(width: 1, height: 56)
+                Rectangle().fill(theme.stroke).frame(width: 1, height: 56 * k)
 
                 TextField(s.phone, text: $flow.phone)
                     .keyboardType(.phonePad)
                     .focused($phoneFocused)
                     .foregroundStyle(theme.text)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 16 * k)
                     .onChange(of: flow.phone) { old, new in handlePhoneChange(old: old, new: new) }
             }
-            .font(.system(size: 18, weight: .medium).monospacedDigit())
+            .font(.system(size: 18 * k, weight: .medium).monospacedDigit())
             .tint(theme.accentColor)
-            .frame(height: 56)
+            .frame(height: 56 * k)
         }
-        .card(theme, radius: 18)
+        .card(theme, radius: 18 * k)
         .overlay(
-            RoundedRectangle(cornerRadius: 18)
+            RoundedRectangle(cornerRadius: 18 * k)
                 .stroke(theme.accentColor.opacity(phoneFocused ? 0.8 : 0), lineWidth: 1.2)
         )
         .animation(.easeOut(duration: 0.2), value: phoneFocused)
         .padding(.horizontal, 24)
-        .padding(.top, 14)
+        .padding(.top, 14 * k)
     }
 
     // MARK: Логика ввода
@@ -252,19 +255,21 @@ struct CodeBoxes: View {
     let focused: Bool
     let hasError: Bool
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        HStack(spacing: 9) {
+        let k = sizeClass.authScale
+        HStack(spacing: 9 * k) {
             ForEach(0..<length, id: \.self) { i in
                 let char = i < code.count ? String(code[code.index(code.startIndex, offsetBy: i)]) : ""
                 let isCurrent = focused && i == min(code.count, length - 1)
                 Text(char)
-                    .font(.system(size: 26, weight: .semibold).monospacedDigit())
+                    .font(.system(size: 26 * k, weight: .semibold).monospacedDigit())
                     .foregroundStyle(theme.text)
-                    .frame(width: 44, height: 58)
-                    .card(theme, radius: 14)
+                    .frame(width: 44 * k, height: 58 * k)
+                    .card(theme, radius: 14 * k)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14)
+                        RoundedRectangle(cornerRadius: 14 * k)
                             .stroke(hasError ? theme.danger.opacity(0.8) : theme.accentColor,
                                     lineWidth: (isCurrent || hasError) ? 1.5 : 0)
                     )
@@ -344,6 +349,8 @@ struct CodeStepView: View {
             if let ticket {
                 ResendTimer(availableAt: ticket.resendAvailableAt) { resend() }
             }
+
+            Spacer(minLength: 0)        // на iPad блок встаёт по центру экрана
         }
         .onChange(of: code) { _, new in
             let clean = String(new.filter(\.isNumber).prefix(length))
