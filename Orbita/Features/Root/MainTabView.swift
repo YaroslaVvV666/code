@@ -15,6 +15,16 @@ enum MainTab: Hashable {
     }
 }
 
+/// Повторное нажатие на уже открытую вкладку: экран листается в начало (а если уже там — обновляется), как в Telegram и ВК
+@MainActor
+final class TabReselect {
+    static let shared = TabReselect()
+    let events = PassthroughSubject<MainTab, Never>()
+    func publisher(_ tab: MainTab) -> AnyPublisher<MainTab, Never> {
+        events.filter { $0 == tab }.eraseToAnyPublisher()
+    }
+}
+
 struct TabBarHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
@@ -440,6 +450,9 @@ struct OrbitaTabBar: View {
             if selection != tab {
                 Haptics.select()
                 selection = tab
+            } else {
+                Haptics.impact(.light)
+                TabReselect.shared.events.send(tab)          // уже здесь — в начало экрана
             }
         } label: {
             VStack(spacing: 4) {

@@ -462,6 +462,18 @@ struct ReelsView: View {
                         .offset(x: slideX)
                         .scrollPosition(id: $current)
                         .ignoresSafeArea()
+                        // повторное нажатие «Шортс»: к первому ролику, а если уже на нём — свежая подборка
+                        .onReceive(TabReselect.shared.publisher(.reels)) { _ in
+                            guard fixed == nil, pinned == nil, onClose == nil, !suspended else { return }
+                            if currentIndex > 0, let first = model.reels.first?.id {
+                                withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { current = first }
+                            } else {
+                                Task {
+                                    await model.refresh(session: session)
+                                    current = model.reels.first?.id
+                                }
+                            }
+                        }
                     }
                     if !rotatedNow { topBar }
                 }

@@ -42,6 +42,12 @@ struct FeedView: View {
     // скрытие нижней панели при прокрутке вниз (как в YouTube). Сдвиг — в обычном объекте, а не в @State:
     // он меняется на каждом кадре прокрутки, и @State заставлял бы всю ленту пересчитываться каждый кадр
     @State private var scrollTrack = ScrollTrack()
+    /// Карточка «Что у вас нового?» ушла вверх — внизу появляется кнопка нового поста
+    @State private var composeFloating = false
+    /// Обновление по нажатию на «Orbita» / повторному нажатию «Главной»: логотип крутится
+    @State private var refreshing = false
+    /// Нажатие на «Orbita» просит ленту пролистаться наверх (сам ScrollViewReader живёт ниже шапки)
+    @State private var topRequest = 0
     final class ScrollTrack { var last: CGFloat = 0; var ready = false }
 
     private var s: Strings { Strings(lang: lang) }
@@ -72,9 +78,11 @@ struct FeedView: View {
             header
                 .zIndex(5)          // плашка «что нового» под колокольчиком ложится поверх ленты
 
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear.frame(height: 0)
+                        .id(Self.topID)
                         .background(GeometryReader { g in
                             Color.clear.preference(key: FeedPullKey.self, value: g.frame(in: .named("feedScroll")).minY)
                         })
@@ -123,7 +131,20 @@ struct FeedView: View {
                 _ = await (feed, tray)
                 Haptics.impact(.light)
             }
+            .onReceive(TabReselect.shared.publisher(.home)) { _ in
+                // повторно нажали «Главная»: пролистали — в начало; уже в начале — обновить
+                if scrollTrack.last < -8 { scrollToTop(proxy) } else { reload() }
+            }
+            .onChange(of: topRequest) { _, _ in scrollToTop(proxy) }
+            }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if composeFloating && !searching && vm.authorFilter == nil {
+                FloatingComposeButton(onPost: onCompose, stories: stories)
+                    .transition(.scale(scale: 0.4, anchor: .bottomTrailing).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.36, dampingFraction: 0.78), value: composeFloating)
         .task { await vm.load() }
         .task {
             stories.myID = session.serverID
@@ -196,6 +217,9 @@ struct FeedView: View {
     /// y — сдвиг верхнего края ленты: 0 у верха, уходит в минус при прокрутке вниз.
     private func handleScroll(_ y: CGFloat) {
         guard !searching else { return }                  // в поиске панель не трогаем
+        // карточка постинга (истории + «Что у вас нового?») скрылась — показываем плавающую кнопку
+        let past = y < -170
+        if past != composeFloating { composeFloating = past }
         let t = scrollTrack
         guard t.ready else { t.ready = true; t.last = y; return }
         let dy = y - t.last
@@ -207,6 +231,26 @@ struct FeedView: View {
             if !session.tabBarHidden { session.tabBarHidden = true }
         } else if dy > 3 {                                // листаем вверх — возвращаем сразу
             if session.tabBarHidden { session.tabBarHidden = false }
+        }
+    }
+
+    private static let topID = "feedTop"
+
+    private func scrollToTop(_ proxy: ScrollViewProxy) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo(Self.topID, anchor: .top) }
+        session.tabBarHidden = false
+    }
+
+    /// В начало ленты и обновить её вместе с историями
+    private func reload() {
+        guard !refreshing else { return }
+        refreshing = true
+        Task {
+            async let feed: Void = vm.load()
+            async let tray: Void = stories.reload(session.extras)
+            _ = await (feed, tray)
+            refreshing = false
+            Haptics.impact(.light)
         }
     }
 
@@ -335,14 +379,28 @@ struct FeedView: View {
                 .font(.system(size: 15))
                 .foregroundStyle(theme.accentColor)
             } else {
-                OrbitLogo(size: 30)
-                    .frame(width: 40, height: 40)
-
-                Text("Orbita")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(theme.text)
-                    .tracking(0.4)
-                    .padding(.leading, -6)
+                // нажатие на «Orbita» — в начало ленты и обновить
+                Button {
+                    Haptics.impact(.light)
+                    topRequest += 1
+                    reload()
+                } label: {
+                    HStack(spacing: 0) {
+                        OrbitLogo(size: 30)
+                            .rotationEffect(.degrees(refreshing ? 360 : 0))
+                            .animation(refreshing ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                                       value: refreshing)
+                            .frame(width: 40, height: 40)
+                        Text("Orbita")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(theme.text)
+                            .tracking(0.4)
+                            .padding(.leading, -6)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(s.t("Обновить ленту", "Refresh feed"))
 
                 Spacer()
 
@@ -379,6 +437,53 @@ struct FeedView: View {
         .padding(.horizontal, 16)
         .frame(height: 54)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 1) }
+    }
+}
+
+// MARK: - Плавающая кнопка постинга
+
+/// Пролистали карточку «Что у вас нового?» — справа внизу остаётся кнопка: пост одним касанием,
+/// а рядом маленькая камера для истории. Пока листаем вниз и панель вкладок уезжает, кнопка опускается следом.
+private struct FloatingComposeButton: View {
+    let onPost: () -> Void
+    @ObservedObject var stories: StoryStore
+    @ObservedObject private var bar = TabBarVisibility.shared
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.tabBarHeight) private var tabBarHeight
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        VStack(spacing: 12) {
+            StoryAddPicker(store: stories) {
+                Image(systemName: stories.preparing ? "hourglass" : "camera.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accentColor)
+                    .frame(width: 44, height: 44)
+                    .glassCircle()
+                    .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+            }
+            .accessibilityLabel(s.t("Новая история", "New story"))
+
+            Button {
+                Haptics.impact(.medium)
+                onPost()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 58, height: 58)
+                    .background(theme.accent, in: Circle())
+                    .shadow(color: theme.accentColor.opacity(0.45), radius: 14, y: 6)
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityLabel(s.t("Новый пост", "New post"))
+        }
+        .padding(.trailing, 18)
+        .padding(.bottom, 14)
+        // панель вкладок спряталась — кнопка садится ниже, на её место
+        .offset(y: bar.hidden ? tabBarHeight - 6 : 0)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: bar.hidden)
     }
 }
 

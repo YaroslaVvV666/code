@@ -257,8 +257,10 @@ struct ChatsListView: View {
             } else if !model.loaded {
                 ChatListSkeleton()
             } else {
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        Color.clear.frame(height: 0).id("chatsTop")
                         if query.trimmingCharacters(in: .whitespaces).isEmpty && !archivedChats.isEmpty { archiveRow }
                         if folder == .all && query.trimmingCharacters(in: .whitespaces).isEmpty { savedRow }
                         if searchingNow && !filtered.filter({ $0.id != session.serverID }).isEmpty {
@@ -275,6 +277,12 @@ struct ChatsListView: View {
                     .animation(.spring(response: 0.42, dampingFraction: 0.86), value: filtered.map(\.id))
                 }
                 .scrollIndicators(.hidden)
+                // повторное нажатие «Чаты» — в начало списка (и сброс поиска)
+                .onReceive(TabReselect.shared.publisher(.chats)) { _ in
+                    if !query.isEmpty { query = "" }
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo("chatsTop", anchor: .top) }
+                }
+                }
             }
         }
         .overlay(alignment: .top) {

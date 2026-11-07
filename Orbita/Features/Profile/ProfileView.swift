@@ -509,6 +509,11 @@ struct ProfileView: View {
             scrollY = 0; probeY = 0; pullArmed = true
             proxy.scrollTo("profileTop", anchor: .top)
         }
+        // повторное нажатие «Профиль»: из раздела — назад к профилю, иначе — в начало
+        .onReceive(TabReselect.shared.publisher(.profile)) { _ in
+            if route != nil { route = nil; return }
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo("profileTop", anchor: .top) }
+        }
         }
         .task { await store.load() }
         .confirmationDialog(s.deleteAccount, isPresented: $confirmDelete, titleVisibility: .visible) {

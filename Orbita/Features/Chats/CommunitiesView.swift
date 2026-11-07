@@ -54,8 +54,10 @@ struct CommunityDirectory: View {
             }
             .pickerStyle(.segmented).padding(.horizontal, 16)
 
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: 0).id("communitiesTop")
                     if !myList.isEmpty {
                         header(s.t("МОИ", "MINE"))
                         ForEach(myList) { chat in myRow(chat) }
@@ -78,6 +80,10 @@ struct CommunityDirectory: View {
                 .padding(.bottom, 90)
             }
             .scrollIndicators(.hidden)
+            .onReceive(TabReselect.shared.publisher(.communities)) { _ in
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo("communitiesTop", anchor: .top) }
+            }
+            }
         }
         .overlay(alignment: .bottom) {
             if let notice {
