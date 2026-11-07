@@ -453,6 +453,7 @@ ensure_column("users", "style_enc", "style_enc BLOB")
 ensure_column("users", "phone_idx", "phone_idx TEXT")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_idx)")
 ensure_column("users", "status_emoji_enc", "status_emoji_enc BLOB")   # эмодзи-статус рядом с именем
+ensure_column("users", "activity_enc", "activity_enc BLOB")            # «чем я занят»: эмодзи, текст и до какого времени
 ensure_column("users", "pw_salt", "pw_salt BLOB")          # облачный пароль (2FA): соль, хэш и подсказка
 ensure_column("users", "pw_hash_enc", "pw_hash_enc BLOB")
 ensure_column("users", "pw_hint_enc", "pw_hint_enc BLOB")
@@ -840,6 +841,22 @@ def followers_count(uid):
 _orbit_cache = {}
 
 
+ACTIVITY_MAX_HOURS = 24
+
+
+def activity_of(r):
+    """Статус «чем я занят» (🎧 Слушаю…, 🏋️ В зале), пока не истёк; иначе None"""
+    if not ("activity_enc" in r.keys() and r["activity_enc"]):
+        return None
+    try:
+        a = json.loads(dec(r["id"], "profile", "users.activity", r["id"], r["activity_enc"]) or "null")
+    except ValueError:
+        return None
+    if not a or a.get("until", 0) <= time.time():
+        return None
+    return a
+
+
 def orbit_of(r, viewer):
     """Лучшие друзья: с кем человек переписывался больше всего за последние 90 дней (кружат вокруг аватарки).
     Показываются, только если владелец включил «Отображение лучших друзей». Кэш на 5 минут"""
@@ -861,7 +878,8 @@ def orbit_of(r, viewer):
         if not o:
             continue
         out.append({"id": oid, "name": names(o)[2],
-                    "avatar": o["avatar"] if can_see(o, viewer, "photos") else None})
+                    "avatar": o["avatar"] if can_see(o, viewer, "photos") else None,
+                    **({"activity": act} if (act := activity_of(o)) else {})})
         if len(out) >= 6:
             break
     return out
@@ -901,6 +919,7 @@ def profile_json(r, me_id=None):
         "blocked_me": (not own) and is_blocked(uid, me_id),
         "style": style_of(r),
         "status_emoji": dec(uid, "profile", "users.status_emoji", uid, r["status_emoji_enc"]) if r["status_emoji_enc"] else None,
+        "activity": activity_of(r),
         "contact_name": contact_name(me_id, uid),
         "is_contact": bool(contact_name(me_id, uid)),
         "friend_state": friend_state(me_id, uid) if me_id and not own else "none",
@@ -2089,6 +2108,34 @@ def twofa_set(req, me):
     run("UPDATE users SET pw_salt = ?, pw_hash_enc = ?, pw_hint_enc = ? WHERE id = ?",
         (salt, enc(uid, "profile", "users.pw_hash", uid, _pw_digest(password, salt)),
          enc(uid, "profile", "users.pw_hint", uid, hint) if hint else None, uid))
+    req.send_json(200, {"ok": True})
+
+
+@route("PUT", r"/v1/me/activity")
+def set_activity(req, me):
+    d = req.body_json()
+    emoji = first_emoji(str(d.get("emoji", ""))) or "✨"
+    text = clean_line(d.get("text"), 60)
+    try:
+        hours = float(d.get("hours") or 4)
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    hours = max(0.25, min(ACTIVITY_MAX_HOURS, hours))
+    if not text:
+        raise ApiError(400, "bad_value")
+    a = {"emoji": emoji, "text": text, "until": round(time.time() + hours * 3600, 1), "since": round(time.time(), 1)}
+    uid = me["id"]
+    run("UPDATE users SET activity_enc = ? WHERE id = ?",
+        (enc(uid, "profile", "users.activity", uid, json.dumps(a, ensure_ascii=False)), uid))
+    rcache().pop(("usr", uid), None)
+    _orbit_cache.clear()
+    req.send_json(200, {"activity": a})
+
+
+@route("DELETE", r"/v1/me/activity")
+def clear_activity(req, me):
+    run("UPDATE users SET activity_enc = NULL WHERE id = ?", (me["id"],))
+    rcache().pop(("usr", me["id"]), None)
     req.send_json(200, {"ok": True})
 
 
@@ -6609,6 +6656,10 @@ SYS_LABELS = {"left": "вышел(а) из группы", "joined": "вступ�
 
 def summary_of(m, limit=120):
     """Текст для списка чатов, ответов и push: подпись или вид вложения"""
+    if "locked" in m.keys() and m["locked"]:
+        label = lock_label(m["id"])
+        if label:
+            return label                                 # содержимое капсулы / секрета не утекает в списки и push
     text = (dec(m["sender"], "messages", COL["msg_text"], m["id"], m["text_enc"]) or "").replace("\n", " ")
     if text.startswith(CALL_MARK):
         return call_label(text)
@@ -6664,7 +6715,153 @@ def typing_action(frm, to):
     return SHARED.typing_dm(frm, to, TYPING_TTL)
 
 
+# ---------- капсула времени и секрет на расстоянии ----------
+# Капсула: сообщение откроется у получателя в выбранный момент (через час, в день рождения, через год).
+# Секрет на расстоянии: откроется, только когда получатель придёт в нужное место (радиус 30–2000 м).
+# Пока замок закрыт, сервер не отдаёт получателю ни текст, ни вложения — только «замок» и, для секрета, место.
+
+ensure_column("messages", "locked", "locked INTEGER NOT NULL DEFAULT 0")
+DB.execute("CREATE TABLE IF NOT EXISTS message_locks(message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, open_at REAL, "
+           "place_enc BLOB, radius REAL, unlocked_at REAL, created_at REAL NOT NULL)")
+LOCK_MAX_FUTURE = 10 * 366 * 86400
+
+
+def clean_lock(raw):
+    """{"open_at": ts} — капсула; {"lat", "lon", "radius", "title"} — секрет на расстоянии. Можно оба сразу"""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    if raw.get("open_at") is not None:
+        try:
+            at = float(raw["open_at"])
+        except (TypeError, ValueError):
+            raise ApiError(400, "bad_lock")
+        now = time.time()
+        if not now + 30 <= at <= now + LOCK_MAX_FUTURE:
+            raise ApiError(400, "bad_lock")
+        out["open_at"] = at
+    if raw.get("lat") is not None or raw.get("lon") is not None:
+        try:
+            lat, lon = float(raw["lat"]), float(raw["lon"])
+            radius = float(raw.get("radius") or 150)
+        except (TypeError, ValueError, KeyError):
+            raise ApiError(400, "bad_lock")
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ApiError(400, "bad_lock")
+        out["place"] = {"lat": round(lat, 6), "lon": round(lon, 6), "title": clean_line(raw.get("title"), 80)}
+        out["radius"] = max(30.0, min(2000.0, radius))
+    return out or None
+
+
+def store_lock(mid, uid, lock):
+    place = lock.get("place")
+    run("INSERT OR REPLACE INTO message_locks(message_id, owner, open_at, place_enc, radius, unlocked_at, created_at) "
+        "VALUES (?,?,?,?,?,NULL,?)",
+        (mid, uid, lock.get("open_at"),
+         enc(uid, "messages", COL["msg_entities"], mid + ":place", json.dumps(place, ensure_ascii=False)) if place else None,
+         lock.get("radius"), time.time()))
+    run("UPDATE messages SET locked = 1 WHERE id = ?", (mid,))
+
+
+def lock_of(mid):
+    r = q1("SELECT * FROM message_locks WHERE message_id = ?", (mid,))
+    if not r:
+        return None
+    place = None
+    if r["place_enc"]:
+        try:
+            place = json.loads(dec(r["owner"], "messages", COL["msg_entities"], mid + ":place", r["place_enc"]) or "null")
+        except ValueError:
+            place = None
+    now = time.time()
+    time_ok = r["open_at"] is None or now >= r["open_at"]
+    place_ok = place is None or r["unlocked_at"] is not None
+    return {"open_at": r["open_at"], "place": place, "radius": r["radius"], "unlocked_at": r["unlocked_at"],
+            "time_ok": time_ok, "place_ok": place_ok, "open": time_ok and place_ok}
+
+
+def lock_label(mid):
+    lk = lock_of(mid)
+    if not lk or lk["open"]:
+        return None
+    return "📍 Секрет — откроется на месте" if lk["place"] and lk["time_ok"] else "⏳ Капсула времени"
+
+
+def lock_view(m, me_id, out):
+    """Замок на сообщении: получателю до открытия — без содержимого"""
+    if not ("locked" in m.keys() and m["locked"]):
+        return out
+    lk = lock_of(m["id"])
+    if not lk:
+        return out
+    info = {"open_at": lk["open_at"], "open": lk["open"], "time_ok": lk["time_ok"], "place_ok": lk["place_ok"]}
+    if lk["place"]:
+        info.update(place=lk["place"], radius=lk["radius"])
+    out["lock"] = info
+    if not lk["open"] and m["sender"] != me_id:
+        out.update(text="", entities=[], attachments=[], sealed=True)
+        for k in ("poll", "blocks", "buttons", "markup", "forwarded"):
+            out.pop(k, None)
+    return out
+
+
+@route("POST", r"/v1/messages/([a-f0-9]+)/unlock")
+def unlock_message(req, me, mid):
+    """Получатель пришёл на место: телефон присылает свою точку, сервер проверяет расстояние"""
+    uid = me["id"]
+    rate_limit("unlock:" + uid, 30, 60)
+    m = q1("SELECT * FROM messages WHERE id = ? AND recipient = ? AND del_recipient = 0", (mid, uid))
+    if not m or not m["locked"]:
+        raise ApiError(404, "not_found")
+    lk = lock_of(mid)
+    if not lk or not lk["place"]:
+        raise ApiError(400, "not_geo")
+    if not lk["time_ok"]:
+        raise ApiError(409, "too_early")
+    if lk["unlocked_at"] is None:
+        pos = clean_coords(req.body_json())
+        if not pos:
+            raise ApiError(400, "bad_request")
+        dist = haversine(pos["lat"], pos["lon"], lk["place"]["lat"], lk["place"]["lon"])
+        accuracy = min(float(pos.get("acc") or 0), 100.0)          # неточный GPS немного прощаем
+        if dist > lk["radius"] + accuracy:
+            return req.send_json(403, {"error": "too_far", "distance": round(dist)})
+        run("UPDATE message_locks SET unlocked_at = ? WHERE message_id = ?", (time.time(), mid))
+        SHARED.events_publish(m["sender"], "dm")                     # отправитель увидит «открыто»
+    req.send_json(200, message_json(q1("SELECT * FROM messages WHERE id = ?", (mid,)), uid))
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+ensure_column("message_locks", "notified", "notified INTEGER NOT NULL DEFAULT 0")
+
+
+def open_capsules():
+    """Капсула открылась — получатель узнаёт сразу: событие и push «Капсула времени открылась»"""
+    now = time.time()
+    for r in q("SELECT l.message_id, m.sender, m.recipient FROM message_locks l JOIN messages m ON m.id = l.message_id "
+               "WHERE l.notified = 0 AND l.open_at IS NOT NULL AND l.open_at <= ? LIMIT 100", (now,)):
+        run("UPDATE message_locks SET notified = 1 WHERE message_id = ?", (r["message_id"],))
+        SHARED.ver_bump("uver:" + r["recipient"])
+        SHARED.events_publish(r["recipient"], "dm")
+        SHARED.events_publish(r["sender"], "dm")
+        lk = lock_of(r["message_id"])
+        if lk and not lk["place"]:
+            notify_message(r["sender"], r["recipient"], "⏳ Капсула времени открылась")
+
+
 def message_json(m, me_id):
+    return lock_view(m, me_id, _message_json(m, me_id))
+
+
+def _message_json(m, me_id):
     mid = m["id"]
     reply = None
     if m["reply_to"]:
@@ -6827,6 +7024,8 @@ def forward_messages(req, me, peer):
             raise ApiError(403, "no_forward")
         if m["kind"] in SYS_LABELS:
             continue
+        if not grp and "locked" in m.keys() and m["locked"] and (lock_of(m["id"]) or {"open": True})["open"] is False:
+            raise ApiError(403, "locked")                  # нераскрытую капсулу / секрет переслать нельзя
         items.append(m)
     items.sort(key=lambda r: r["created_at"])
     now = time.time()
@@ -7554,8 +7753,9 @@ def record_dm_mention(peer, sender, mid, text, now):
             (mid, sender, peer, now))
 
 
-def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, story=None, silent=False):
-    """Кладёт личное сообщение в базу. peer == uid — «Избранное» (сообщение сразу прочитано)."""
+def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, story=None, silent=False, lock=None):
+    """Кладёт личное сообщение в базу. peer == uid — «Избранное» (сообщение сразу прочитано).
+    lock — капсула времени или секрет на расстоянии: содержимое скрыто от получателя, пока не откроется"""
     mid = uuid.uuid4().hex
     now = time.time()
     ttl = dm_ttl(dm_key(uid, peer))                    # исчезающие сообщения: таймер чата
@@ -7572,6 +7772,8 @@ def deliver_dm(uid, peer, text, entities, attachments, reply_to, poll=None, stor
     if story:
         run("UPDATE messages SET fwd_enc = ? WHERE id = ?",
             (enc(uid, "messages", COL["msg_entities"], mid + ":fwd", json.dumps({"story": story}, ensure_ascii=False)), mid))
+    if lock:
+        store_lock(mid, uid, lock)                     # до push: в уведомлении — только «капсула» / «секрет»
     SHARED.typing_clear(uid, peer)
     SHARED.ver_bump("uver:" + peer)                    # у получателя список чатов обновится сразу
     if peer != uid:
@@ -7694,7 +7896,8 @@ def send_message(req, me, peer):
         st = q1("SELECT * FROM stories WHERE id = ? AND author = ? AND expires_at > ?", (str(d["story_id"]), peer, time.time()))
         if st:
             story = {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"]}
-    row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")))
+    lock = clean_lock(d.get("lock")) if peer != uid and not poll and not blocks else None
+    row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")), lock=lock)
     if blocks or buttons:
         store_article("messages", row["id"], uid, blocks, buttons)
         row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
@@ -7919,6 +8122,10 @@ def scheduler_loop():
             reap_uploads()       # брошенные загрузки частями (не продолжали сутки)
         except Exception as e:
             print("reap_uploads: %s" % e.__class__.__name__)
+        try:
+            open_capsules()      # капсулы времени, чей час настал: разбудить получателя и прислать уведомление
+        except Exception as e:
+            print("open_capsules: %s" % e.__class__.__name__)
         try:
             for r in q("SELECT * FROM scheduled WHERE send_at <= ? ORDER BY send_at LIMIT 50", (time.time(),)):
                 run("DELETE FROM scheduled WHERE id = ?", (r["id"],))
