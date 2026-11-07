@@ -339,6 +339,43 @@ struct MessageInfo: Equatable {
     var sentAt: Date
 }
 
+/// Фото-цепочка: тема дня, фото по кругу, проверка владельцем
+struct PhotoChain: Equatable {
+    struct Item: Identifiable, Equatable {
+        let id: String
+        let mediaID: String
+        let pending: Bool
+        let mine: Bool
+        let userID: String
+        let name: String
+        let avatarID: String?
+    }
+    var theme: String
+    var owner: Bool
+    var moderated: Bool
+    var closed: Bool
+    var items: [Item]
+    var pending: [Item]
+    var people: Int
+}
+
+struct PhotoChainDTO: Decodable {
+    struct ItemDTO: Decodable {
+        struct U: Decodable { let id: String; let name: String; let avatar: String? }
+        let id: String; let mediaId: String; let status: String; let mine: Bool; let user: U
+        var model: PhotoChain.Item {
+            PhotoChain.Item(id: id, mediaID: mediaId, pending: status == "pending", mine: mine, userID: user.id,
+                            name: user.name, avatarID: user.avatar)
+        }
+    }
+    let theme: String; let owner: Bool; let moderated: Bool; let closed: Bool
+    let items: [ItemDTO]; let pending: [ItemDTO]; let people: Int?
+    var model: PhotoChain {
+        PhotoChain(theme: theme, owner: owner, moderated: moderated, closed: closed,
+                   items: items.map(\.model), pending: pending.map(\.model), people: people ?? 0)
+    }
+}
+
 /// Сообщение перенесено из другого мессенджера
 struct ImportedInfo: Equatable {
     var source: String              // Telegram / WhatsApp
@@ -401,6 +438,7 @@ struct ChatMessage: Identifiable, Equatable {
     var lock: MessageLock? = nil    // капсула времени / секрет на расстоянии
     var sealed = false              // замок ещё закрыт: содержимое сервер не прислал
     var imported: ImportedInfo? = nil   // перенесено из Telegram / WhatsApp
+    var chain: PhotoChain? = nil        // фото-цепочка
     var isArticle: Bool { !blocks.isEmpty }
 
     var summary: String {
@@ -579,6 +617,13 @@ protocol MessengerRepository: Sendable {
     func exportPage(peerID: String, before: Double?) async throws -> (messages: [ChatMessage], more: Bool, before: Double?)
     /// Импорт: пачка сообщений из Telegram / WhatsApp, возвращает сколько добавлено
     func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int
+    // фото-цепочка
+    func sendChain(peerID: String, theme: String, moderated: Bool) async throws -> ChatMessage
+    func chainAdd(messageID: String, mediaID: String) async throws -> PhotoChain
+    func chainApprove(messageID: String, itemID: String) async throws -> PhotoChain
+    func chainRemove(messageID: String, itemID: String) async throws -> PhotoChain
+    func chainSettings(messageID: String, moderated: Bool?, closed: Bool?) async throws -> PhotoChain
+    func chainReel(messageID: String) async throws
     // темы в группах
     func topics(groupID: String) async throws -> ForumTopicList
     func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
@@ -835,6 +880,7 @@ private struct MessageDTO: Decodable {
     let sealed: Bool?
     let imported: ImportedDTO?
     struct ImportedDTO: Decodable { let source: String; let name: String? }
+    let chain: PhotoChainDTO?
 
     struct LockDTO: Decodable {
         struct Place: Decodable { let lat: Double; let lon: Double; let title: String? }
@@ -864,7 +910,8 @@ private struct MessageDTO: Decodable {
                     comments: comments, note: note, commenters: (commenters ?? []).map(\.model),
                     markup: markup ?? [], blocks: (blocks ?? []).compactMap(\.model),
                     lock: lock?.model, sealed: sealed ?? false,
-                    imported: imported.map { ImportedInfo(source: $0.source, name: $0.name ?? "") })
+                    imported: imported.map { ImportedInfo(source: $0.source, name: $0.name ?? "") },
+                    chain: chain?.model)
     }
 }
 
@@ -1317,6 +1364,39 @@ struct RemoteMessengerRepository: MessengerRepository {
         if let before { path += "&before=\(before)" }
         let page = try decodeAPI(Page.self, from: try await api.request("GET", path))
         return (page.messages.map(\.model), page.more, page.before)
+    }
+
+    func sendChain(peerID: String, theme: String, moderated: Bool) async throws -> ChatMessage {
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/messages",
+                                         body: ServerAPI.json(["chain": ["theme": theme, "moderated": moderated]]))
+        return try decodeAPI(MessageDTO.self, from: data).model
+    }
+
+    private struct ChainBox: Decodable { let chain: PhotoChainDTO }
+
+    func chainAdd(messageID: String, mediaID: String) async throws -> PhotoChain {
+        try decodeAPI(ChainBox.self, from: try await api.request("POST", "/v1/chains/\(messageID)/items",
+                                                                 body: ServerAPI.json(["media_id": mediaID]))).chain.model
+    }
+
+    func chainApprove(messageID: String, itemID: String) async throws -> PhotoChain {
+        try decodeAPI(ChainBox.self, from: try await api.request("POST", "/v1/chains/\(messageID)/items/\(itemID)/approve")).chain.model
+    }
+
+    func chainRemove(messageID: String, itemID: String) async throws -> PhotoChain {
+        try decodeAPI(ChainBox.self, from: try await api.request("DELETE", "/v1/chains/\(messageID)/items/\(itemID)")).chain.model
+    }
+
+    func chainSettings(messageID: String, moderated: Bool?, closed: Bool?) async throws -> PhotoChain {
+        var body: [String: Any] = [:]
+        if let moderated { body["moderated"] = moderated }
+        if let closed { body["closed"] = closed }
+        return try decodeAPI(ChainBox.self, from: try await api.request("POST", "/v1/chains/\(messageID)/settings",
+                                                                        body: ServerAPI.json(body))).chain.model
+    }
+
+    func chainReel(messageID: String) async throws {
+        _ = try await api.request("POST", "/v1/chains/\(messageID)/reel")
     }
 
     func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int {

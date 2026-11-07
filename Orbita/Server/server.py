@@ -6899,6 +6899,7 @@ def _message_json(m, me_id):
         "reactions": reactions_of(mid, me_id),
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
+        **({"chain": chain_json(mid, me_id)} if m["kind"] == "chain" else {}),
         **({"expires_at": m["expires_at"]} if m["expires_at"] else {}),
         **({"markup": mk} if (mk := markup_of(m)) else {}),
         **article_fields(m),
@@ -7156,6 +7157,167 @@ def clean_poll(raw):
             raise ApiError(400, "bad_quiz")
         out.update(quiz=1, multiple=0, correct=correct, explanation=clean_line(raw.get("explanation"), 200))
     return out
+
+
+# ---------- фото-цепочка ----------
+# В чате задают тему дня («мой завтрак», «вид из окна») — все по кругу добавляют фото. Владелец может включить проверку:
+# тогда новые фото видит только он, пока не одобрит. Не по теме — убирает. В конце цепочку можно выложить коллажем в шортсы.
+
+DB.execute("CREATE TABLE IF NOT EXISTS photo_chains(message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, theme_enc BLOB NOT NULL, "
+           "moderated INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)")
+DB.execute("CREATE TABLE IF NOT EXISTS chain_items(id TEXT PRIMARY KEY, message_id TEXT NOT NULL, user_id TEXT NOT NULL, "
+           "media_id TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_chain_items ON chain_items(message_id, created_at)")
+CHAIN_MAX_ITEMS = 60
+CHAIN_PER_USER = 5
+
+
+def clean_chain(raw):
+    if not isinstance(raw, dict):
+        return None
+    theme = clean_line(raw.get("theme"), 80)
+    if not theme:
+        raise ApiError(400, "bad_chain")
+    return {"theme": theme, "moderated": 1 if raw.get("moderated") else 0}
+
+
+def create_chain(mid, uid, chain):
+    run("INSERT INTO photo_chains(message_id, owner, theme_enc, moderated, closed, created_at) VALUES (?,?,?,?,0,?)",
+        (mid, uid, enc(uid, "messages", COL["msg_text"], mid + ":chain", chain["theme"]), chain["moderated"], time.time()))
+
+
+def chain_json(mid, me_id):
+    c = q1("SELECT * FROM photo_chains WHERE message_id = ?", (mid,))
+    if not c:
+        return None
+    owner = c["owner"] == me_id
+    rows = q("SELECT * FROM chain_items WHERE message_id = ? ORDER BY created_at", (mid,))
+
+    def item(r):
+        b = user_brief(r["user_id"], me_id)
+        return {"id": r["id"], "media_id": r["media_id"], "status": r["status"], "mine": r["user_id"] == me_id,
+                "user": {"id": r["user_id"], "name": b["name"], "avatar": b.get("avatar")}}
+    approved = [item(r) for r in rows if r["status"] == "approved"]
+    # на проверке: владелец видит все, автор — свои
+    pending = [item(r) for r in rows if r["status"] == "pending" and (owner or r["user_id"] == me_id)]
+    return {"theme": dec(c["owner"], "messages", COL["msg_text"], mid + ":chain", c["theme_enc"]) or "",
+            "owner": owner, "moderated": bool(c["moderated"]), "closed": bool(c["closed"]),
+            "items": approved, "pending": pending, "people": len({r["user_id"] for r in rows if r["status"] == "approved"})}
+
+
+def chain_ctx(mid, uid):
+    """(сообщение, это_группа, цепочка) — если пользователь в этом чате"""
+    m, grp, _ = find_message(mid, uid)
+    c = q1("SELECT * FROM photo_chains WHERE message_id = ?", (mid,))
+    if not c:
+        raise ApiError(404, "not_found")
+    return m, grp, c
+
+
+def chain_wake(m, grp):
+    """Все в чате видят изменения цепочки сразу"""
+    if grp:
+        for r in q("SELECT user_id FROM group_members WHERE group_id = ?", (m["group_id"],)):
+            SHARED.events_publish(r["user_id"], "group")
+    else:
+        SHARED.events_publish(m["sender"], "dm")
+        SHARED.events_publish(m["recipient"], "dm")
+
+
+@route("POST", r"/v1/chains/([a-f0-9]+)/items")
+def chain_add(req, me, mid):
+    uid = me["id"]
+    rate_limit("chain:" + uid, 30, 600)
+    m, grp, c = chain_ctx(mid, uid)
+    if c["closed"]:
+        raise ApiError(409, "chain_closed")
+    media = q1("SELECT * FROM media WHERE id = ? AND owner = ? AND kind = 'image'", (str(req.body_json().get("media_id", "")), uid))
+    if not media:
+        raise ApiError(400, "media_not_found")
+    if q1("SELECT COUNT(*) n FROM chain_items WHERE message_id = ? AND status != 'rejected'", (mid,))["n"] >= CHAIN_MAX_ITEMS:
+        raise ApiError(409, "chain_full")
+    if q1("SELECT COUNT(*) n FROM chain_items WHERE message_id = ? AND user_id = ? AND status != 'rejected'", (mid, uid))["n"] >= CHAIN_PER_USER:
+        raise ApiError(409, "too_many")
+    status = "pending" if c["moderated"] and c["owner"] != uid else "approved"
+    run("INSERT INTO chain_items(id, message_id, user_id, media_id, status, created_at) VALUES (?,?,?,?,?,?)",
+        (uuid.uuid4().hex, mid, uid, media["id"], status, time.time()))
+    chain_wake(m, grp)
+    req.send_json(200, {"status": status, "chain": chain_json(mid, uid)})
+
+
+@route("POST", r"/v1/chains/([a-f0-9]+)/items/([a-f0-9]+)/approve")
+def chain_approve(req, me, mid, iid):
+    m, grp, c = chain_ctx(mid, me["id"])
+    if c["owner"] != me["id"]:
+        raise ApiError(403, "forbidden")
+    run("UPDATE chain_items SET status = 'approved' WHERE id = ? AND message_id = ?", (iid, mid))
+    chain_wake(m, grp)
+    req.send_json(200, {"chain": chain_json(mid, me["id"])})
+
+
+@route("DELETE", r"/v1/chains/([a-f0-9]+)/items/([a-f0-9]+)")
+def chain_remove(req, me, mid, iid):
+    """Владелец убирает любое фото (не по теме), автор — своё"""
+    uid = me["id"]
+    m, grp, c = chain_ctx(mid, uid)
+    it = q1("SELECT * FROM chain_items WHERE id = ? AND message_id = ?", (iid, mid))
+    if not it:
+        raise ApiError(404, "not_found")
+    if c["owner"] != uid and it["user_id"] != uid:
+        raise ApiError(403, "forbidden")
+    if c["owner"] == uid and it["user_id"] != uid:
+        run("UPDATE chain_items SET status = 'rejected' WHERE id = ?", (iid,))   # не по теме: человек больше не займёт место
+    else:
+        run("DELETE FROM chain_items WHERE id = ?", (iid,))
+    chain_wake(m, grp)
+    req.send_json(200, {"chain": chain_json(mid, uid)})
+
+
+@route("POST", r"/v1/chains/([a-f0-9]+)/settings")
+def chain_settings(req, me, mid):
+    """Владелец: проверка фото вкл/выкл, завершить цепочку"""
+    m, grp, c = chain_ctx(mid, me["id"])
+    if c["owner"] != me["id"]:
+        raise ApiError(403, "forbidden")
+    d = req.body_json()
+    if "moderated" in d:
+        run("UPDATE photo_chains SET moderated = ? WHERE message_id = ?", (1 if d["moderated"] else 0, mid))
+    if "closed" in d:
+        run("UPDATE photo_chains SET closed = ? WHERE message_id = ?", (1 if d["closed"] else 0, mid))
+    chain_wake(m, grp)
+    req.send_json(200, {"chain": chain_json(mid, me["id"])})
+
+
+@route("POST", r"/v1/chains/([a-f0-9]+)/reel")
+def chain_reel(req, me, mid):
+    """Владелец выкладывает цепочку коллажем в шортсы (до 10 фото, копии файлов — у владельца)"""
+    uid = me["id"]
+    m, grp, c = chain_ctx(mid, uid)
+    if c["owner"] != uid:
+        raise ApiError(403, "forbidden")
+    rows = q("SELECT * FROM chain_items WHERE message_id = ? AND status = 'approved' ORDER BY created_at LIMIT ?", (mid, MAX_MEDIA_PER_POST))
+    if not rows:
+        raise ApiError(400, "empty")
+    items = []
+    for r in rows:
+        nid = clone_media(r["media_id"], uid)
+        md = q1("SELECT * FROM media WHERE id = ?", (nid,)) if nid else None
+        if md:
+            items.append((nid, "image", md["width"], md["height"], None, md["thumb"], 0))
+    theme = dec(c["owner"], "messages", COL["msg_text"], mid + ":chain", c["theme_enc"]) or ""
+    pid = uuid.uuid4().hex
+    text = "📸 " + theme
+    with LOCK:
+        run("BEGIN")
+        try:
+            run("INSERT INTO posts(id, author, text_enc, entities_enc, created_at, reel) VALUES (?,?,?,?,?,1)",
+                (pid, uid, enc(uid, "posts", COL["post_text"], pid, text), enc(uid, "posts", COL["post_entities"], pid, "[]"), time.time()))
+            write_post_media(pid, items)
+            run("COMMIT")
+        except Exception:
+            run("ROLLBACK")
+            raise
+    req.send_json(201, post_json(q1("SELECT * FROM posts WHERE id = ?", (pid,)), uid))
 
 
 def create_poll(mid, uid, poll):
@@ -7973,9 +8135,10 @@ def send_message(req, me, peer):
         if either_blocked(uid, peer):
             raise ApiError(403, "blocked")
     poll = clean_poll(d.get("poll"))
-    blocks = None if poll else clean_blocks(d.get("blocks"), uid)          # статья из блоков
+    chain = None if poll else clean_chain(d.get("chain"))                 # фото-цепочка
+    blocks = None if poll or chain else clean_blocks(d.get("blocks"), uid)          # статья из блоков
     buttons = clean_user_buttons(d.get("buttons"))                         # кнопки-ссылки под сообщением
-    text = poll["question"] if poll else str(d.get("text", "")).strip()
+    text = poll["question"] if poll else ("📸 " + chain["theme"] if chain else str(d.get("text", "")).strip())
     if blocks:
         text = (text or blocks_summary(blocks))[:MAX_MSG]
         send_at = None                                                     # статьи уходят сразу
@@ -8013,6 +8176,10 @@ def send_message(req, me, peer):
             story = {"id": st["id"], "media_id": st["media_id"], "kind": st["kind"]}
     lock = clean_lock(d.get("lock")) if peer != uid and not poll and not blocks else None
     row = deliver_dm(uid, peer, text, entities, attachments, reply_to, poll, story, silent=bool(d.get("silent")), lock=lock)
+    if chain:
+        run("UPDATE messages SET kind = 'chain' WHERE id = ?", (row["id"],))
+        create_chain(row["id"], uid, chain)
+        row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
     if blocks or buttons:
         store_article("messages", row["id"], uid, blocks, buttons)
         row = q1("SELECT * FROM messages WHERE id = ?", (row["id"],))
@@ -9417,6 +9584,8 @@ def gmsg_json(m, me_id, channel=None):
         out["system"] = m["kind"]
     if "kind" in m.keys() and m["kind"] == "poll":
         out["poll"] = poll_json(mid, me_id)
+    if "kind" in m.keys() and m["kind"] == "chain":
+        out["chain"] = chain_json(mid, me_id)
     if channel:
         out["views"] = max(1, pf_group_views(m))
         cg = group_row(m["group_id"])
@@ -9914,9 +10083,10 @@ def group_send(req, me, gid):
         raise ApiError(403, "forbidden")
     d = req.body_json()
     poll = clean_poll(d.get("poll"))
-    blocks = None if poll else clean_blocks(d.get("blocks"), uid)
+    chain = None if poll else clean_chain(d.get("chain"))                 # фото-цепочка
+    blocks = None if poll or chain else clean_blocks(d.get("blocks"), uid)
     buttons = clean_user_buttons(d.get("buttons"))
-    text = poll["question"] if poll else str(d.get("text", "")).strip()
+    text = poll["question"] if poll else ("📸 " + chain["theme"] if chain else str(d.get("text", "")).strip())
     if blocks:
         text = (text or blocks_summary(blocks))[:MAX_MSG]
     attachments = [] if poll else clean_attachments(d.get("attachments"), uid)
@@ -9950,11 +10120,13 @@ def group_send(req, me, gid):
         (mid, gid, uid, enc(uid, "messages", COL["msg_text"], mid, text),
          enc(uid, "messages", COL["msg_entities"], mid, json.dumps(entities, ensure_ascii=False)),
          enc(uid, "messages", COL["msg_attach"], mid, json.dumps(attachments)) if attachments else None,
-         reply_to, now, "poll" if poll else None))
+         reply_to, now, "poll" if poll else ("chain" if chain else None)))
     if topic_id:
         run("UPDATE group_messages SET topic_id = ? WHERE id = ?", (topic_id, mid))
     if blocks or buttons:
         store_article("group_messages", mid, uid, blocks, buttons)
+    if chain:
+        create_chain(mid, uid, chain)
     if poll:
         create_poll(mid, uid, poll)
     run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (now, gid, uid))

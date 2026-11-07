@@ -897,6 +897,7 @@ struct ChatScreen: View {
                 .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
                                                          peer: model.peer.avatarID, peerName: model.peer.name))
                 .environment(\.chatLive, liveContext)
+                .environment(\.chainModel, model)                         // действия в фото-цепочках
                 .background { ChatTranslatorHost() }                     // перевод на телефоне
                 .onAppear { translator.open(chat: route.peer.id) }
                 .onChange(of: model.messages.count) { _, _ in translator.feed(model.messages) }

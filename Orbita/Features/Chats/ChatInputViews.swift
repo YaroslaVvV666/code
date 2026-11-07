@@ -46,6 +46,7 @@ struct ChatInputBar: View {
     @EnvironmentObject private var session: AppSession
     @State private var showSchedule = false
     @State private var showCapsule = false               // капсула времени: когда откроется
+    @State private var showChain = false                 // фото-цепочка: тема дня
     @State private var showSecretPlace = false           // секрет: где откроется
     @State private var showStickerCreator = false
     @State private var kbVisible = false
@@ -160,6 +161,11 @@ struct ChatInputBar: View {
                 }, onCancel: { editingDraft = nil })
             }
         }
+        .sheet(isPresented: $showChain) {
+            ChainCreateSheet { theme, moderated in Task { _ = await model.sendChain(theme: theme, moderated: moderated) } }
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $showCapsule) {
             CapsuleSheet { date in sendLocked(OutgoingLock(openAt: date)) }
                 .environment(\.theme, theme).environment(\.lang, lang)
@@ -201,6 +207,9 @@ struct ChatInputBar: View {
                         onFiles: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showFileImporter = true } },
                         onPoll: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onPoll() } },
                         onLocation: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showLocation = true } },
+                        onChain: model.isBot || (model.peer.isChannel && model.group?.isAdmin != true) ? nil : {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showChain = true }
+                        },
                         onArticle: model.isBot ? nil : {
                             articleSeed = ""
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showArticle = true }

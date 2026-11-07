@@ -15,6 +15,8 @@ struct AttachSheet: View {
     var onLocation: (() -> Void)? = nil
     /// «Звук»: выбрать музыку/аудиофайл (в статье)
     var onAudio: (() -> Void)? = nil
+    /// «Цепочка»: фото-цепочка на тему дня
+    var onChain: (() -> Void)? = nil
     var onArticle: (() -> Void)? = nil          // «Статья»: сообщение из блоков (заголовки, цитаты, таблицы, медиа…)
     var onPhoto: (Data) -> Void = { _ in }
     var onVideo: (URL) -> Void = { _ in }
@@ -184,13 +186,14 @@ struct AttachSheet: View {
             .buttonStyle(PressStyle())
             .padding(.horizontal, 16).padding(.bottom, 14)
             .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else if onFiles != nil || onLocation != nil || onAudio != nil || canPoll || onArticle != nil {
+        } else if onFiles != nil || onLocation != nil || onAudio != nil || canPoll || onArticle != nil || onChain != nil {
             HStack(spacing: 0) {
                 tab("gallery", "photo.on.rectangle.fill", s.t("Галерея", "Gallery")) { }
                 if let onAudio { tab("audio", "play.circle.fill", s.t("Звук", "Audio")) { onAudio() } }
                 if let onFiles { tab("file", "doc.fill", s.attachFile) { onFiles() } }
                 if let onLocation { tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location")) { onLocation() } }
                 if canPoll { tab("poll", "chart.bar.fill", s.t("Опрос", "Poll")) { onPoll() } }
+                if let onChain { tab("chain", "photo.stack.fill", s.t("Цепочка", "Chain")) { onChain() } }
                 if let onArticle { tab("article", "doc.richtext.fill", s.t("Статья", "Article")) { onArticle() } }
             }
             .padding(6)

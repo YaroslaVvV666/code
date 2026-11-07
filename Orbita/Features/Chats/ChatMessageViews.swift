@@ -602,6 +602,7 @@ struct MessageRow: View {
                 .buttonStyle(.plain)
             }
             if let imp = message.imported { ImportedBadge(info: imp, mine: mine) }        // перенесено из Telegram / WhatsApp
+            if let chain = message.chain { PhotoChainBlock(message: message, chain: chain, mine: mine) }   // фото-цепочка
             // капсула времени / секрет на месте: у получателя — запечатано, у отправителя и после открытия — пометка
             if let lock = message.lock {
                 if message.sealed {
@@ -735,7 +736,7 @@ struct MessageRow: View {
 
             if message.isArticle {
                 EmptyView()
-            } else if hasText && message.poll == nil {
+            } else if hasText && message.poll == nil && message.chain == nil {
                 // перевод прямо в пузыре: «Показать оригинал» в меню возвращает текст
                 let translated = translator.translation(message.id)
                 if translated != nil {

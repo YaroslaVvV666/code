@@ -294,3 +294,17 @@ while True:
   В профиле и у друзей в орбите приходит `activity: {emoji, text, until}`, пока не истёк.
 Проверка: `python3 tests/test_capsule_secret.py`.
 
+
+## Перенос переписки, дуэты, фото-цепочка
+
+- **Экспорт**: `GET /v1/chats/<peer>/export?before=<ts>&limit=500` — история постранично (телефон собирает .zip:
+  result.json как у Telegram, messages.txt как у WhatsApp, фото).
+- **Импорт** из Telegram / WhatsApp: `POST /v1/chats/<peer>/import` `{"source", "messages": [{mine, text, date, name, attachments}]}`
+  (до 500 за раз). Сообщения встают с исходными датами и полем `imported: {source, name}` — у обоих собеседников.
+  Проверка: `python3 tests/test_chat_import.py`.
+- **Дуэты**: шортс с `"duet_of": <id шортса>`; в ответе `duet: {id, author}`. Если автор запретил репосты — дуэт нельзя.
+  Проверка: `python3 tests/test_duets.py`.
+- **Фото-цепочка**: сообщение с `"chain": {"theme", "moderated"}` (личка и группы); `POST /v1/chains/<id>/items` (фото),
+  `/items/<item>/approve`, `DELETE /items/<item>`, `/settings` (`moderated`, `closed`), `/reel` — коллаж в шортсы.
+  С проверкой новые фото видит только владелец, пока не одобрит. Проверка: `python3 tests/test_photo_chain.py`.
+
