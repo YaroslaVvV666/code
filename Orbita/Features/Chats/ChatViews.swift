@@ -823,6 +823,7 @@ struct ChatScreen: View {
     @State private var translateText: String?
     @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
+    @State private var reactionWho: ReactionWhoRoute?      // кто поставил реакции (окно поверх чата)
     @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
     @State private var noteTarget: ChatMessage?             // своя заметка к сообщению: добавить / изменить
     @State private var reportTarget: ChatMessage?           // пожаловаться на чужое сообщение
@@ -866,6 +867,15 @@ struct ChatScreen: View {
                 .environment(\.theme, theme)
         } else {
             chatSheets(chatLifecycle(chatChrome(chatMain)))
+                .overlay {
+                    if let route = reactionWho {
+                        ReactionWhoOverlay(route: route, onClose: { reactionWho = nil },
+                                           onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
+                            .environmentObject(session)
+                            .transition(.opacity)
+                            .zIndex(50)
+                    }
+                }
                 .environment(\.theme, theme)
         }
     }
@@ -948,6 +958,7 @@ struct ChatScreen: View {
                     onForward: { forwardIDs = ForwardRoute(ids: [target.id]) },
                     onSelect: { selecting = true; selected = [target.id] },
                     onInfo: { infoMessage = target },
+                    onReactions: { reactionWho = ReactionWhoRoute(message: target, emoji: nil) },
                     onTranslate: { translateText = target.text },
                     onNote: { noteTarget = target },
                     onReport: { reportTarget = target },
@@ -1962,7 +1973,7 @@ struct ChatScreen: View {
                 onPlayAudio: playAudio,
                 showSender: groupChat,
                 noForward: model.peer.noForward || model.group?.noForward == true,
-                onReactionInfo: { infoMessage = m },
+                onReactionInfo: { emoji in reactionWho = ReactionWhoRoute(message: m, emoji: emoji) },
                 onJumpToReply: { scrollTarget = $0 },
                 onReact: { model.react(m, emoji: $0) },
                 onLongPress: { if !selecting { MessageMenu.isOpen = true; actionTarget = m } },     // флаг — сразу, ещё до первого кадра меню

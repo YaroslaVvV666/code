@@ -61,6 +61,8 @@ struct MessageActionOverlay: View {
     var onForward: () -> Void = {}
     var onSelect: () -> Void = {}
     var onInfo: () -> Void = {}
+    /// «N реакций» — все реакции на сообщение: кто, когда и какую поставил
+    var onReactions: (() -> Void)? = nil
     /// «Перевести» — системный переводчик iOS (17.4+), прямо на телефоне
     var onTranslate: (() -> Void)? = nil
     /// Своя заметка к сообщению — видна только тебе
@@ -397,6 +399,10 @@ struct MessageActionOverlay: View {
                 row(pinned ? "pin.slash" : "pin", pinned ? s.t("Открепить", "Unpin") : s.t("Закрепить", "Pin")) {
                     model.togglePin(message); dismiss()
                 }
+            }
+            if let onReactions, case let total = message.reactions.reduce(0, { $0 + $1.count }), total > 0 {
+                divider
+                row("heart.text.square", ReactionWords.count(total, lang: lang)) { dismiss(onReactions) }
             }
             if showSender {
                 // в группе — кто прочитал и кто как отреагировал; в личке время и «прочитано» и так видны сверху меню

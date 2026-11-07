@@ -220,7 +220,7 @@ struct MessageRow: View {
     var onPlayAudio: (ChatAttachment) -> Void = { _ in }
     var showSender = false
     var noForward = false
-    var onReactionInfo: (() -> Void)? = nil
+    var onReactionInfo: ((String) -> Void)? = nil       // зажали реакцию — кто её поставил и когда
     var onJumpToReply: ((String) -> Void)? = nil     // нажали на цитату — перейти к исходному сообщению
     var onReact: ((String) -> Void)? = nil          // двойной тап и нажатие на «чип» реакции
     var onLongPress: (() -> Void)? = nil            // зажатие — реакции и меню
@@ -458,7 +458,7 @@ struct MessageRow: View {
                 }
                 .buttonStyle(.plain)
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                    if interactive && !blocked { Haptics.impact(.medium); onReactionInfo?() }
+                    if interactive && !blocked { Haptics.impact(.medium); onReactionInfo?(r.emoji) }
                 })
                 .transition(.scale.combined(with: .opacity))
             }
