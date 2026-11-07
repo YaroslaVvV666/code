@@ -807,6 +807,15 @@ struct ChatScreen: View {
     @State private var scheduled: [ScheduledItem] = []
     @State private var showScheduled = false
     @State private var showPlayer = false
+    @State private var showLiveMap = false                  // общая карта трансляций чата
+
+    /// Кто транслирует геопозицию в этом чате (я и собеседники) — для плашки сверху и общей карты
+    private var liveContext: ChatLiveContext {
+        ChatLiveContext.build(chatID: route.peer.id, messages: model.messages,
+                              me: (session.serverID, session.profile.profile?.name ?? "", session.profile.profile?.avatarID),
+                              peer: model.peer,
+                              onShare: model.canWrite ? { [model] point, seconds in model.sendLocation(point, live: seconds) } : nil)
+    }
     @State private var deleting: ChatMessage?
     @State private var viewer: ViewerItem?
     @State private var previewFile: PreviewFile?
@@ -885,6 +894,11 @@ struct ChatScreen: View {
                 // аватарки для трансляции геопозиции: в кружочке на карте — тот, кто транслирует
                 .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
                                                          peer: model.peer.avatarID, peerName: model.peer.name))
+                .environment(\.chatLive, liveContext)
+                .fullScreenCover(isPresented: $showLiveMap) {
+                    LiveMapScreen(context: liveContext)
+                        .environment(\.theme, theme).environment(\.lang, lang)
+                }
                 .overlay {
                     if let route = reactionWho {
                         ReactionWhoOverlay(route: route, onClose: { reactionWho = nil },
@@ -925,7 +939,7 @@ struct ChatScreen: View {
                         }
                         scheduledBar
                         pinnedBar
-                        LiveLocationBar(chatID: route.peer.id)
+                        LiveLocationBar(context: liveContext) { showLiveMap = true }
                         digestBar
                         NowPlayingBar { showPlayer = true }
                         VoiceNowBar()

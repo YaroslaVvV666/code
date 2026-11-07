@@ -35,6 +35,8 @@ struct LiveAvatarPin: View {
         VStack(spacing: -3) {
                 AvatarView(name: name, size: size, avatarID: avatarID)
                     .clipShape(Circle())
+                    .grayscale(active ? 0 : 1)                       // трансляция закончилась — застывает серой и темнее
+                    .brightness(active ? 0 : -0.22)
                     .padding(3)
                     .background(Circle().fill(active ? theme.accentColor : Color.gray))
                     .background { if active { PulseRing(color: theme.accentColor) } }     // «живая» — расходятся волны
@@ -525,12 +527,19 @@ struct LocationBlock: View {
             withAnimation(.easeOut(duration: 0.2)) { snapshot = img ?? snapshot }
         }
         .fullScreenCover(isPresented: $showMap) {
+            if geo.isLive, !chatLive.people.isEmpty {
+                // трансляция: общая карта — и моя, и его аватарки, закончившиеся — серые на последней точке
+                LiveMapScreen(context: chatLive, focus: messageID)
+                    .environment(\.theme, theme).environment(\.lang, lang)
+            } else {
             LocationMapView(geo: geo, messageID: messageID, mine: mine, avatarID: pinAvatar, name: pinName)
                 .environment(\.theme, theme).environment(\.lang, lang)
+            }
         }
     }
 
     @Environment(\.liveAvatars) private var avatars
+    @Environment(\.chatLive) private var chatLive
     private var pinAvatar: String? { avatarID ?? (mine ? avatars.mine : avatars.peer) }
     private var pinName: String { mine ? avatars.myName : avatars.peerName }
 
@@ -695,48 +704,299 @@ struct LocationMapView: View {
     }
 }
 
-// MARK: - Плашка в чате: «Вы транслируете геопозицию»
+// MARK: - Кто транслирует в этом чате
+
+/// Трансляция одного человека в чате (последняя его трансляция)
+struct LivePerson: Identifiable, Equatable {
+    let messageID: String
+    let userID: String
+    let name: String
+    let avatarID: String?
+    let mine: Bool
+    let geo: GeoPoint
+    var id: String { userID }
+    var active: Bool { geo.active() }
+    var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: geo.lat, longitude: geo.lon) }
+}
+
+/// Всё про трансляции чата — для плашки сверху, общей карты и карт в сообщениях
+struct ChatLiveContext {
+    var chatID = ""
+    var people: [LivePerson] = []
+    /// Поделиться своей трансляцией прямо с карты (точка, секунды)
+    var onShare: ((GeoPoint, Int) -> Void)? = nil
+    var active: [LivePerson] { people.filter(\.active) }
+
+    /// Из сообщений чата: у каждого — его последняя трансляция (идущая или закончившаяся — тогда застывшая серая)
+    static func build(chatID: String, messages: [ChatMessage], me: (id: String, name: String, avatar: String?),
+                      peer: ChatPeer, onShare: ((GeoPoint, Int) -> Void)?) -> ChatLiveContext {
+        var byUser: [String: LivePerson] = [:]
+        for m in messages {
+            guard let geo = m.attachments.first(where: { $0.kind == .location })?.geo, geo.isLive else { continue }
+            let uid = m.mine ? me.id : (m.sender?.id ?? peer.id)
+            let person = LivePerson(messageID: m.id, userID: uid,
+                                    name: m.mine ? me.name : (m.sender?.name ?? peer.name),
+                                    avatarID: m.mine ? me.avatar : (m.sender?.avatarID ?? peer.avatarID),
+                                    mine: m.mine, geo: geo)
+            if let old = byUser[uid], old.active && !person.active { continue }     // идущая важнее закончившейся
+            byUser[uid] = person
+        }
+        let list = byUser.values.sorted { a, b in a.mine != b.mine ? a.mine : (a.active != b.active ? a.active : a.name < b.name) }
+        return ChatLiveContext(chatID: chatID, people: list, onShare: onShare)
+    }
+}
+
+private struct ChatLiveKey: EnvironmentKey { static let defaultValue = ChatLiveContext() }
+
+extension EnvironmentValues {
+    var chatLive: ChatLiveContext {
+        get { self[ChatLiveKey.self] }
+        set { self[ChatLiveKey.self] = newValue }
+    }
+}
+
+/// Значок трансляции: булавка и расходящиеся с двух сторон волны
+struct LiveBeaconIcon: View {
+    var size: CGFloat = 18
+    var color: Color = Color(red: 0.22, green: 0.66, blue: 0.45)
+    @State private var on = false
+
+    var body: some View {
+        HStack(spacing: 1) {
+            Image(systemName: "wave.3.left").font(.system(size: size * 0.7, weight: .semibold))
+                .symbolEffect(.variableColor.iterative.reversing, options: .repeating)
+            Image(systemName: "mappin").font(.system(size: size, weight: .bold))
+                .offset(y: on ? -1.5 : 1)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
+            Image(systemName: "wave.3.right").font(.system(size: size * 0.7, weight: .semibold))
+                .symbolEffect(.variableColor.iterative.reversing, options: .repeating)
+        }
+        .foregroundStyle(color)
+        .onAppear { on = true }
+    }
+}
+
+// MARK: - Плашка в чате: кто сейчас транслирует (я и другие)
 
 struct LiveLocationBar: View {
-    let chatID: String
+    let context: ChatLiveContext
+    let onOpen: () -> Void
 
-    @ObservedObject private var live = LiveLocationManager.shared
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     private var s: Strings { Strings(lang: lang) }
 
     var body: some View {
-        let mineHere = live.active(in: chatID)
-        if let last = mineHere.max(by: { $0.until < $1.until }) {
-            TimelineView(.periodic(from: .now, by: 30)) { tl in
-                let left = max(1, Int(last.until.timeIntervalSince(tl.date) / 60))
-                HStack(spacing: 10) {
-                    Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.22, green: 0.66, blue: 0.45))
-                        .symbolEffect(.variableColor.iterative, options: .repeating)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(s.t("Вы транслируете геопозицию", "You're sharing live location"))
-                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.text)
-                        Text(left >= 60 ? s.t("ещё \(left / 60) ч \(left % 60) мин", "\(left / 60) h \(left % 60) min left")
-                                        : s.t("ещё \(left) мин", "\(left) min left"))
-                            .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+        let active = context.active
+        if !active.isEmpty {
+            Button(action: { Haptics.impact(.light); onOpen() }) {
+                HStack(spacing: 12) {
+                    LiveBeaconIcon()
+                        .frame(width: 52, height: 36)
+                        .background(Color(red: 0.22, green: 0.66, blue: 0.45).opacity(0.14), in: Capsule())
+                    VStack(spacing: 2) {
+                        Text(s.t("Трансляция геопозиции", "Live location")).font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                        Text(active.map { $0.mine ? s.t("Я", "Me") : $0.name }.joined(separator: " • "))
+                            .font(.system(size: 12)).foregroundStyle(theme.textSecondary).lineLimit(1)
                     }
-                    Spacer(minLength: 0)
-                    Button {
-                        live.stopAll(in: chatID)
-                        Haptics.impact(.medium)
-                    } label: {
-                        Text(s.t("Остановить", "Stop")).font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.danger)
-                            .padding(.horizontal, 12).frame(height: 30)
-                            .background(theme.danger.opacity(0.14), in: Capsule())
+                    .frame(maxWidth: .infinity)
+                    // аватарки тех, кто транслирует
+                    HStack(spacing: -8) {
+                        ForEach(active.prefix(3)) { p in
+                            AvatarView(name: p.name, size: 26, avatarID: p.avatarID)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(theme.sheet, lineWidth: 2))
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .frame(width: 52, alignment: .trailing)
                 }
-                .padding(.horizontal, 14).frame(height: 46)
-                .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12).frame(height: 52)
+                .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .contentShape(Rectangle())
             }
+            .buttonStyle(PressStyle())
+            .padding(.horizontal, 10)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+}
+
+// MARK: - Общая карта трансляций чата
+
+struct LiveMapScreen: View {
+    let context: ChatLiveContext
+    var focus: String? = nil                    // id сообщения, с которого открыли
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @ObservedObject private var live = LiveLocationManager.shared
+    @State private var camera: MapCameraPosition = .automatic
+    @State private var askLive = false
+    @State private var me: CLLocation?
+    private let locator = CLLocationManager()
+
+    private var s: Strings { Strings(lang: lang) }
+    private var sharingHere: Bool { !live.active(in: context.chatID).isEmpty }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Map(position: $camera) {
+                UserAnnotation()
+                ForEach(context.people) { p in
+                    Annotation(p.mine ? s.t("Я", "Me") : p.name, coordinate: p.coordinate, anchor: .bottom) {
+                        LiveAvatarPin(avatarID: p.avatarID, name: p.name, active: p.active, heading: p.geo.heading, size: 44)
+                            .onTapGesture { zoom(to: p) }
+                    }
+                }
+            }
+            .mapControls {
+                MapUserLocationButton()
+                MapCompass()
+                MapPitchToggle()
+            }
+            .ignoresSafeArea()
+
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(width: 44, height: 44).glassCircle()
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(s.t("Геопозиция", "Location")).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.text)
+                    .shadow(color: .black.opacity(0.25), radius: 3)
+                Spacer()
+                Button { Haptics.select(); showAll() } label: {
+                    Text(s.t("Показать все", "Show all")).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .padding(.horizontal, 14).frame(height: 44)
+                        .glass(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16).padding(.top, 8)
+
+            VStack { Spacer(); panel }
+        }
+        .onAppear {
+            me = locator.location
+            if let f = focus, let p = context.people.first(where: { $0.messageID == f }) { zoom(to: p, animated: false) }
+            else { showAll(animated: false) }
+        }
+        .confirmationDialog(s.t("Транслировать геопозицию", "Share live location"), isPresented: $askLive, titleVisibility: .visible) {
+            ForEach([(900, s.t("15 минут", "15 minutes")), (3600, s.t("1 час", "1 hour")),
+                     (LiveLocationManager.forever, s.t("Навсегда", "Until I stop"))], id: \.0) { sec, label in
+                Button(label) { shareLive(sec) }
+            }
+            Button(s.t("Отмена", "Cancel"), role: .cancel) {}
+        }
+    }
+
+    private var panel: some View {
+        VStack(spacing: 0) {
+            // поделиться в ответ — или остановить свою
+            if sharingHere {
+                Button {
+                    live.stopAll(in: context.chatID)
+                    Haptics.impact(.medium)
+                } label: {
+                    row(icon: AnyView(Image(systemName: "stop.fill").font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
+                                        .frame(width: 46, height: 46).background(theme.danger, in: Circle())),
+                        title: s.t("Остановить трансляцию", "Stop sharing"), subtitle: nil, titleColor: theme.danger)
+                }
+                .buttonStyle(.plain)
+            } else if context.onShare != nil {
+                Button { askLive = true } label: {
+                    row(icon: AnyView(LiveBeaconIcon(size: 15, color: .white).frame(width: 46, height: 46)
+                                        .background(Color(red: 0.22, green: 0.66, blue: 0.45), in: Circle())),
+                        title: s.t("Транслировать геопозицию", "Share live location"),
+                        subtitle: s.t("Обновляется в реальном времени", "Updates in real time"), titleColor: theme.text)
+                }
+                .buttonStyle(.plain)
+            }
+            ForEach(context.people) { p in
+                Divider().padding(.leading, 74)
+                Button { zoom(to: p) } label: {
+                    row(icon: AnyView(AvatarView(name: p.name, size: 46, avatarID: p.avatarID).clipShape(Circle())
+                                        .grayscale(p.active ? 0 : 1).brightness(p.active ? 0 : -0.15)),
+                        title: p.mine ? s.t("Я", "Me") : p.name, subtitle: subtitle(p), titleColor: theme.text,
+                        live: p.active)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 6)
+        .glass(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(.horizontal, 12).padding(.bottom, 12)
+    }
+
+    private func row(icon: AnyView, title: String, subtitle: String?, titleColor: Color, live: Bool = false) -> some View {
+        HStack(spacing: 14) {
+            icon
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 16, weight: .semibold)).foregroundStyle(titleColor).lineLimit(1)
+                if let subtitle {
+                    Text(subtitle).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if live {
+                Circle().fill(Color(red: 0.22, green: 0.66, blue: 0.45)).frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(Color(red: 0.22, green: 0.66, blue: 0.45).opacity(0.4), lineWidth: 4).scaleEffect(1.6))
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private func subtitle(_ p: LivePerson) -> String {
+        var parts: [String] = []
+        if p.active {
+            if let u = p.geo.updatedAt {
+                let sec = Int(Date().timeIntervalSince(u))
+                parts.append(sec < 60 ? s.t("обновлено только что", "updated just now") : s.t("обновлено \(sec / 60) мин назад", "updated \(sec / 60) min ago"))
+            } else {
+                parts.append(s.t("в реальном времени", "live"))
+            }
+        } else {
+            parts.append(s.t("трансляция закончилась", "sharing ended"))
+        }
+        if !p.mine, let me {
+            let d = me.distance(from: CLLocation(latitude: p.geo.lat, longitude: p.geo.lon))
+            parts.append(d < 1000 ? s.t("\(Int(d)) м от вас", "\(Int(d)) m away") : s.t(String(format: "%.1f км от вас", d / 1000), String(format: "%.1f km away", d / 1000)))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func zoom(to p: LivePerson, animated: Bool = true) {
+        let pos = MapCameraPosition.region(MKCoordinateRegion(center: p.coordinate, latitudinalMeters: 1200, longitudinalMeters: 1200))
+        if animated { withAnimation(.easeInOut(duration: 0.5)) { camera = pos } } else { camera = pos }
+    }
+
+    /// Все трансляции (и я) в кадре
+    private func showAll(animated: Bool = true) {
+        var coords = context.people.map(\.coordinate)
+        if let me { coords.append(me.coordinate) }
+        guard let first = coords.first else { return }
+        var minLat = first.latitude, maxLat = first.latitude, minLon = first.longitude, maxLon = first.longitude
+        for c in coords {
+            minLat = min(minLat, c.latitude); maxLat = max(maxLat, c.latitude)
+            minLon = min(minLon, c.longitude); maxLon = max(maxLon, c.longitude)
+        }
+        let span = MKCoordinateSpan(latitudeDelta: max(0.01, (maxLat - minLat) * 1.6), longitudeDelta: max(0.01, (maxLon - minLon) * 1.6))
+        let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
+        let pos = MapCameraPosition.region(MKCoordinateRegion(center: center, span: span))
+        if animated { withAnimation(.easeInOut(duration: 0.6)) { camera = pos } } else { camera = pos }
+    }
+
+    private func shareLive(_ seconds: Int) {
+        guard let onShare = context.onShare else { return }
+        if locator.authorizationStatus == .notDetermined { locator.requestWhenInUseAuthorization() }
+        guard let loc = locator.location ?? me else { return }
+        onShare(GeoPoint(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude, accuracy: loc.horizontalAccuracy,
+                         heading: loc.course >= 0 ? loc.course : nil), seconds)
+        Haptics.notify(.success)
+        dismiss()
     }
 }
