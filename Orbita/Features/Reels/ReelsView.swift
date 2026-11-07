@@ -971,13 +971,14 @@ struct ReelPage: View {
                 }
             }
 
-            if userPaused && active {
+            // в повёрнутом режиме, пока видны кнопки, на паузе только кнопка в кружке; кнопки скрылись — обычный значок
+            if userPaused && active && !(forceFill && lsControls) {
                 Image(systemName: "play.fill")
                     .font(.system(size: 64)).foregroundStyle(.white.opacity(0.38))
                     .shadow(color: .black.opacity(0.4), radius: 8)
                     .rotationEffect(.degrees(forceFill ? 90 : 0))
                     .allowsHitTesting(false)
-                    .transition(.scale(scale: 1.3).combined(with: .opacity))
+                    .transition(forceFill ? .opacity : .scale(scale: 1.3).combined(with: .opacity))
             }
 
             if !forceFill {
@@ -1150,9 +1151,10 @@ struct ReelPage: View {
     private func scheduleHide() {
         lsHideTask?.cancel()
         lsHideTask = Task {
-            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            // на паузе надписи и кнопки уходят через 5 с — остаётся чистое видео; во время просмотра — через 3,5 с
+            try? await Task.sleep(nanoseconds: userPaused ? 5_000_000_000 : 3_500_000_000)
             guard !Task.isCancelled else { return }
-            await MainActor.run { if !scrubbing && !userPaused && !lsMenu { withAnimation(.easeOut(duration: 0.25)) { lsControls = false } } }
+            await MainActor.run { if !scrubbing && !lsMenu { withAnimation(.easeOut(duration: 0.25)) { lsControls = false } } }
         }
     }
 
@@ -1260,8 +1262,12 @@ struct ReelPage: View {
                 .padding(.leading, topInset + 4).padding(.trailing, 28)       // слева — сторона с вырезом
                 .padding(.vertical, 24)
 
-                Button { togglePause() } label: {
+                Button {
+                    togglePause()
+                    scheduleHide()                    // таймер скрытия заново: на паузе — 5 с
+                } label: {
                     Image(systemName: userPaused ? "play.fill" : "pause.fill")
+                        .contentTransition(.symbolEffect(.replace))          // пауза ⇄ воспроизведение плавно
                         .font(.system(size: 26)).foregroundStyle(.white)
                         .frame(width: 64, height: 64)
                         .background(Color.black.opacity(0.35), in: Circle())
