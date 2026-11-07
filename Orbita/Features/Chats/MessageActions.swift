@@ -90,6 +90,7 @@ struct MessageActionOverlay: View {
     private var current: String? { model.messages.first { $0.id == message.id }?.reactions.first(where: \.mine)?.emoji }
     /// Перевод есть для текста, если система умеет (iOS 17.4+)
     private var canTranslate: Bool {
+        if ChatTranslator.shared.shows(message.id) { return onTranslate != nil }      // «Показать оригинал»
         guard onTranslate != nil, TranslationSheet.available, !message.text.hasPrefix("\u{200B}call:") else { return false }
         return Self.needsTranslation(message.text)
     }
@@ -412,7 +413,9 @@ struct MessageActionOverlay: View {
             }
             if canTranslate {
                 divider
-                row("character.bubble", s.t("Перевести", "Translate")) { dismiss { onTranslate?() } }
+                let shown = ChatTranslator.shared.shows(message.id)
+                row(shown ? "arrow.uturn.backward" : "character.bubble",
+                    shown ? s.t("Показать оригинал", "Show original") : s.t("Перевести", "Translate")) { dismiss { onTranslate?() } }
             }
             if model.canPin {
                 divider

@@ -808,6 +808,7 @@ struct ChatScreen: View {
     @State private var showScheduled = false
     @State private var showPlayer = false
     @State private var showLiveMap = false                  // общая карта трансляций чата
+    @ObservedObject private var translator = ChatTranslator.shared   // перевод сообщений в этом чате
 
     /// Кто транслирует геопозицию в этом чате (я и собеседники) — для плашки сверху и общей карты
     private var liveContext: ChatLiveContext {
@@ -896,6 +897,9 @@ struct ChatScreen: View {
                 .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
                                                          peer: model.peer.avatarID, peerName: model.peer.name))
                 .environment(\.chatLive, liveContext)
+                .background { ChatTranslatorHost() }                     // перевод на телефоне
+                .onAppear { translator.open(chat: route.peer.id) }
+                .onChange(of: model.messages.count) { _, _ in translator.feed(model.messages) }
                 .overlay { MeetWatcher(context: liveContext) }        // «Вы рядом!» в режиме встречи
                 .environment(\.unlockSecret, { [model] message, point in await model.unlock(message, at: point) })
                 .fullScreenCover(isPresented: $showLiveMap) {
@@ -941,10 +945,12 @@ struct ChatScreen: View {
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
                         scheduledBar
-                        pinnedBar
+                        // закреп, перевод канала и песня — одной карточкой с линиями
+                        ChatTopCard(hasPinned: !model.pinned.isEmpty, chatID: route.peer.id,
+                                    translateLanguage: channelForeignLanguage, messages: model.messages,
+                                    onOpenPlayer: { showPlayer = true }) { pinnedContent }
                         LiveLocationBar(context: liveContext) { showLiveMap = true }
                         digestBar
-                        NowPlayingBar { showPlayer = true }
                         VoiceNowBar()
                     }
                     .padding(.bottom, 4)
@@ -1000,7 +1006,10 @@ struct ChatScreen: View {
                     onSelect: { selecting = true; selected = [target.id] },
                     onInfo: { infoMessage = target },
                     onReactions: { reactionWho = ReactionWhoRoute(message: target, emoji: nil) },
-                    onTranslate: { translateText = target.text },
+                    onTranslate: {
+                        // перевод прямо в пузыре (iOS 18+), «Показать оригинал» — возвращает; раньше — системная шторка
+                        if ChatTranslator.available { translator.toggle(target) } else { translateText = target.text }
+                    },
                     onNote: { noteTarget = target },
                     onReport: { reportTarget = target },
                     sourceFrame: messageFrames.frames[target.id])
@@ -1639,7 +1648,7 @@ struct ChatScreen: View {
     // MARK: Закреплённые
 
     @ViewBuilder
-    private var pinnedBar: some View {
+    private var pinnedContent: some View {
         if !model.pinned.isEmpty {
             let index = min(pinIndex, model.pinned.count - 1)
             let m = model.pinned[index]
@@ -1655,19 +1664,23 @@ struct ChatScreen: View {
                              ? s.t("Закреплённое сообщение \(index + 1)/\(model.pinned.count)", "Pinned message \(index + 1)/\(model.pinned.count)")
                              : s.t("Закреплённое сообщение", "Pinned message"))
                             .font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.accentColor)
-                        Text(m.summary.isEmpty ? "…" : m.summary)
+                        Text(translator.translation(m.id) ?? (m.summary.isEmpty ? "…" : m.summary))
                             .font(.system(size: 14)).foregroundStyle(theme.text).lineLimit(1)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "pin.fill").font(.system(size: 13)).foregroundStyle(theme.textSecondary)
                 }
-                .padding(.horizontal, 14).frame(height: 46)
-                .glass(RoundedRectangle(cornerRadius: 18, style: .continuous), interactive: true)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 14).frame(height: 50)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+
+    /// Язык канала, если он не язык телефона — для плашки «Перевести»
+    private var channelForeignLanguage: String? {
+        guard model.peer.isChannel, ChatTranslator.available else { return nil }
+        return ChatTranslator.foreignLanguage(of: model.messages)
     }
 
     // MARK: Сообщения

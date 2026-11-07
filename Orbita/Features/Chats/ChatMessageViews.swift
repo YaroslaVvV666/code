@@ -240,6 +240,7 @@ struct MessageRow: View {
     @Environment(\.lang) private var lang
     @Environment(\.openURL) private var parentOpenURL
     @Environment(\.onBotCommand) private var onBotCommand
+    @ObservedObject private var translator = ChatTranslator.shared
     @State private var dragX: CGFloat = 0
     @State private var stickerPop = false        // нажали на стикер — он «пружинит»
     @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
@@ -734,9 +735,19 @@ struct MessageRow: View {
             if message.isArticle {
                 EmptyView()
             } else if hasText && message.poll == nil {
-                RichInlineText(text: message.text, entities: message.entities, size: 16,
+                // перевод прямо в пузыре: «Показать оригинал» в меню возвращает текст
+                let translated = translator.translation(message.id)
+                if translated != nil {
+                    Label(s.t("Перевод", "Translated"), systemImage: "character.bubble")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.accentColor)
+                        .padding(.horizontal, 11).padding(.top, 6)
+                        .transition(.opacity)
+                }
+                RichInlineText(text: translated ?? message.text, entities: translated == nil ? message.entities : [], size: 16,
                                color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler,
                                detect: interactive)
+                    .animation(.easeInOut(duration: 0.25), value: translated)
                     .padding(.horizontal, 11)
                     .padding(.top, mediaItems.isEmpty && message.attachments.isEmpty && message.reply == nil ? 7 : 6)
                     .padding(.bottom, 7)

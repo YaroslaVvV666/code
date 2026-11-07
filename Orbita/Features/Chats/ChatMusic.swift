@@ -144,6 +144,8 @@ struct AudioBlock: View {
 // MARK: - Полоска «сейчас играет» под шапкой чата
 
 struct NowPlayingBar: View {
+    /// Внутри общей карточки шапки (закреп / перевод / песня) — без своего «стекла» и отступов
+    var embedded = false
     let onOpen: () -> Void
 
     @EnvironmentObject private var player: AudioPlayer
@@ -190,7 +192,7 @@ struct NowPlayingBar: View {
             }
             .padding(.horizontal, 4)
             .frame(height: 56)
-            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background { if !embedded { Color.clear.glass(RoundedRectangle(cornerRadius: 18, style: .continuous)) } }
             .overlay(alignment: .bottom) {
                 GeometryReader { geo in
                     Capsule().fill(theme.accentColor)
@@ -200,11 +202,50 @@ struct NowPlayingBar: View {
                 }
                 .frame(height: 3).padding(.bottom, 3)
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 8)                       // воздух между островком и перепиской
+            .padding(.horizontal, embedded ? 0 : 10)
+            .padding(.bottom, embedded ? 0 : 8)        // воздух между островком и перепиской
             .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+}
+
+/// Одна карточка в шапке чата: закреплённое, перевод канала и играющая песня — разделены линиями, как в профиле
+struct ChatTopCard<Pinned: View>: View {
+    let hasPinned: Bool
+    let chatID: String
+    let translateLanguage: String?
+    let messages: [ChatMessage]
+    let onOpenPlayer: () -> Void
+    @ViewBuilder let pinned: () -> Pinned
+
+    @EnvironmentObject private var player: AudioPlayer
+    @ObservedObject private var translator = ChatTranslator.shared
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let showT = translateLanguage != nil && !translator.hiddenChats.contains(chatID)
+            && !translator.never.contains(translateLanguage ?? "")
+        let music = player.current != nil
+        if hasPinned || showT || music {
+            VStack(spacing: 0) {
+                if hasPinned { pinned() }
+                if hasPinned && (showT || music) { line }
+                if showT, let l = translateLanguage {
+                    ChannelTranslateBar(chatID: chatID, language: l, messages: messages)
+                }
+                if showT && music { line }
+                if music { NowPlayingBar(embedded: true, onOpen: onOpenPlayer) }
+            }
+            .glass(RoundedRectangle(cornerRadius: 22, style: .continuous), interactive: true)
+            .padding(.horizontal, 10)
+            .padding(.bottom, music ? 4 : 0)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showT)
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: music)
+        }
+    }
+
+    private var line: some View { Rectangle().fill(theme.text.opacity(0.12)).frame(height: 0.5).padding(.horizontal, 14) }
 }
 
 // MARK: - Большой плеер (как в Spotify)
