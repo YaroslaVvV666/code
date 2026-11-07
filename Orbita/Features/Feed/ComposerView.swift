@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import Photos
 import Combine
 
 // MARK: - Новая публикация: форматирование, несколько фото и видео
@@ -28,6 +29,8 @@ struct ComposerView: View {
     @State private var kept: [MediaItem] = []
     @State private var didLoadEditing = false
     @State private var showStickers = false
+    @State private var showAttach = false          // сетка недавних фото и видео, как скрепка в чате
+    @State private var showSystemPicker = false
     @State private var packs: [StickerPack] = []
     @State private var options = PostOptions()
 
@@ -143,6 +146,30 @@ struct ComposerView: View {
                 pickerItems = []
             }
         }
+        .sheet(isPresented: $showAttach) {
+            AttachSheet(canPoll: false, maxCount: max(1, maxMedia - mediaCount),
+                        onAssets: { assets in Task { @MainActor in await processAssets(assets) } },
+                        onFiles: nil,
+                        onPhoto: { data in
+                            if let m = try? MediaPreparer.prepareImage(data), mediaCount < maxMedia { picked.append(m) }
+                        },
+                        onVideo: { url in
+                            Task { @MainActor in
+                                preparing = true
+                                defer { preparing = false }
+                                do { if mediaCount < maxMedia { picked.append(try await MediaPreparer.prepare(videoFile: url)) } }
+                                catch MediaError.tooLong { mediaError = s.videoTooLong }
+                                catch { mediaError = s.mediaFailed }
+                            }
+                        },
+                        onSystemPicker: { showAttach = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showSystemPicker = true } })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDetents([.fraction(0.62), .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.sheet)
+        }
+        .photosPicker(isPresented: $showSystemPicker, selection: $pickerItems,
+                      maxSelectionCount: max(1, maxMedia - mediaCount), matching: .any(of: [.images, .videos]))
         .sheet(isPresented: $showStickers) {
             EmojiStickerPanel(packs: packs,
                               onEmoji: { controller.insert($0) },
@@ -164,9 +191,8 @@ struct ComposerView: View {
     private var bottomBar: some View {
         VStack(spacing: 10) {
             HStack {
-                PhotosPicker(selection: $pickerItems,
-                             maxSelectionCount: max(1, maxMedia - mediaCount),
-                             matching: .any(of: [.images, .videos])) {
+                // как скрепка в чате: шторка с сеткой недавних фото и видео и камерой
+                Button { showAttach = true } label: {
                     Label(s.addMedia, systemImage: "photo.on.rectangle")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(theme.accentColor)
@@ -278,6 +304,25 @@ struct ComposerView: View {
         for item in items where mediaCount < maxMedia {
             do {
                 picked.append(try await MediaPreparer.prepare(item))
+            } catch MediaError.tooLong {
+                mediaError = s.videoTooLong
+            } catch MediaError.tooLarge {
+                mediaError = s.videoTooBig
+            } catch {
+                mediaError = s.mediaFailed
+            }
+        }
+        preparing = false
+        await autoDetectSensitive()
+    }
+
+    /// Выбранное в сетке шторки
+    private func processAssets(_ assets: [PHAsset]) async {
+        preparing = true
+        mediaError = nil
+        for asset in assets where mediaCount < maxMedia {
+            do {
+                picked.append(try await AssetLoader.prepare(asset))
             } catch MediaError.tooLong {
                 mediaError = s.videoTooLong
             } catch MediaError.tooLarge {

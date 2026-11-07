@@ -9,9 +9,10 @@ struct AttachSheet: View {
     var canPoll: Bool
     var maxCount = 10
     var onAssets: ([PHAsset]) -> Void
-    var onFiles: () -> Void
-    var onPoll: () -> Void
-    var onLocation: () -> Void = {}
+    /// nil — вкладки нет (например, в публикации: там только фото и видео)
+    var onFiles: (() -> Void)?
+    var onPoll: () -> Void = {}
+    var onLocation: (() -> Void)? = nil
     /// «Звук»: выбрать музыку/аудиофайл (в статье)
     var onAudio: (() -> Void)? = nil
     var onArticle: (() -> Void)? = nil          // «Статья»: сообщение из блоков (заголовки, цитаты, таблицы, медиа…)
@@ -183,12 +184,12 @@ struct AttachSheet: View {
             .buttonStyle(PressStyle())
             .padding(.horizontal, 16).padding(.bottom, 14)
             .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else {
+        } else if onFiles != nil || onLocation != nil || onAudio != nil || canPoll || onArticle != nil {
             HStack(spacing: 0) {
                 tab("gallery", "photo.on.rectangle.fill", s.t("Галерея", "Gallery")) { }
                 if let onAudio { tab("audio", "play.circle.fill", s.t("Звук", "Audio")) { onAudio() } }
-                tab("file", "doc.fill", s.attachFile) { onFiles() }
-                tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location")) { onLocation() }
+                if let onFiles { tab("file", "doc.fill", s.attachFile) { onFiles() } }
+                if let onLocation { tab("location", "mappin.circle.fill", s.t("Геопозиция", "Location")) { onLocation() } }
                 if canPoll { tab("poll", "chart.bar.fill", s.t("Опрос", "Poll")) { onPoll() } }
                 if let onArticle { tab("article", "doc.richtext.fill", s.t("Статья", "Article")) { onArticle() } }
             }
