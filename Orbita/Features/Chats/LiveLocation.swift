@@ -81,6 +81,18 @@ final class LiveLocationManager: NSObject, ObservableObject, CLLocationManagerDe
     }
 
     @Published private(set) var sessions: [Session] = []
+    /// Где я сейчас (пока идёт трансляция) — для «Вы рядом!»
+    @Published private(set) var lastLocation: CLLocation?
+    /// Чаты в режиме «Встретиться»: трансляция выключится сама, когда вы окажетесь рядом
+    @Published private(set) var meetChats: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "orbita.live.meet") ?? [])
+
+    func setMeet(_ chatID: String, _ on: Bool) {
+        if on { meetChats.insert(chatID) } else { meetChats.remove(chatID) }
+        UserDefaults.standard.set(Array(meetChats), forKey: "orbita.live.meet")
+    }
+
+    /// «До встречи»: трансляция до 8 часов, но выключится раньше — как только будете рядом
+    static let untilMeet = 8 * 3600
     private let manager = CLLocationManager()
     private var repo: MessengerRepository?
     private var userID = ""
@@ -147,6 +159,7 @@ final class LiveLocationManager: NSObject, ObservableObject, CLLocationManagerDe
     static let forever = 10 * 365 * 86400
 
     func stopAll(in chatID: String) {
+        setMeet(chatID, false)
         for s in active(in: chatID) { stop(s.messageID) }
     }
 
@@ -220,7 +233,10 @@ final class LiveLocationManager: NSObject, ObservableObject, CLLocationManagerDe
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
-        Task { @MainActor in self.push(loc) }
+        Task { @MainActor in
+            self.lastLocation = loc
+            self.push(loc)
+        }
     }
 
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -359,6 +375,8 @@ struct LocationShareSheet: View {
                          (LiveLocationManager.forever, s.t("Навсегда", "Until I stop"))], id: \.0) { sec, label in
                     Button(label) { sendLive(sec) }
                 }
+                // «Мы рядом»: выключится сама, когда вы окажетесь рядом
+                Button(s.t("До встречи 🤝", "Until we meet 🤝")) { sendLive(LiveLocationManager.untilMeet) }
                 Button(s.t("Отмена", "Cancel"), role: .cancel) {}
             } message: {
                 Text(s.t("Собеседник видит вас на карте — с вашей аватаркой. Остановить можно в любой момент: в сообщении или на карте. Удалите сообщение — трансляция тоже прекратится.",
@@ -725,11 +743,14 @@ struct ChatLiveContext {
     var people: [LivePerson] = []
     /// Поделиться своей трансляцией прямо с карты (точка, секунды)
     var onShare: ((GeoPoint, Int) -> Void)? = nil
+    /// Предложить место встречи — обычной точкой в чат
+    var onSendPlace: ((GeoPoint) -> Void)? = nil
     var active: [LivePerson] { people.filter(\.active) }
 
     /// Из сообщений чата: у каждого — его последняя трансляция (идущая или закончившаяся — тогда застывшая серая)
     static func build(chatID: String, messages: [ChatMessage], me: (id: String, name: String, avatar: String?),
-                      peer: ChatPeer, onShare: ((GeoPoint, Int) -> Void)?) -> ChatLiveContext {
+                      peer: ChatPeer, onShare: ((GeoPoint, Int) -> Void)?,
+                      onSendPlace: ((GeoPoint) -> Void)? = nil) -> ChatLiveContext {
         var byUser: [String: LivePerson] = [:]
         for m in messages {
             guard let geo = m.attachments.first(where: { $0.kind == .location })?.geo, geo.isLive else { continue }
@@ -742,7 +763,7 @@ struct ChatLiveContext {
             byUser[uid] = person
         }
         let list = byUser.values.sorted { a, b in a.mine != b.mine ? a.mine : (a.active != b.active ? a.active : a.name < b.name) }
-        return ChatLiveContext(chatID: chatID, people: list, onShare: onShare)
+        return ChatLiveContext(chatID: chatID, people: list, onShare: onShare, onSendPlace: onSendPlace)
     }
 }
 
@@ -835,7 +856,22 @@ struct LiveMapScreen: View {
     @State private var camera: MapCameraPosition = .automatic
     @State private var askLive = false
     @State private var me: CLLocation?
+    @State private var places: [MKMapItem] = []          // места посередине между вами
+    @State private var picked: MKMapItem?
+    @State private var searching = false
     private let locator = CLLocationManager()
+
+    /// Я и собеседник оба на карте — можно встретиться посередине
+    private var pair: (LivePerson, LivePerson)? {
+        guard let mine = context.people.first(where: { $0.mine && $0.active }),
+              let other = context.people.first(where: { !$0.mine && $0.active }) else { return nil }
+        return (mine, other)
+    }
+    private var midpoint: CLLocationCoordinate2D? {
+        guard let p = pair else { return nil }
+        let a = p.0, b = p.1
+        return CLLocationCoordinate2D(latitude: (a.geo.lat + b.geo.lat) / 2, longitude: (a.geo.lon + b.geo.lon) / 2)
+    }
 
     private var s: Strings { Strings(lang: lang) }
     private var sharingHere: Bool { !live.active(in: context.chatID).isEmpty }
@@ -848,6 +884,29 @@ struct LiveMapScreen: View {
                     Annotation(p.mine ? s.t("Я", "Me") : p.name, coordinate: p.coordinate, anchor: .bottom) {
                         LiveAvatarPin(avatarID: p.avatarID, name: p.name, active: p.active, heading: p.geo.heading, size: 44)
                             .onTapGesture { zoom(to: p) }
+                    }
+                }
+                if let p = pair {
+                    // линия между вами и точка посередине
+                    MapPolyline(coordinates: [p.0.coordinate, p.1.coordinate])
+                        .stroke(Color(red: 0.22, green: 0.66, blue: 0.45).opacity(0.7), style: StrokeStyle(lineWidth: 3, dash: [6, 6]))
+                    if let mid = midpoint {
+                        Annotation(s.t("Посередине", "Halfway"), coordinate: mid) {
+                            Image(systemName: "flag.checkered.circle.fill").font(.system(size: 30))
+                                .symbolRenderingMode(.palette).foregroundStyle(.white, Color(red: 0.22, green: 0.66, blue: 0.45))
+                                .shadow(radius: 3)
+                        }
+                    }
+                }
+                ForEach(places, id: \.self) { item in
+                    Annotation(item.name ?? "", coordinate: item.placemark.coordinate) {
+                        Image(systemName: picked == item ? "cup.and.saucer.fill" : "cup.and.saucer")
+                            .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: picked == item ? 38 : 30, height: picked == item ? 38 : 30)
+                            .background(Color.orange, in: Circle())
+                            .overlay(Circle().stroke(.white, lineWidth: 2))
+                            .shadow(radius: 3)
+                            .onTapGesture { withAnimation(.spring(response: 0.3)) { picked = item } }
                     }
                 }
             }
@@ -895,6 +954,55 @@ struct LiveMapScreen: View {
 
     private var panel: some View {
         VStack(spacing: 0) {
+            if let p = pair {
+                // встреча: расстояние между вами и места посередине
+                let d = CLLocation(latitude: p.0.geo.lat, longitude: p.0.geo.lon).distance(from: CLLocation(latitude: p.1.geo.lat, longitude: p.1.geo.lon))
+                HStack(spacing: 10) {
+                    Image(systemName: "figure.walk").foregroundStyle(Color(red: 0.22, green: 0.66, blue: 0.45))
+                    Text(s.t("Между вами ", "Between you: ") + (d < 1000 ? s.t("\(Int(d)) м", "\(Int(d)) m") : String(format: s.t("%.1f км", "%.1f km"), d / 1000)))
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.text)
+                    Spacer()
+                    Button { Task { await findPlaces() } } label: {
+                        HStack(spacing: 5) {
+                            if searching { ProgressView().scaleEffect(0.7) } else { Image(systemName: "cup.and.saucer.fill") }
+                            Text(s.t("Места посередине", "Places halfway"))
+                        }
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).frame(height: 32).background(Color.orange, in: Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                if let item = picked {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.name ?? "").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                            Text(item.placemark.thoroughfare ?? "").font(.system(size: 12)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                        }
+                        Spacer()
+                        if let send = context.onSendPlace {
+                            Button {
+                                let c = item.placemark.coordinate
+                                send(GeoPoint(lat: c.latitude, lon: c.longitude, title: item.name))
+                                Haptics.notify(.success)
+                                withAnimation { picked = nil }
+                            } label: {
+                                Text(s.t("Предложить", "Suggest")).font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                                    .padding(.horizontal, 12).frame(height: 32).background(theme.accent, in: Capsule())
+                            }
+                            .buttonStyle(PressStyle())
+                        }
+                        Button { item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking]) } label: {
+                            Image(systemName: "arrow.triangle.turn.up.right.diamond.fill").foregroundStyle(theme.accentColor)
+                                .frame(width: 32, height: 32).background(theme.accentColor.opacity(0.14), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                Divider().padding(.leading, 16)
+            }
             // поделиться в ответ — или остановить свою
             if sharingHere {
                 Button {
@@ -912,6 +1020,16 @@ struct LiveMapScreen: View {
                                         .background(Color(red: 0.22, green: 0.66, blue: 0.45), in: Circle())),
                         title: s.t("Транслировать геопозицию", "Share live location"),
                         subtitle: s.t("Обновляется в реальном времени", "Updates in real time"), titleColor: theme.text)
+                }
+                .buttonStyle(.plain)
+                Divider().padding(.leading, 74)
+                // «Мы рядом»: трансляция до встречи — выключится сама, когда окажетесь рядом
+                Button { shareLive(LiveLocationManager.untilMeet, meet: true) } label: {
+                    row(icon: AnyView(Image(systemName: "figure.2.arms.open").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                                        .frame(width: 46, height: 46).background(Color.orange, in: Circle())),
+                        title: s.t("Встретиться", "Meet up"),
+                        subtitle: s.t("Покажем точку посередине, а рядом — «Вы рядом!»", "We'll show a halfway point and tell you when you're close"),
+                        titleColor: theme.text)
                 }
                 .buttonStyle(.plain)
             }
@@ -990,7 +1108,32 @@ struct LiveMapScreen: View {
         if animated { withAnimation(.easeInOut(duration: 0.6)) { camera = pos } } else { camera = pos }
     }
 
-    private func shareLive(_ seconds: Int) {
+    /// Места посередине: кафе и кофейни рядом с точкой между вами
+    private func findPlaces() async {
+        guard let mid = midpoint else { return }
+        searching = true
+        defer { searching = false }
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = "кафе"
+        request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.cafe, .restaurant, .bakery])
+        request.region = MKCoordinateRegion(center: mid, latitudinalMeters: 1500, longitudinalMeters: 1500)
+        let found = (try? await MKLocalSearch(request: request).start())?.mapItems ?? []
+        let midLoc = CLLocation(latitude: mid.latitude, longitude: mid.longitude)
+        let sorted = found.sorted { ($0.placemark.location?.distance(from: midLoc) ?? .infinity) < ($1.placemark.location?.distance(from: midLoc) ?? .infinity) }
+        withAnimation(.spring(response: 0.4)) {
+            places = Array(sorted.prefix(6))
+            picked = places.first
+        }
+        if places.isEmpty { Haptics.notify(.warning) } else {
+            Haptics.select()
+            withAnimation(.easeInOut(duration: 0.6)) {
+                camera = .region(MKCoordinateRegion(center: mid, latitudinalMeters: 2200, longitudinalMeters: 2200))
+            }
+        }
+    }
+
+    private func shareLive(_ seconds: Int, meet: Bool = false) {
+        if meet { live.setMeet(context.chatID, true) }
         guard let onShare = context.onShare else { return }
         if locator.authorizationStatus == .notDetermined { locator.requestWhenInUseAuthorization() }
         guard let loc = locator.location ?? me else { return }
@@ -998,5 +1141,69 @@ struct LiveMapScreen: View {
                          heading: loc.course >= 0 ? loc.course : nil), seconds)
         Haptics.notify(.success)
         dismiss()
+    }
+}
+
+// MARK: - «Вы рядом!»
+
+/// Следит за режимом встречи: как только вы с собеседником ближе 60 м — праздник, вибрация и трансляция выключается
+struct MeetWatcher: View {
+    let context: ChatLiveContext
+    @ObservedObject private var live = LiveLocationManager.shared
+    @State private var celebrate = false
+    @State private var fired = false
+
+    private var near: Bool {
+        guard live.meetChats.contains(context.chatID), !live.active(in: context.chatID).isEmpty,
+              let me = live.lastLocation else { return false }
+        return context.people.contains { p in
+            !p.mine && p.active && me.distance(from: CLLocation(latitude: p.geo.lat, longitude: p.geo.lon)) < 60 + min(40, max(0, me.horizontalAccuracy))
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            if celebrate { NearbyCelebration().transition(.scale(scale: 0.6).combined(with: .opacity)) }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: near) { _, now in if now { fire() } }
+        .onAppear { if near { fire() } }
+    }
+
+    private func fire() {
+        guard !fired else { return }
+        fired = true
+        Haptics.notify(.success)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { Haptics.impact(.heavy) }
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.65)) { celebrate = true }
+        live.stopAll(in: context.chatID)                  // встретились — геопозиция больше не нужна
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+            withAnimation(.easeOut(duration: 0.4)) { celebrate = false }
+        }
+    }
+}
+
+private struct NearbyCelebration: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var burst = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        ZStack {
+            ForEach(0..<14, id: \.self) { i in
+                Text(["🎉", "✨", "🤝", "💛"][i % 4]).font(.system(size: 26))
+                    .offset(x: burst ? cos(Double(i) / 14 * 2 * .pi) * 150 : 0, y: burst ? sin(Double(i) / 14 * 2 * .pi) * 150 : 0)
+                    .opacity(burst ? 0 : 1)
+            }
+            VStack(spacing: 8) {
+                Text("🤝").font(.system(size: 56))
+                Text(s.t("Вы рядом!", "You're close!")).font(.system(size: 26, weight: .heavy)).foregroundStyle(theme.text)
+                Text(s.t("Трансляция геопозиции выключена", "Live location turned off")).font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+            }
+            .padding(28)
+            .glass(RoundedRectangle(cornerRadius: 30, style: .continuous))
+        }
+        .onAppear { withAnimation(.easeOut(duration: 1.4)) { burst = true } }
     }
 }

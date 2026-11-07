@@ -759,6 +759,7 @@ final class ChatModel: ObservableObject {
                   let sent = messages.last(where: { $0.mine && !before.contains($0.id) && $0.attachments.contains { $0.kind == .location } }),
                   let until = sent.attachments.first(where: { $0.kind == .location })?.geo?.liveUntil else { return }
             LiveLocationManager.shared.start(messageID: sent.id, chatID: peerID, until: until, repo: repo)
+            if live == LiveLocationManager.untilMeet { LiveLocationManager.shared.setMeet(peerID, true) }   // «До встречи»
         }
     }
 

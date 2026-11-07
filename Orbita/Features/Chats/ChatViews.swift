@@ -814,7 +814,8 @@ struct ChatScreen: View {
         ChatLiveContext.build(chatID: route.peer.id, messages: model.messages,
                               me: (session.serverID, session.profile.profile?.name ?? "", session.profile.profile?.avatarID),
                               peer: model.peer,
-                              onShare: model.canWrite ? { [model] point, seconds in model.sendLocation(point, live: seconds) } : nil)
+                              onShare: model.canWrite ? { [model] point, seconds in model.sendLocation(point, live: seconds) } : nil,
+                              onSendPlace: model.canWrite ? { [model] point in model.sendLocation(point, live: 0) } : nil)
     }
     @State private var deleting: ChatMessage?
     @State private var viewer: ViewerItem?
@@ -895,6 +896,7 @@ struct ChatScreen: View {
                 .environment(\.liveAvatars, LiveAvatars(mine: session.profile.profile?.avatarID, myName: session.profile.profile?.name ?? "",
                                                          peer: model.peer.avatarID, peerName: model.peer.name))
                 .environment(\.chatLive, liveContext)
+                .overlay { MeetWatcher(context: liveContext) }        // «Вы рядом!» в режиме встречи
                 .environment(\.unlockSecret, { [model] message, point in await model.unlock(message, at: point) })
                 .fullScreenCover(isPresented: $showLiveMap) {
                     LiveMapScreen(context: liveContext)
