@@ -706,7 +706,7 @@ struct ReelsView: View {
             HStack(spacing: 6) {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 18) {
+                        HStack(spacing: 16) {
                             tab(s.t("Друзья", "Friends"), .friends).id(ReelsModel.Kind.friends)
                             tab(s.t("Рекомендации", "For you"), .forYou).id(ReelsModel.Kind.forYou)
                             tab(s.t("Подписки", "Following"), .following).id(ReelsModel.Kind.following)
@@ -776,7 +776,7 @@ struct ReelsView: View {
             VStack(spacing: 5) {
                 Text(title)
                     .lineLimit(1).fixedSize(horizontal: true, vertical: false)       // «Рекомендации» всегда в одну строку
-                    .font(.system(size: 18, weight: on ? .bold : .semibold))
+                    .font(.system(size: 15.5, weight: on ? .bold : .semibold))
                     .foregroundStyle(on ? Color.white : Color.white.opacity(0.62))
                     .shadow(color: .black.opacity(0.55), radius: 3)
                 ZStack {
