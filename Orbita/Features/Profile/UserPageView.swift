@@ -1327,7 +1327,7 @@ enum OrbitTone {
         cache[key] = c
         if fromPhoto {
             saved[key] = Double(hue)
-            if saved.count > 300 { saved = Dictionary(uniqueKeysWithValues: saved.suffix(200).map { ($0.key, $0.value) }) }
+            if saved.count > 300 { saved = Dictionary(saved.suffix(200).map { ($0.key, $0.value) }, uniquingKeysWith: { a, _ in a }) }
             UserDefaults.standard.set(saved, forKey: storeKey)
         }
         lock.unlock()

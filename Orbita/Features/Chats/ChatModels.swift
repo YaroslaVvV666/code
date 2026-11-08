@@ -305,7 +305,8 @@ final class ChatModel: ObservableObject {
             saved = ThreadPrefetcher.shared.get(peer.id) ?? repo.cachedThread(peerID: peer.id)
         }
         if let t = saved {
-            messages = t.messages
+            var seen = Set<String>()
+            messages = t.messages.filter { seen.insert($0.id).inserted }     // без повторов: один id — одно сообщение
             self.peer = t.peer
             lastSeen = t.lastSeen
             canWrite = t.canWrite
@@ -353,8 +354,10 @@ final class ChatModel: ObservableObject {
         do {
             let thread = try await repo.thread(peerID: peerID, limit: historyLimit, peek: false, topic: topic?.id)
             // Тот же ключ у тех же сообщений: список не перерисовывается и не «прыгает»
-            let keys = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0.key) })
-            let fresh = thread.messages.map { m -> ChatMessage in
+            // одинаковый id дважды (кэш + сервер, отправка + обновление) раньше ронял приложение — берём первый
+            let keys = Dictionary(messages.map { ($0.id, $0.key) }, uniquingKeysWith: { first, _ in first })
+            var seenIDs = Set<String>()
+            let fresh = thread.messages.filter { seenIDs.insert($0.id).inserted }.map { m -> ChatMessage in
                 var m = m
                 if let key = keys[m.id] { m.key = key }
                 return m

@@ -224,7 +224,7 @@ final class VoicePlayer: ObservableObject {
 
     private func remember(_ id: String, _ fraction: Double) {
         if fraction > 0.02 && fraction < 0.97 { positions[id] = fraction } else { positions[id] = nil }
-        if positions.count > 200 { positions = Dictionary(uniqueKeysWithValues: positions.suffix(150).map { ($0.key, $0.value) }) }
+        if positions.count > 200 { positions = Dictionary(positions.suffix(150).map { ($0.key, $0.value) }, uniquingKeysWith: { a, _ in a }) }
         UserDefaults.standard.set(positions, forKey: "voice_positions")
     }
 
