@@ -514,23 +514,12 @@ struct ChatsListView: View {
         let author: String? = chat.peer.isChannel || chat.peer.id == session.serverID ? nil
             : (chat.lastMine ? s.t("Вы", "You") : chat.lastSender)
         HStack(alignment: .center, spacing: 5) {
-            if let author, chat.lastThumb != nil || animated != nil {
+            if let author, animated != nil {
                 Text(author + ":").foregroundStyle(theme.text)
-            }
-            if let thumb = chat.lastThumb {
-                RemoteImage(id: thumb.mediaID, maxPixel: 120)
-                    .frame(width: 22, height: 22)
-                    .clipShape(thumb.kind == "circle" ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 5, style: .continuous)))
-                    .overlay {
-                        if thumb.kind != "photo" {
-                            Image(systemName: "play.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                                .shadow(color: .black.opacity(0.5), radius: 2)
-                        }
-                    }
             }
             if let animated {
                 StillEmoji(emoji: animated, size: 24)       // в списке чатов не играет — последний кадр готовой картинкой, без Lottie
-            } else if let author, chat.lastThumb == nil {
+            } else if let author {
                 Text(author + ": ").foregroundStyle(theme.text) + Text(chat.lastText).foregroundStyle(color)
             } else {
                 Text(chat.lastText).foregroundStyle(color)
@@ -561,7 +550,7 @@ struct ChatsListView: View {
                         Spacer(minLength: 6)
                         if chat.lastMine { Ticks(read: chat.lastRead, color: theme.accentColor) }
                         Text(ChatTime.short(chat.updatedAt, lang: lang))
-                            .font(.system(size: 13))
+                            .font(.system(size: 13).monospacedDigit())
                             .foregroundStyle(chat.unread > 0 ? theme.accentColor : theme.textTertiary)
                     }
                     HStack(alignment: .top) {
@@ -577,7 +566,20 @@ struct ChatsListView: View {
                         .font(.system(size: 15))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                        Spacer(minLength: 6)
+                        // две строки под текст всегда: строки списка одной высоты, с превью и без
+                        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .topLeading)
+                        if let thumb = chat.lastThumb, chat.typing == nil {
+                            // фото/видео из последнего сообщения — квадратиком справа
+                            RemoteImage(id: thumb.mediaID, maxPixel: 160)
+                                .frame(width: 38, height: 38)
+                                .clipShape(thumb.kind == "circle" ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous)))
+                                .overlay {
+                                    if thumb.kind != "photo" {
+                                        Image(systemName: "play.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                            .shadow(color: .black.opacity(0.5), radius: 2)
+                                    }
+                                }
+                        }
                         if chat.mentions > 0 {
                             // вас «тегнули»: красная «собака» всегда, рядом число — красное, если чат не отключён
                             HStack(spacing: 6) {
@@ -586,7 +588,7 @@ struct ChatsListView: View {
                                     .foregroundStyle(Color(red: 0.90, green: 0.28, blue: 0.17))
                                 if chat.unread > 0 {
                                     Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
-                                        .font(.system(size: 12, weight: .bold))
+                                        .font(.system(size: 12, weight: .bold).monospacedDigit())
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 7)
                                         .frame(minWidth: 22, minHeight: 22)
@@ -597,7 +599,7 @@ struct ChatsListView: View {
                             Circle().fill(theme.accent).frame(width: 14, height: 14)
                         } else if chat.unread > 0 {
                             Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
-                                .font(.system(size: 12, weight: .bold))
+                                .font(.system(size: 12, weight: .bold).monospacedDigit())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
                                 .frame(minWidth: 22, minHeight: 22)
@@ -1520,6 +1522,12 @@ struct ChatScreen: View {
                     .font(.system(size: 12))
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)                   // запас на совсем узкий экран
+                    // статус меняется мягко: старый уезжает вверх и гаснет, новый выплывает снизу — без скачка строки
+                    .id(headerStatusKey)
+                    .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
+                                            removal: .move(edge: .top).combined(with: .opacity)))
+                    .frame(height: 15)
+                    .clipped()
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 44)

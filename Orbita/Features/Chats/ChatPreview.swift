@@ -246,7 +246,7 @@ struct SwipeActionsRow<Content: View>: View {
 
     @State private var drag: CGFloat = 0
     @State private var side: Int = 0            // -1 открыто справа, +1 открыто слева, 0 закрыто
-    private let unit: CGFloat = 80
+    private let unit: CGFloat = 76
     private var trailingFull: CGFloat { unit * CGFloat(actions.count) }
     private var leadingFull: CGFloat { leading != nil ? unit : 0 }
 
@@ -262,14 +262,19 @@ struct SwipeActionsRow<Content: View>: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 }
             a.run()
         } label: {
-            VStack(spacing: 5) {
-                Image(systemName: a.icon).font(.system(size: 20, weight: .semibold))
+            // как в Telegram: значок и короткая подпись, сплошной мягкий цвет; значок «проявляется» по мере свайпа
+            let reveal = min(1, abs(offset) / max(1, a.id == leading?.id ? leadingFull : trailingFull))
+            VStack(spacing: 4) {
+                Image(systemName: a.icon).font(.system(size: 19, weight: .semibold))
+                    .scaleEffect(0.7 + 0.3 * reveal)
                 if !a.label.isEmpty {
-                    Text(a.label).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
+                    Text(a.label).font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
+            .opacity(0.4 + 0.6 * reveal)
             .foregroundStyle(.white)
-            .frame(width: unit).frame(maxHeight: .infinity).background(a.tint)
+            .frame(width: unit).frame(maxHeight: .infinity)
+            .background(LinearGradient(colors: [a.tint.opacity(0.92), a.tint], startPoint: .top, endPoint: .bottom))
         }
         .buttonStyle(.plain)
     }

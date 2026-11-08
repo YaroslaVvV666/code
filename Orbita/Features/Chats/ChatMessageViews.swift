@@ -36,7 +36,7 @@ struct MessageMeta: View {
             if message.editedAt != nil {
                 Text(Strings(lang: lang).edited).font(.system(size: 11))
             }
-            Text(ChatTime.clock(message.createdAt)).font(.system(size: 11))
+            Text(ChatTime.clock(message.createdAt)).font(.system(size: 11).monospacedDigit())
             if message.mine {
                 if message.isPending {
                     if message.failed {
@@ -56,8 +56,21 @@ struct MessageMeta: View {
         .foregroundStyle(color)
         .padding(.horizontal, onMedia ? 7 : 0)
         .padding(.vertical, onMedia ? 3 : 0)
-        .background(onMedia ? Color.black.opacity(0.42) : Color.clear, in: Capsule())
+        .background(onMedia ? Color.black.opacity(0.45) : Color.clear, in: Capsule())
     }
+}
+
+/// Одно место для времени и галочек во всех пузырях: нижний правый угол, одинаковые отступы
+extension View {
+    func metaCorner<M: View>(@ViewBuilder _ meta: () -> M) -> some View {
+        overlay(alignment: .bottomTrailing) { meta().padding(.trailing, MetaInset.trailing).padding(.bottom, MetaInset.bottom) }
+    }
+}
+
+enum MetaInset {
+    static let trailing: CGFloat = 10       // внутри пузыря
+    static let bottom: CGFloat = 6
+    static let media: CGFloat = 6           // поверх фото, видео, стикера
 }
 
 // MARK: - Своя заметка к сообщению
@@ -480,7 +493,7 @@ struct MessageRow: View {
             ZStack(alignment: .bottomTrailing) {
                 StickerImage(sticker: sticker.asSticker, size: 168)
                     .scaleEffect(stickerPop ? 1.12 : 1)
-                MessageMeta(message: message, color: .white, onMedia: true).padding(6)
+                MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media)
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -662,7 +675,7 @@ struct MessageRow: View {
                     .padding(.horizontal, 11).padding(.top, 8).padding(.bottom, 4)
                 MessageMeta(message: message, color: secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal, 11).padding(.bottom, 5)
+                    .padding(.trailing, MetaInset.trailing).padding(.bottom, MetaInset.bottom)
             }
 
             if message.isArticle {
@@ -674,8 +687,8 @@ struct MessageRow: View {
                     .padding(.top, message.reply == nil ? 0 : 6)
                     .padding(.bottom, 4)
                 HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
-                    .padding(.horizontal, 11)
-                    .padding(.bottom, 6)
+                    .padding(.trailing, MetaInset.trailing)
+                    .padding(.bottom, MetaInset.bottom)
             }
 
             if let pid = message.forwarded?.postID, mediaItems.count == 1, mediaItems[0].kind == .video {
@@ -685,7 +698,7 @@ struct MessageRow: View {
                     if let open = onOpenPost { open(pid) } else if let item = mediaItems[0].mediaItem { onOpenMedia([item], 0) }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(6) }
+                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
                 }
                 .padding(.top, message.reply == nil ? 0 : 6)
             } else if !mediaItems.isEmpty {
@@ -699,7 +712,7 @@ struct MessageRow: View {
                     if !items.isEmpty { onOpenMedia(items, min(index, items.count - 1)) }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(6) }
+                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
                 }
                 .padding(.top, message.reply == nil ? 0 : 6)
             }
@@ -732,11 +745,9 @@ struct MessageRow: View {
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, hasText ? 0 : (fileOnly ? 4 : 6))
-                .overlay(alignment: .bottomTrailing) {
-                    if voiceOnly && a.kind == .voice {
-                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 6)
-                    } else if fileOnly {
-                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 8)
+                .metaCorner {
+                    if (voiceOnly && a.kind == .voice) || fileOnly {
+                        MessageMeta(message: message, color: secondary)
                     }
                 }
             }
@@ -760,13 +771,11 @@ struct MessageRow: View {
                     .padding(.horizontal, 11)
                     .padding(.top, mediaItems.isEmpty && message.attachments.isEmpty && message.reply == nil ? 7 : 6)
                     .padding(.bottom, 7)
-                    .overlay(alignment: .bottomTrailing) {
-                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 5)
-                    }
+                    .metaCorner { MessageMeta(message: message, color: secondary) }
             } else if !onlyMedia && message.poll == nil && !voiceOnly && !fileOnly {
                 HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
-                    .padding(.horizontal, 11)
-                    .padding(.bottom, 5)
+                    .padding(.trailing, MetaInset.trailing)
+                    .padding(.bottom, MetaInset.bottom)
             }
 
             if hasText, !message.isArticle, message.poll == nil, mediaItems.isEmpty, let link = LinkPreviewCard.firstURL(in: message.text) {
