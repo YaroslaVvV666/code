@@ -69,7 +69,7 @@ struct BannerWindowInstaller: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let root = AnyView(
-            ChatBannerHost(chats: chats, onOpen: onOpen)
+            ChatBannerHost(chats: chats, selfID: session.serverID, onOpen: onOpen)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .environmentObject(session).environmentObject(flow).environmentObject(session.player)
                 .preferredColorScheme(theme.dark ? .dark : .light)
@@ -86,6 +86,7 @@ struct BannerWindowInstaller: UIViewRepresentable {
 
 struct ChatBannerHost: View {
     @ObservedObject var chats: ChatsModel
+    var selfID: String = ""
     let onOpen: (ChatPeer) -> Void
 
     @Environment(\.theme) private var theme
@@ -136,7 +137,7 @@ struct ChatBannerHost: View {
                 if let chat = deleting { Task { await chats.clear(chat.id) } }
             }
             // личный чат (не «Избранное») — можно удалить и у собеседника
-            if let chat = deleting, !chat.peer.isGroup, chat.id != session.serverID {
+            if let chat = deleting, !chat.peer.isGroup, chat.id != selfID {
                 Button(s.t("Удалить у меня и у \(chat.peer.name)", "Delete for me and \(chat.peer.name)"), role: .destructive) {
                     Task { await chats.clear(chat.id, forEveryone: true) }
                 }

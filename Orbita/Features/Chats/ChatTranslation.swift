@@ -81,7 +81,7 @@ final class ChatTranslator: ObservableObject {
     private func request(_ items: [(String, String)]) {
         let fresh = items.filter { item in results[item.0] == nil && !queue.contains(where: { q in q.id == item.0 }) }
         guard !fresh.isEmpty else { return }
-        queue += fresh.map { (id: $0.0, text: $0.1) }
+        queue += fresh.map { item in (id: item.0, text: item.1) }
         tick += 1
     }
 
@@ -161,7 +161,7 @@ struct ChatTranslatorHost: View {
                     while true {
                         let batch = await MainActor.run { translator.take(20) }
                         if batch.isEmpty { break }
-                        let requests = batch.map { TranslationSession.Request(sourceText: $0.text, clientIdentifier: $0.id) }
+                        let requests = batch.map { item in TranslationSession.Request(sourceText: item.text, clientIdentifier: item.id) }
                         if let out = try? await session.translations(from: requests) {
                             await MainActor.run {
                                 for r in out { if let id = r.clientIdentifier { translator.store(id, r.targetText) } }
