@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AVFoundation
 import Combine
 import CoreMedia
@@ -1060,8 +1061,11 @@ struct ReelPage: View {
             // касания: один — пауза, два — сердечко (у коллажа — свои, на листающихся фото)
             if !collage {
             GeometryReader { geo in
-                Color.clear.contentShape(Rectangle())
-                    .onTapGesture(count: 2, coordinateSpace: .local) { point in
+                // касания на видео — системными распознавателями (UIKit): они не спорят с прокруткой ленты,
+                // поэтому листать можно и пальцем по самому видео
+                ReelTouchLayer(
+                    onTap: { if forceFill { toggleControls() } else { togglePause() } },
+                    onDoubleTap: { point in
                         onDoubleLike()
                         let h = FloatingHeart(point: point, tilt: Double.random(in: -18...18))
                         hearts.append(h)
@@ -1070,42 +1074,29 @@ struct ReelPage: View {
                             try? await Task.sleep(nanoseconds: 900_000_000)
                             hearts.removeAll { $0.id == h.id }
                         }
-                    }
-                    .onTapGesture { if forceFill { toggleControls() } else { togglePause() } }
-                    // удержание — ×2; пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×); отпустил — обычная скорость.
-                    // Сначала долгое нажатие, и только потом — ведение пальцем: быстрый свайп достаётся ленте (раньше
-                    // «прилипший» жест с нулевым порогом перехватывал касание, и шортсы не листались)
-                    .gesture(
-                        LongPressGesture(minimumDuration: 0.35)
-                            .sequenced(before: DragGesture(minimumDistance: 0))
-                            .onChanged { value in
-                                guard active, !userPaused else { return }
-                                switch value {
-                                case .first:
-                                    break
-                                case .second(true, let drag):
-                                    if !fast {
-                                        fast = true
-                                        fastRate = 2
-                                        fastOrigin = nil
-                                        player?.rate = 2
-                                        Haptics.impact(.light)
-                                    }
-                                    guard let drag else { return }
-                                    let x = forceFill ? drag.location.y : drag.location.x      // в повёрнутом режиме «вправо» — вниз
-                                    if fastOrigin == nil { fastOrigin = x }
-                                    let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
-                                    if r != fastRate {
-                                        fastRate = r
-                                        player?.rate = r
-                                        Haptics.select()
-                                    }
-                                default:
-                                    break
-                                }
-                            }
-                            .onEnded { _ in endFast() }
-                    )
+                    },
+                    onHoldBegan: { point in
+                        // удержание — ×2
+                        guard active, !userPaused else { return }
+                        fast = true
+                        fastRate = 2
+                        fastOrigin = forceFill ? point.y : point.x
+                        player?.rate = 2
+                        Haptics.impact(.light)
+                    },
+                    onHoldMoved: { point in
+                        // пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×)
+                        guard fast else { return }
+                        let x = forceFill ? point.y : point.x
+                        let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
+                        if r != fastRate {
+                            fastRate = r
+                            player?.rate = r
+                            Haptics.select()
+                        }
+                    },
+                    onHoldEnded: { endFast() }
+                )
                 ForEach(hearts) { h in
                     TapHeart(tilt: h.tilt, size: forceFill ? 150 : 86).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
                 }
@@ -2341,5 +2332,59 @@ struct ReelPullToRefresh: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+// MARK: - Касания по видео шортса (UIKit)
+
+/// Тап, двойной тап и удержание по видео. Сделано системными распознавателями: в отличие от жестов SwiftUI они
+/// не забирают касание у ленты — свайп по видео листает шортсы, а тапы и удержание работают как раньше
+struct ReelTouchLayer: UIViewRepresentable {
+    var onTap: () -> Void
+    var onDoubleTap: (CGPoint) -> Void
+    var onHoldBegan: (CGPoint) -> Void
+    var onHoldMoved: (CGPoint) -> Void
+    var onHoldEnded: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        let double = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.double(_:)))
+        double.numberOfTapsRequired = 2
+        let single = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.single(_:)))
+        single.require(toFail: double)
+        let hold = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.hold(_:)))
+        hold.minimumPressDuration = 0.35
+        hold.allowableMovement = 10           // сдвинул палец раньше — это свайп, его забирает лента
+        for g in [double, single, hold] as [UIGestureRecognizer] {
+            g.cancelsTouchesInView = false
+            g.delegate = context.coordinator
+            v.addGestureRecognizer(g)
+        }
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ReelTouchLayer
+        init(parent: ReelTouchLayer) { self.parent = parent }
+
+        @objc func single(_ g: UITapGestureRecognizer) { parent.onTap() }
+        @objc func double(_ g: UITapGestureRecognizer) { parent.onDoubleTap(g.location(in: g.view)) }
+        @objc func hold(_ g: UILongPressGestureRecognizer) {
+            let p = g.location(in: g.view)
+            switch g.state {
+            case .began: parent.onHoldBegan(p)
+            case .changed: parent.onHoldMoved(p)
+            case .ended, .cancelled, .failed: parent.onHoldEnded()
+            default: break
+            }
+        }
+
+        // с прокруткой ленты и другими жестами — одновременно, ничего не блокируем
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
     }
 }
