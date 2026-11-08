@@ -164,7 +164,19 @@ struct FeedView: View {
         .modifier(StoryPresenters(store: stories))
         .task {
             // закладки с других устройств — чтобы значок закладок был, если они есть
-            if let list = await session.extras.savedPosts() { bookmarks.adopt(server: list.map(\.id)) }
+            if let list = await session.extras.savedPosts() {
+                bookmarks.adopt(server: list.map(\.id))
+                // закладки на посты, которых больше нет (удалены или с другого аккаунта), — убираем: иначе значок
+                // закладок висит, а внутри пусто
+                var gone: [String] = []
+                for id in bookmarks.ids.prefix(40) where !list.contains(where: { $0.id == id }) {
+                    // пост есть, но сервер про закладку не знает (не дошло) — отправляем ещё раз
+                    do { _ = try await session.feedRepo.post(id: id); await session.extras.setSaved(id: id, saved: true) }
+                    catch APIError.server(let status, _) where status == 404 { gone.append(id) }
+                    catch {}
+                }
+                bookmarks.forget(gone)
+            }
         }
         .task {
             // счётчик на колокольчике: раз в минуту, тихо, без баннеров

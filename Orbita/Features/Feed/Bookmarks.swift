@@ -76,19 +76,26 @@ struct BookmarksSheet: View {
             Spacer(minLength: 0)
         }
         .task {
+            // сразу — то, что уже загружено в ленте (без ожидания сети)
+            let local = store.ids.compactMap { id in vm.posts.first { $0.id == id } }
+            if !local.isEmpty { posts = local; loading = false }
             // всё сохранённое — одним запросом с сервера (там закладки со всех устройств)
             if let list = await session.extras.savedPosts() {
                 store.adopt(server: list.map(\.id))
                 var out = list
                 // сохранённое на этом телефоне, но ещё не дошедшее до сервера — догружаем по одному
                 for id in store.ids where !out.contains(where: { $0.id == id }) {
-                    if let p = try? await session.feedRepo.post(id: id) { out.append(p) }
+                    if let p = vm.posts.first(where: { $0.id == id }) { out.append(p) }
+                    else if let p = try? await session.feedRepo.post(id: id) { out.append(p) }
                 }
                 posts = out.sorted { a, b in (store.ids.firstIndex(of: a.id) ?? .max) < (store.ids.firstIndex(of: b.id) ?? .max) }
             } else {
                 var out: [Post] = []
-                for id in store.ids { if let p = try? await session.feedRepo.post(id: id) { out.append(p) } }
-                posts = out
+                for id in store.ids {
+                    if let p = vm.posts.first(where: { $0.id == id }) { out.append(p) }
+                    else if let p = try? await session.feedRepo.post(id: id) { out.append(p) }
+                }
+                if !out.isEmpty || posts.isEmpty { posts = out }
             }
             loading = false
         }
