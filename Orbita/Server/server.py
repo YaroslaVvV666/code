@@ -8960,7 +8960,10 @@ def chat_messages(req, me, peer):
     fu = q1("SELECT id FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
             "ORDER BY created_at LIMIT 1", (peer, uid)) if peer != uid else None
     first_unread = fu["id"] if fu else None
-    if req.query().get("peek") != "1":                       # предпросмотр не помечает прочитанным
+    dm_unread = q1("SELECT COUNT(*) c FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
+                   (peer, uid))["c"] if peer != uid else 0
+    # read=manual: телефон сам отмечает прочитанным то, что человек увидел (POST /v1/chats/<id>/read)
+    if req.query().get("peek") != "1" and req.query().get("read") != "manual":       # предпросмотр не помечает прочитанным
         run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
             (now, peer, uid))
     rows = q("SELECT * FROM messages WHERE ((sender = ? AND recipient = ? AND del_sender = 0) "
@@ -8975,7 +8978,7 @@ def chat_messages(req, me, peer):
     req.send_json(200, {"messages": items,
                         "peer": {**profile_json(pr, uid), "name": contact_name(uid, peer) or names(pr)[2]},
                         "typing": typing_action(peer, uid),
-                        "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread,
+                        "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread, "unread": dm_unread,
                         "ttl": dm_ttl(dm_key(uid, peer)),
                         **bot_thread_fields(peer, uid),
                         "protected": dm_protected(dm_key(uid, peer)),
@@ -10809,7 +10812,8 @@ def group_messages(req, me, gid):
                 "AND id NOT IN (SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at LIMIT 1",
                 (gid, uid, max(mem["last_read"], history_since(g, mem)), uid))
         first_unread = fu["id"] if fu else None
-    if not preview and req.query().get("peek") != "1":
+    g_unread = group_unread_count(g, mem, uid) if not preview else 0
+    if not preview and req.query().get("peek") != "1" and req.query().get("read") != "manual":
         run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (time.time(), gid, uid))
     topic = req.query().get("topic") or None
     if topic and topic != GENERAL_TOPIC and not topic_row(gid, topic):
@@ -10843,7 +10847,55 @@ def group_messages(req, me, gid):
     req.send_json(200, {"messages": items, "peer": group_peer(g),
                         "typing": None if preview else group_typing(gid, uid),
                         "can_write": can_write, "group": group_info(g, uid), "preview": preview,
-                        "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread})
+                        "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread, "unread": g_unread})
+
+
+def group_unread_count(g, mem, uid):
+    """Сколько непрочитанных в группе/канале у участника (как в списке чатов)"""
+    return q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND sender != ? AND created_at > ? "
+              "AND kind IS NOT 'left' AND kind IS NOT 'joined' AND kind IS NOT 'removed' "
+              "AND id NOT IN (SELECT message_id FROM group_hidden WHERE user_id = ?)",
+              (g["id"], uid, max(mem["last_read"], history_since(g, mem)), uid))["c"]
+
+
+@route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/read")
+def read_up_to(req, me, peer):
+    """Прочитано до сообщения up_to (включительно) — то, что человек увидел на экране; all — всё.
+    Отметка только вперёд: прочитанное назад не «непрочитывается». Ответ — сколько осталось непрочитанных"""
+    uid = me["id"]
+    d = req.body_json()
+    upto = str(d.get("up_to") or "")
+    if is_group(peer):
+        g = group_row(peer)
+        mem = member_row(peer, uid)
+        if not g or not mem:
+            raise ApiError(404, "not_found")
+        if d.get("all"):
+            t = time.time()
+        else:
+            m = q1("SELECT created_at FROM group_messages WHERE id = ? AND group_id = ?", (upto, peer))
+            if not m:
+                raise ApiError(404, "not_found")
+            t = m["created_at"]
+        if t > (mem["last_read"] or 0):
+            run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (t, peer, uid))
+        mem = member_row(peer, uid)
+        left = group_unread_count(g, mem, uid)
+    else:
+        if d.get("all"):
+            t = time.time()
+        else:
+            m = q1("SELECT created_at FROM messages WHERE id = ? AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))",
+                   (upto, peer, uid, uid, peer))
+            if not m:
+                raise ApiError(404, "not_found")
+            t = m["created_at"]
+        run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
+            "AND created_at <= ?", (time.time(), peer, uid, t))
+        left = q1("SELECT COUNT(*) c FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
+                  (peer, uid))["c"]
+        SHARED.events_publish(peer, "dm")              # у собеседника — галочки «прочитано»
+    req.send_json(200, {"unread": left})
 
 
 # ---------- темы в группах (форум, как в Telegram) ----------

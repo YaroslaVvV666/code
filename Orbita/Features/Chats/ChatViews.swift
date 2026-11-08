@@ -1190,6 +1190,7 @@ struct ChatScreen: View {
     @State private var userDragged = false          // пока не листали сами — длинная история не должна уводить экран от низа
     @State private var atBottom = true
     @State private var unreadIDs: Set<String> = []      // входящие, которые ещё не показывались на экране
+    @State private var readArmed = false                 // отмечать прочитанным — только когда чат уже встал на первое непрочитанное
     @ObservedObject private var listPrefs = ChatListPrefs.shared
     @State private var viewH: CGFloat = 800
     @State private var downloading = false
@@ -1445,7 +1446,12 @@ struct ChatScreen: View {
             }
             VoicePlayer.shared.onAdvance = { id in scrollTarget = id }
         }
-        .onDisappear { session.chats.chatScreenDisappeared(tab: hostTab) }
+        .onDisappear {
+            session.chats.chatScreenDisappeared(tab: hostTab)
+            // вышли — в списке чатов сразу точное число непрочитанных (или ничего, если всё прочитал)
+            let chats = session.chats
+            Task { try? await Task.sleep(nanoseconds: 500_000_000); await chats.refresh() }
+        }
         .task {
             // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
             // меню по зажатию оживает сразу, а не после разбора JSON в момент открытия
@@ -2227,12 +2233,18 @@ struct ChatScreen: View {
             })
             .onPreferenceChange(UnreadYKey.self) { ys in
                 // сообщение прочитано, когда его верх вошёл в видимую область
-                let seen = ys.filter { $0.value < viewH - 16 }.keys
-                if !seen.isEmpty { unreadIDs.subtract(seen) }
+                let seen = Set(ys.filter { $0.value < viewH - 16 }.keys)
+                if !seen.isEmpty, readArmed || userDragged {
+                    unreadIDs.subtract(seen)
+                    // самое новое из увиденных — «прочитано до него» (сервер + точный остаток)
+                    if let newest = model.items.last(where: { seen.contains($0.id) }) { model.markSeen(newest.id) }
+                }
             }
             .onPreferenceChange(BottomKey.self) { y in
                 let near = y < viewH + 140
                 if near != atBottom { atBottom = near }
+                // сам низ переписки на экране — прочитано всё
+                if y < viewH + 8, readArmed || userDragged, (model.unreadLeft ?? 0) > 0 || !unreadIDs.isEmpty { model.markAllSeen() }
             }
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in if !userDragged { userDragged = true } })   // запись в @State — один раз, а не на каждом движении пальца
@@ -2245,14 +2257,22 @@ struct ChatScreen: View {
                     if let f = route.focus {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { scrollTarget = f }
                     } else if model.firstUnreadID != nil {
-                    // чат открылся с предзагруженными сообщениями — к плашке «Новые сообщения», как и при обычной загрузке
+                    // чат открылся с предзагруженными сообщениями — к плашке «Непрочитанные сообщения», как и при обычной загрузке
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("unreadStrip", anchor: .top) }
                     }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { readArmed = true }
                 }
             }
             .onChange(of: model.items.count) { old, new in
                 // пришла более длинная история (предзагруженные 10 → 100): остаёмся внизу, а не у начала переписки
                 if new > old, !userDragged, route.focus == nil {
+                    // догрузилась длинная история, где наконец есть первое непрочитанное — встаём на него
+                    if unreadIDs.isEmpty, let uid = model.firstUnreadID, model.items.contains(where: { $0.id == uid }) {
+                        if let i = all.firstIndex(where: { $0.message.id == uid }), i < startIdx { topKey = all[max(0, i - 5)].id }
+                        seedUnread()
+                        readArmed = false                                    // пока переезжаем к непрочитанным — не отмечаем
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { readArmed = true }
+                    }
                     let id = model.firstUnreadID != nil && unreadIDs.isEmpty == false ? "unreadStrip" : "bottom"
                     let anchor: UnitPoint = id == "bottom" ? .bottom : .top
                     DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor) }
@@ -2277,10 +2297,15 @@ struct ChatScreen: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { scrollTarget = f }
                     return
                 }
-                guard ok, model.firstUnreadID != nil else { return }
+                guard ok, model.firstUnreadID != nil else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { readArmed = true }
+                    return
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     proxy.scrollTo("unreadStrip", anchor: .top)
                 }
+                // встали на «Непрочитанные сообщения» — дальше прочитанным считается то, что реально видно
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { readArmed = true }
             }
             .onReceive(scrollRequests) { _ in
                 scrollAnchor.id = list.last?.id
@@ -2318,6 +2343,7 @@ struct ChatScreen: View {
                         // всё ниже прочитано: счётчик гаснет уже после прыжка; и добиваем до самого низа, если высоты строк догрузились
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                             withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
+                            model.markAllSeen()                    // всё прочитано — и на сервере, и в списке чатов
                             scrollAnchor.id = list.last?.id
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
@@ -2329,8 +2355,10 @@ struct ChatScreen: View {
                             .background(.ultraThinMaterial, in: Circle())
                             .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
                             .overlay(alignment: .top) {
-                                if !unreadIDs.isEmpty {
-                                    Text(unreadIDs.count > 999 ? "999+" : "\(unreadIDs.count)")
+                                if unreadBadge > 0 {
+                                    Text(unreadBadge > 999 ? "999+" : "\(unreadBadge)")
+                                        .contentTransition(.numericText(value: Double(unreadBadge)))
+                                        .animation(.snappy(duration: 0.25), value: unreadBadge)
                                         .font(.system(size: 12, weight: .bold)).monospacedDigit()
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 6).frame(minWidth: 20, minHeight: 20)
@@ -2357,6 +2385,12 @@ struct ChatScreen: View {
         return (summary?.muted ?? false) || (!model.peer.isGroup && listPrefs.isDMMuted(model.peer.id))
     }
 
+    /// Число на стрелке «вниз»: точный остаток с сервера (даже если загружена только часть истории), иначе — по экрану
+    private var unreadBadge: Int {
+        if let left = model.unreadLeft { return unreadIDs.isEmpty && left > 0 && atBottom ? 0 : max(left, 0) }
+        return unreadIDs.count
+    }
+
     /// Какие входящие ещё не прочитаны: всё от первого непрочитанного и ниже
     private func seedUnread() {
         guard let first = model.firstUnreadID, let i = model.items.firstIndex(where: { $0.id == first }) else { return }
@@ -2365,7 +2399,7 @@ struct ChatScreen: View {
 
     /// Лоскуток «Новые сообщения» над первым непрочитанным
     private var newMessagesStrip: some View {
-        Text(s.t("Новые сообщения", "New messages"))
+        Text(s.t("Непрочитанные сообщения", "Unread messages"))
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(theme.accentColor)
             .frame(maxWidth: .infinity)

@@ -279,6 +279,10 @@ final class ChatModel: ObservableObject {
     @Published private(set) var joining = false
     /// Сообщение, с которого начинались непрочитанные при входе в чат (запоминается один раз)
     @Published private(set) var firstUnreadID: String?
+    /// Сколько непрочитанных осталось (с сервера, точное — даже если загружена только часть истории); nil — не знаем
+    @Published private(set) var unreadLeft: Int?
+    private var readUpTo: Date = .distantPast          // до какого сообщения уже отметили прочитанным
+    private var readTask: Task<Void, Never>?
     /// Растёт, когда поверх предзагруженных сообщений разом приходит длинная история: экран переписки создаётся заново
     /// и сразу открывается внизу — вместо кадров, где список стоял на месте, а контент под ним вырос
     @Published private(set) var generation = 0
@@ -316,6 +320,7 @@ final class ChatModel: ObservableObject {
             pinned = t.pinned
             isPreview = t.isPreview
             firstUnreadID = t.firstUnread
+            unreadLeft = t.unread
             botCommands = BotCommand.resolve(t.botCommands, peerID: peer.id)
             bot = t.bot
             botKeyboard = t.botKeyboard
@@ -408,13 +413,49 @@ final class ChatModel: ObservableObject {
                 bot = fresh
             }
             if botKeyboard != thread.botKeyboard { botKeyboard = thread.botKeyboard }
-            if !loaded { firstUnreadID = thread.firstUnread }
+            if !loaded {
+                firstUnreadID = thread.firstUnread
+                unreadLeft = thread.unread
+                // непрочитанных больше, чем загружено (563 при 100 последних) — догружаем, чтобы начать с первого непрочитанного
+                if let n = thread.unread, let fu = thread.firstUnread, !thread.messages.contains(where: { $0.id == fu }),
+                   historyLimit < 300 {
+                    historyLimit = min(300, n + 30)
+                    Task { await self.refresh() }
+                }
+            }
             if !loaded { loaded = true }
             refreshedOnce = true
             if !outbox.isEmpty, !NetworkState.shared.offline { Task { await retryQueued() } }
         } catch let e as APIError {
             if !loaded { error = e }
         } catch {}
+    }
+
+    /// Человек увидел сообщение `id` на экране: всё до него (включительно) — прочитано. Только вперёд;
+    /// на сервер уходит раз в полсекунды (последнее увиденное), ответ — точный остаток для счётчика и списка чатов
+    func markSeen(_ id: String) {
+        guard !isPreview, let m = items.first(where: { $0.id == id }), m.createdAt > readUpTo else { return }
+        readUpTo = m.createdAt
+        // сразу на экране: минус увиденные непрочитанные (сервер следом поправит точным числом)
+        if let left = unreadLeft, let first = firstUnreadID, let i = items.firstIndex(where: { $0.id == first }) {
+            let seen = items[i...].filter { !$0.mine && $0.system == nil && $0.createdAt <= m.createdAt }.count
+            let total = items[i...].filter { !$0.mine && $0.system == nil }.count
+            let notLoaded = max(0, left - total)            // непрочитанные, которых ещё нет в загруженной части
+            unreadLeft = max(0, min(left, notLoaded + total - seen))
+        }
+        readTask?.cancel()
+        readTask = Task { [weak self, repo, peerID] in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if let left = await repo.markRead(peerID: peerID, upTo: id) { self.unreadLeft = left }
+        }
+    }
+
+    /// Долистали до самого низа — прочитано всё
+    func markAllSeen() {
+        guard !isPreview, let last = items.last(where: { !$0.isPending }) else { return }
+        markSeen(last.id)
+        if unreadLeft != 0 && (items.last?.createdAt ?? .distantPast) <= readUpTo { unreadLeft = 0 }
     }
 
     /// Пришло только событие «печатает» — обновляем лишь его, не загружая заново всю переписку

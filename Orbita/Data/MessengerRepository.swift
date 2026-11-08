@@ -539,6 +539,7 @@ struct ChatThread {
     var realName: String? = nil
     var pinned: [ChatMessage] = []
     var firstUnread: String? = nil  // первое непрочитанное при входе — для плашки «Новые сообщения»
+    var unread: Int? = nil          // сколько всего непрочитанных (может быть больше, чем загружено сообщений)
     var isPreview = false           // открытый канал/группа просматривается без вступления
     var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
     var botCommands: [BotCommand] = []  // переписка с ботом: его команды (меню «/»)
@@ -662,6 +663,8 @@ protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
     /// topic — тема группы-форума ("general" — общая); nil — вся переписка
     func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread
+    /// Прочитано до сообщения (включительно) или всё; ответ — сколько осталось непрочитанных
+    func markRead(peerID: String, upTo: String?) async -> Int?
     /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
     func cachedChats() -> (chats: [ChatSummary], unread: Int)?
     func cachedThread(peerID: String) -> ChatThread?
@@ -1328,6 +1331,7 @@ private struct ThreadDTO: Decodable {
     let pinned: [MessageDTO]?
     let preview: Bool?
     let firstUnread: String?
+    let unread: Int?
     let ttl: Int?
     let botCommands: [BotCommand]?
     let bot: BotInfo?
@@ -1402,6 +1406,8 @@ struct RemoteMessengerRepository: MessengerRepository {
     func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
+        // прочитанным сервер ничего не отмечает сам — телефон отмечает то, что человек увидел на экране (markRead)
+        if !peek && topic == nil { query["read"] = "manual" }
         if ChannelViewSource.openedByLink.contains(peerID) { query["src"] = "link" }      // статистика: «URL»
         if let topic {
             query["topic"] = topic
@@ -1412,6 +1418,13 @@ struct RemoteMessengerRepository: MessengerRepository {
         let data = try await api.requestCached("/v1/chats/\(peerID)/messages", query: query,
                                                slot: peek ? "p" : "", fallback: peek ? [""] : ["p"])
         return try decodeThread(data)
+    }
+
+    func markRead(peerID: String, upTo: String?) async -> Int? {
+        struct Left: Decodable { let unread: Int }
+        let body: [String: Any] = upTo.map { ["up_to": $0] } ?? ["all": true]
+        guard let data = try? await api.request("POST", "/v1/chats/\(peerID)/read", body: ServerAPI.json(body)) else { return nil }
+        return (try? decodeAPI(Left.self, from: data))?.unread
     }
 
     func cachedThread(peerID: String, topic: String) -> ChatThread? {
@@ -1453,7 +1466,7 @@ struct RemoteMessengerRepository: MessengerRepository {
                           lastSeen: dto.peer.lastSeen.map { Date(timeIntervalSince1970: $0) },
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
-                          pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread,
+                          pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread, unread: dto.unread,
                           isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot,
                           botKeyboard: dto.botKeyboard)
     }
