@@ -217,6 +217,13 @@ extension ExtrasAPI {
         return (n, j["reposted_by_me"] as? Bool ?? on)
     }
 
+    /// Закладки с сервера (свежие сверху) — посты целиком одним запросом; nil — нет сети
+    func savedPosts() async -> [Post]? {
+        guard let data = try? await api.request("GET", "/v1/me/saved"),
+              let list = try? decodeAPI(PostListDTO.self, from: data) else { return nil }
+        return list.posts.map(\.model)
+    }
+
     /// Закладки раньше жили только на устройстве — один раз отправляем их серверу
     func syncSaves(ids: [String]) async {
         guard !ids.isEmpty else { return }

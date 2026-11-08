@@ -4515,6 +4515,16 @@ def sync_saves(req, me):
     req.send_json(200, {"ok": True})
 
 
+@route("GET", r"/v1/me/saved")
+def my_saved(req, me):
+    """Закладки: сохранённые посты и шортсы, свежие сверху (удалённые и от заблокированных — пропускаем)"""
+    rows = q("SELECT p.* FROM post_saves s JOIN posts p ON p.id = s.post_id WHERE s.user_id = ? "
+             "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
+             "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
+             "ORDER BY s.created_at DESC LIMIT 300", (me["id"], me["id"], me["id"]))
+    req.send_json(200, {"posts": posts_json(rows, me["id"])})
+
+
 @route("GET", r"/v1/posts/([a-f0-9]+)/likes")
 def post_likers(req, me, pid):
     """Кто лайкнул пост — видит только его автор"""

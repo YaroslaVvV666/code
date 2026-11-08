@@ -34,6 +34,7 @@ struct FeedView: View {
     @FocusState private var searchFocused: Bool
     @StateObject private var stories = StoryStore()
     @StateObject private var activity = ActivityStore()
+    @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var showActivity = false
     @State private var pendingAuthor: Author?
     @Environment(\.scenePhase) private var scenePhase
@@ -137,7 +138,10 @@ struct FeedView: View {
             }
             .onReceive(TabReselect.shared.publisher(.home)) { _ in
                 // повторно нажали «Главная»: пролистали — в начало; уже в начале — обновить
-                if scrollTrack.last < -8 || composeFloating { scrollToTop(proxy) } else { reload() }
+                // всегда в самое начало (как нажатие на «Orbita»); если уже были наверху — ещё и обновить
+                let wasAtTop = scrollTrack.last >= -8 && !composeFloating
+                scrollToTop(proxy)
+                if wasAtTop { reload() }
             }
             .onChange(of: topRequest) { _, _ in scrollToTop(proxy) }
             }
@@ -158,6 +162,10 @@ struct FeedView: View {
             }
         }
         .modifier(StoryPresenters(store: stories))
+        .task {
+            // закладки с других устройств — чтобы значок закладок был, если они есть
+            if let list = await session.extras.savedPosts() { bookmarks.adopt(server: list.map(\.id)) }
+        }
         .task {
             // счётчик на колокольчике: раз в минуту, тихо, без баннеров
             while !Task.isCancelled {
@@ -437,13 +445,21 @@ struct FeedView: View {
                     }
                 }
 
-                BellButton(store: activity) { showActivity = true }
+                // колокольчик — только когда есть новое; прочитал — пропадает до следующего нового
+                if activity.unread > 0 {
+                    BellButton(store: activity) { showActivity = true }
+                        .transition(.scale.combined(with: .opacity))
+                }
 
-                Button { showBookmarks = true } label: {
-                    Image(systemName: "bookmark")
-                        .font(.system(size: 19, weight: .medium))
-                        .foregroundStyle(theme.text)
-                        .frame(width: 40, height: 40)
+                // закладки — только когда в них что-то есть
+                if !bookmarks.ids.isEmpty {
+                    Button { showBookmarks = true } label: {
+                        Image(systemName: "bookmark")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundStyle(theme.text)
+                            .frame(width: 40, height: 40)
+                    }
+                    .transition(.scale.combined(with: .opacity))
                 }
 
                 Button {
@@ -458,6 +474,8 @@ struct FeedView: View {
                 .buttonStyle(PressStyle())
             }
         }
+        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: activity.unread > 0)
+        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: bookmarks.ids.isEmpty)
         .padding(.horizontal, 16)
         .frame(height: 54)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 1) }
