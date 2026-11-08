@@ -176,7 +176,7 @@ struct PostLabel: Equatable, Hashable, Codable {
 
     func title(_ s: Strings) -> String {
         switch kind {
-        case .ai: return s.t("Создано ИИ", "AI-generated")
+        case .ai: return s.t("Содержит контент, созданный ИИ", "Contains AI-generated content")
         case .ad: return s.t("Реклама", "Ad")
         case .place, .custom: return text ?? ""
         }

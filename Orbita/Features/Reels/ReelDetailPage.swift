@@ -29,18 +29,19 @@ struct PostLabelsRow: View {
                         }
                         .foregroundStyle(onDark ? Color.white : theme.text)
                         .padding(.horizontal, 8).frame(height: 24)
-                        .background(onDark ? Color.black.opacity(0.4) : theme.text.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .background(onDark ? Color.white.opacity(0.2) : theme.text.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
                 ForEach(labels, id: \.self) { l in
                     HStack(spacing: 4) {
-                        Image(systemName: l.icon).font(.system(size: 11, weight: .bold))
+                        if l.kind != .ai { Image(systemName: l.icon).font(.system(size: 11, weight: .bold)) }
                         Text(l.title(s)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     }
-                    .foregroundStyle(onDark ? Color.white : theme.text)
+                    .foregroundStyle(onDark ? Color.white.opacity(0.92) : theme.text)
                     .padding(.horizontal, 8).frame(height: 24)
-                    .background(onDark ? Color.black.opacity(0.4) : theme.text.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    // серая плашка, как в TikTok
+                    .background(onDark ? Color.white.opacity(0.2) : theme.text.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
             }
         }
@@ -356,7 +357,6 @@ struct ReelDetailPage: View {
     private var details: some View {
         let (title, body) = titleAndBody
         return VStack(alignment: .leading, spacing: 12) {
-            if !post.labels.isEmpty || post.ad != nil { PostLabelsRow(labels: post.labels, ad: post.ad) }
             if let title {
                 Text(title).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
             }
@@ -388,6 +388,8 @@ struct ReelDetailPage: View {
                 }
                 .buttonStyle(.plain)
             }
+            // пометки — под всем текстом
+            if !post.labels.isEmpty || post.ad != nil { PostLabelsRow(labels: post.labels, ad: post.ad) }
             Text(dateLine).font(.system(size: 14)).foregroundStyle(.white.opacity(0.5))
         }
     }
