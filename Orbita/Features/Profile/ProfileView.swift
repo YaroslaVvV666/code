@@ -66,7 +66,6 @@ struct ProfileView: View {
     @State private var pullStage = 0
     @State private var showEdit = false
     @State private var showStatus = false
-    @State private var showActivity = false              // «Чем я занят»
     @State private var showQR = false
     @State private var showImport = false
     @State private var showAds = false
@@ -386,10 +385,6 @@ struct ProfileView: View {
                     SettingsDivider()
                     SettingsRow(icon: "face.smiling.fill", tint: .yellow, title: s.t("Эмодзи-статус", "Emoji status"),
                                 value: store.profile?.statusEmoji ?? s.t("Нет", "None"), showsChevron: true) { showStatus = true }
-                    SettingsDivider()
-                    SettingsRow(icon: "sparkles", tint: .orange, title: s.t("Чем я занят", "What I'm up to"),
-                                value: store.profile?.activity.flatMap { $0.active ? $0.line : nil } ?? s.t("Нет", "None"),
-                                showsChevron: true) { showActivity = true }
                 }
 
                 SettingsGroup {
@@ -535,14 +530,6 @@ struct ProfileView: View {
         .fullScreenCover(isPresented: $showEdit) {
             EditProfileView(store: store)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-        }
-        .sheet(isPresented: $showActivity) {
-            ActivityStatusSheet(current: store.profile?.activity.flatMap { $0.active ? $0 : nil }) { value in
-                await store.setActivity(value)
-            }
-            .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationDetents([.large])
-            .sheetStyle(theme)
         }
         .sheet(isPresented: $showStatus) {
             EmojiStatusSheet(current: store.profile?.statusEmoji) { emoji in

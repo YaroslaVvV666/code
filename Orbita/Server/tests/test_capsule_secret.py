@@ -44,14 +44,10 @@ def main():
     check("после открытия текст виден", last(tb, a).get("text") == "Ты на месте!")
     check("открыть чужой секрет нельзя", req("POST", "/v1/messages/%s/unlock" % sm.get("id"), ta, {"lat": 55.75, "lon": 37.62})[0] == 404)
 
-    # статус
-    s, body, _ = req("PUT", "/v1/me/activity", ta, {"emoji": "🎧", "text": "Слушаю музыку", "hours": 2})
-    check("статус поставлен", s == 200 and (jbody(body) or {}).get("activity", {}).get("text") == "Слушаю музыку", body[:200])
+    # статус «чем я занят» убран: даже поставленный старым приложением, другим не виден
+    req("PUT", "/v1/me/activity", ta, {"emoji": "🎧", "text": "Слушаю музыку", "hours": 2})
     prof = jbody(req("GET", "/v1/users/%s" % a, tb)[1]) or {}
-    check("статус виден в профиле", (prof.get("activity") or {}).get("emoji") == "🎧", prof.get("activity"))
-    check("убрать статус", req("DELETE", "/v1/me/activity", ta)[0] == 200)
-    prof = jbody(req("GET", "/v1/users/%s" % a, tb)[1]) or {}
-    check("статуса больше нет", prof.get("activity") is None, prof.get("activity"))
+    check("статус «чем я занят» не показывается", prof.get("activity") is None, prof.get("activity"))
     print("FAILS: %d" % fails)
     sys.exit(1 if fails else 0)
 

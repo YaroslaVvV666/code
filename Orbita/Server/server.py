@@ -921,9 +921,12 @@ _orbit_cache = {}
 ACTIVITY_MAX_HOURS = 24
 
 
+ACTIVITY_ENABLED = False
+
+
 def activity_of(r):
-    """Статус «чем я занят» (🎧 Слушаю…, 🏋️ В зале), пока не истёк; иначе None"""
-    if not ("activity_enc" in r.keys() and r["activity_enc"]):
+    """Статус «чем я занят» убран из приложения: никому не показываем (и уже поставленные тоже)"""
+    if not ACTIVITY_ENABLED or not ("activity_enc" in r.keys() and r["activity_enc"]):
         return None
     try:
         a = json.loads(dec(r["id"], "profile", "users.activity", r["id"], r["activity_enc"]) or "null")

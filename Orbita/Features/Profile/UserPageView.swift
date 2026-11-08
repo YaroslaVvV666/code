@@ -857,12 +857,6 @@ struct UserPageView: View {
                     .padding(.horizontal, 24)
                     .collapsing(fadeFrom: 0.5, fadeTo: 0.7)               // крупный ник уходит, ник в плашке остаётся
                     .opacity(namesReady ? 1 : 0)
-                if let act = profile.activity, act.active {
-                    ActivityChip(activity: act)                              // «чем занят» — под именем
-                        .collapsing(fadeFrom: 0.3, fadeTo: 0.55)
-                        .opacity(namesReady ? 1 : 0)
-                        .padding(.vertical, 2)
-                }
                 Text(statusLine(profile))
                     .font(.system(size: 15))
                     .foregroundStyle(statusIsOnline(profile) ? (profile.styleColor == nil ? theme.accentColor : Color.white)
@@ -1527,11 +1521,6 @@ struct OrbitRing: View {
             AvatarView(name: f.name, size: d, avatarID: f.avatarID).clipShape(Circle())
             Circle().stroke(LinearGradient(colors: [neon, Color.white.opacity(0.9), neon], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2)
                 .frame(width: d, height: d)
-            if let act = f.activity, act.active {
-                // друг чем-то занят — значок статуса на аватарке
-                ActivityBadge(emoji: act.emoji, size: d * 0.46)
-                    .offset(x: d * 0.36, y: -d * 0.36)
-            }
         }
         .background {
             if active {                                                // идёт музыка — вокруг каждой аватарки «плещется» в её цвете
