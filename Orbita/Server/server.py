@@ -7350,7 +7350,7 @@ def fwd_target(uid, peer):
     return group
 
 
-def insert_fwd(uid, peer, group, text, entities, atts, fwd, t):
+def insert_fwd(uid, peer, group, text, entities, atts, fwd, t, blocks=None, buttons=None):
     nid = uuid.uuid4().hex
     # fwd=None — «скрыть имя отправителя»: сообщение приходит как обычное, без пометки «Переслано»
     fwd_blob = enc(uid, "messages", COL["msg_entities"], nid + ":fwd", json.dumps(fwd, ensure_ascii=False)) if fwd else None
@@ -7365,6 +7365,46 @@ def insert_fwd(uid, peer, group, text, entities, atts, fwd, t):
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (nid, uid, peer, enc(uid, "messages", COL["msg_text"], nid, text), ent, t,
              t if peer == uid else None, att, fwd_blob))
+    # статья (блоки с фото/видео) и кнопки-ссылки пересылаются целиком
+    store_article("group_messages" if group else "messages", nid, uid, blocks, buttons)
+    return nid
+
+
+def fwd_blocks(m, uid):
+    """Блоки статьи для пересылки: медиа внутри — свои копии у пересылающего"""
+    blocks = article_fields(m).get("blocks")
+    if not blocks:
+        return None
+    out = []
+    for b in blocks:
+        b = dict(b)
+        if b.get("kind") == "media" and isinstance(b.get("media"), dict):
+            a = dict(b["media"])
+            if a.get("type") == "location":
+                for k in ("live_until", "updated_at", "stopped"):
+                    a.pop(k, None)
+            if a.get("media_id"):
+                nid = clone_media(a["media_id"], uid)
+                if not nid:
+                    continue
+                a["media_id"] = nid
+                if a.get("thumb"):
+                    a["thumb"] = clone_media(a["thumb"], uid) or None
+                    if not a["thumb"]:
+                        del a["thumb"]
+            b["media"] = a
+        out.append(b)
+    return out or None
+
+
+def fwd_buttons(m):
+    """Кнопки под сообщением при пересылке: ссылки остаются, кнопки бота (callback) — только у бота"""
+    rows = []
+    for row in (markup_of(m) or []):
+        keep = [dict(b) for b in row if isinstance(b, dict) and b.get("url")]
+        if keep:
+            rows.append(keep)
+    return rows or None
 
 
 def notify_fwd(uid, peer, group):
@@ -7427,9 +7467,11 @@ def forward_messages(req, me, peer):
                     if not a["thumb"]:
                         del a["thumb"]
             atts.append(a)
+        blocks = None if hide_caption else fwd_blocks(m, uid)
+        buttons = fwd_buttons(m)
         if hide_caption and atts:                      # «скрыть подписи»: остаётся только медиа
             text, entities = "", []
-        if not (text or atts):
+        if not (text or atts or blocks):
             continue
         # автор: если он скрыл пересылки в приватности — показываем «скрытый автор»
         sender_row = q1("SELECT * FROM users WHERE id = ?", (m["sender"],))
@@ -7441,7 +7483,8 @@ def forward_messages(req, me, peer):
             fwd["ch"], fwd["cm"] = src_group["id"], m["id"]
             run("INSERT INTO channel_shares(group_id, message_id, user_id, target, at) VALUES (?,?,?,?,?)",
                 (src_group["id"], m["id"], uid, "groups" if group else "dm", now))
-        insert_fwd(uid, peer, group, text, entities, atts, None if hide_sender else fwd, now + i * 0.001)
+        insert_fwd(uid, peer, group, text, entities, atts, None if hide_sender else fwd, now + i * 0.001,
+                   blocks=blocks, buttons=buttons)
         count += 1
     if count:
         notify_fwd(uid, peer, group)
@@ -10709,6 +10752,14 @@ def gmsg_json(m, me_id, channel=None):
     }
     if "topic_id" in m.keys() and m["topic_id"]:
         out["topic"] = m["topic_id"]
+    if "mirror_of" in m.keys() and m["mirror_of"]:
+        # копия поста в обсуждении — от лица канала, с кнопкой «N комментариев»
+        src = q1("SELECT group_id FROM group_messages WHERE id = ?", (m["mirror_of"],))
+        cg = group_row(src["group_id"]) if src else None
+        if cg:
+            out["sender"] = {"id": cg["id"], "name": group_title(cg), "username": cg["handle"], "avatar": None}
+            out["from_channel"] = {"id": cg["id"], "post": m["mirror_of"]}
+            out["mine"] = False
     out.update(article_fields(m))
     mk = markup_of(m)
     if mk:
@@ -11296,11 +11347,21 @@ def mirror_post(g, row, uid, text, entities, now):
         return
     mid = uuid.uuid4().hex
     body = text or summary_of(row, 200)
+    # пост целиком: фото/видео, статья и кнопки-ссылки — как в канале (как в Telegram)
+    atts = attachments_of(row)
+    blocks = article_fields(row).get("blocks")
+    buttons = fwd_buttons(row)
     run("INSERT INTO group_messages(id, group_id, sender, text_enc, entities_enc, attachments_enc, reply_to, created_at, kind, mirror_of) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (mid, dg["id"], uid, enc(uid, "messages", COL["msg_text"], mid, body),
          enc(uid, "messages", COL["msg_entities"], mid, json.dumps(entities if text else [], ensure_ascii=False)),
-         None, None, now, None, row["id"]))
+         enc(uid, "messages", COL["msg_attach"], mid, json.dumps(atts)) if atts else None, None, now, None, row["id"]))
+    store_article("group_messages", mid, uid, blocks, buttons)
+    # каждый новый пост закрепляется в чате обсуждения
+    run("INSERT OR REPLACE INTO pins(chat_key, message_id, pinned_by, created_at) VALUES (?,?,?,?)",
+        (dg["id"], mid, uid, now))
+    for mrow in q("SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?", (dg["id"], uid)):
+        SHARED.events_publish(mrow["user_id"], "group")
 
 
 def group_edit(req, me, mid):

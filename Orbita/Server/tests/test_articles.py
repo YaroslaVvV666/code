@@ -66,6 +66,18 @@ def main():
     s, b, _ = req("POST", "/v1/chats/%s/messages" % gid, ta, {"blocks": blocks[:3], "buttons": buttons})
     d = jbody(b) or {}
     check("статья в канале", s == 201 and len(d.get("blocks", [])) == 3 and d.get("markup"), (s, b[:200]))
+    # пересылка статьи: блоки, фото внутри и кнопки-ссылки — целиком
+    c_, tc = session("Третий")
+    art = next((x for x in (jbody(req("GET", "/v1/chats/%s/messages" % a, tb)[1]) or {}).get("messages", []) if x.get("blocks")), {})
+    s, b, _ = req("POST", "/v1/chats/%s/forward" % c_, tb, {"ids": [art.get("id")]})
+    check("статья переслана", s == 200 and (jbody(b) or {}).get("count") == 1, b[:200])
+    fm = ((jbody(req("GET", "/v1/chats/%s/messages" % b_, tc)[1]) or {}).get("messages") or [{}])[-1]
+    fk = [x["kind"] for x in fm.get("blocks", [])]
+    check("у получателя пересылки — все блоки", fk[:3] == ["heading", "media", "text"] and len(fk) == 11, fk)
+    fmedia = (fm.get("blocks") or [{}, {}])[1].get("media", {})
+    check("фото в пересланной статье — своя копия", fmedia.get("media_id") and fmedia.get("media_id") != mid, fmedia)
+    check("кнопки под пересланной статьёй", (fm.get("markup") or [[{}]])[0][0].get("url") == "https://shop.example.com", fm.get("markup"))
+    check("пометка «Переслано»", bool(fm.get("forwarded")), fm.get("forwarded"))
     print("FAILS: %d" % fails)
     sys.exit(1 if fails else 0)
 
