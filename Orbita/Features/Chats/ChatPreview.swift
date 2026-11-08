@@ -233,8 +233,8 @@ struct ChatPeekOverlay: View {
 extension ChatPeer: Identifiable {}
 
 /// Строка списка чатов: короткое нажатие открывает, долгое — показывает карточку с перепиской.
-/// Свайп влево — быстрые кнопки справа (закрепить, без звука, удалить) с подписями, как в Telegram.
-/// Свайп вправо — одна кнопка слева (архив).
+/// Свайп влево — кнопки справа (закрепить, звук, удалить): выезжают по одной, значки проявляются по очереди, как в Telegram.
+/// Свайп вправо — архив; протянул далеко — плашка архива растягивается на всю строку, отпустил — сразу в архив.
 struct SwipeActionsRow<Content: View>: View {
     struct Action: Identifiable {
         let id = UUID()
@@ -252,49 +252,118 @@ struct SwipeActionsRow<Content: View>: View {
 
     @State private var drag: CGFloat = 0
     @State private var side: Int = 0            // -1 открыто справа, +1 открыто слева, 0 закрыто
+    @State private var width: CGFloat = 390
+    @State private var fullArmed = false        // протянули архив до конца: отпустишь — сработает
+    @State private var leaving = false          // строка уезжает в архив
     private let unit: CGFloat = 76
     private var trailingFull: CGFloat { unit * CGFloat(actions.count) }
     private var leadingFull: CGFloat { leading != nil ? unit : 0 }
+    /// С какого сдвига архив «растягивается» на всю строку
+    private var fullAt: CGFloat { max(leadingFull * 1.9, width * 0.5) }
 
     private var base: CGFloat {
         guard openID == id else { return 0 }
         return side < 0 ? -trailingFull : (side > 0 ? leadingFull : 0)
     }
-    private var offset: CGFloat { max(-trailingFull - 24, min(leadingFull + 24, base + drag)) }
+    private var offset: CGFloat {
+        if leaving { return width }
+        let raw = base + drag
+        if raw < -trailingFull {               // дальше кнопок — тянется туго (резинка)
+            let extra = -trailingFull - raw
+            return -trailingFull - extra * 0.25
+        }
+        return min(leading != nil ? width : 0, raw)
+    }
 
-    private func button(_ a: Action) -> some View {
-        Button {
+    private func close() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { openID = nil; side = 0; drag = 0 }
+    }
+
+    // MARK: кнопки справа: ширина делится поровну, значки проявляются по одному — сначала крайний справа
+
+    private func trailingButton(_ a: Action, index: Int) -> some View {
+        let shown = max(0, -offset)
+        let w = shown / CGFloat(max(1, actions.count))
+        // порядок появления: последняя (крайняя справа) — первой
+        let order = CGFloat(actions.count - 1 - index)
+        let progress = shown / max(1, trailingFull) * CGFloat(actions.count)
+        let reveal = max(0, min(1, progress - order * 0.6))
+        return Button {
             Haptics.impact(.light)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 }
+            close()
             a.run()
         } label: {
-            // как в Telegram: значок и короткая подпись, сплошной мягкий цвет; значок «проявляется» по мере свайпа
-            let reveal = min(1, abs(offset) / max(1, a.id == leading?.id ? leadingFull : trailingFull))
-            VStack(spacing: 4) {
-                Image(systemName: a.icon).font(.system(size: 19, weight: .semibold))
-                    .scaleEffect(0.7 + 0.3 * reveal)
-                if !a.label.isEmpty {
-                    Text(a.label).font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
+            ZStack {
+                a.tint
+                VStack(spacing: 4) {
+                    Image(systemName: a.icon).font(.system(size: 20, weight: .semibold))
+                    if !a.label.isEmpty {
+                        Text(a.label).font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.6)
+                    }
                 }
+                .foregroundStyle(.white)
+                .frame(width: unit)
+                .scaleEffect(0.55 + 0.45 * reveal)
+                .opacity(Double(reveal))
             }
-            .opacity(0.4 + 0.6 * reveal)
-            .foregroundStyle(.white)
-            .frame(width: unit).frame(maxHeight: .infinity)
-            .background(LinearGradient(colors: [a.tint.opacity(0.92), a.tint], startPoint: .top, endPoint: .bottom))
+            .frame(width: w).frame(maxHeight: .infinity)
+            .clipped()
         }
         .buttonStyle(.plain)
     }
 
+    // MARK: архив слева: обычная кнопка, а протянул дальше — на всю строку, значок едет за пальцем
+
+    @ViewBuilder
+    private var leadingPanel: some View {
+        if let leading {
+            let shown = max(0, offset)
+            let reveal = min(1, shown / max(1, leadingFull))
+            Button {
+                Haptics.impact(.light)
+                archiveNow(leading)
+            } label: {
+                ZStack(alignment: .leading) {
+                    leading.tint
+                    VStack(spacing: 4) {
+                        Image(systemName: leading.icon).font(.system(size: 20, weight: .semibold))
+                            .rotationEffect(.degrees(fullArmed ? -12 : 0))
+                        if !leading.label.isEmpty {
+                            Text(leading.label).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: unit)
+                    .scaleEffect((0.55 + 0.45 * reveal) * (fullArmed ? 1.12 : 1))
+                    .opacity(Double(reveal))
+                    // дотянули до «во всю строку» — значок прилипает к краю под пальцем
+                    .offset(x: fullArmed ? max(0, shown - unit) : 0)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.72), value: fullArmed)
+                }
+                .frame(width: shown).frame(maxHeight: .infinity)
+                .clipped()
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func archiveNow(_ a: Action) {
+        withAnimation(.easeIn(duration: 0.22)) { leaving = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            a.run()
+            leaving = false; fullArmed = false; drag = 0; side = 0
+            if openID == id { openID = nil }
+        }
+    }
+
     var body: some View {
         ZStack {
-            // кнопка слева (свайп вправо) — архив
-            if let leading {
-                HStack(spacing: 0) { button(leading); Spacer(minLength: 0) }
-                    .mask(alignment: .leading) { Rectangle().frame(width: max(0, offset)) }
+            leadingPanel
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                ForEach(Array(actions.enumerated()), id: \.element.id) { i, a in trailingButton(a, index: i) }
             }
-            // кнопки справа (свайп влево)
-            HStack(spacing: 0) { Spacer(minLength: 0); ForEach(actions) { button($0) } }
-                .mask(alignment: .trailing) { Rectangle().frame(width: max(0, -offset)) }
 
             content()
                 .background(Color.clear)
@@ -303,24 +372,39 @@ struct SwipeActionsRow<Content: View>: View {
                 .overlay {
                     if openID == id {
                         Color.clear.contentShape(Rectangle()).offset(x: offset)
-                            .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { openID = nil; side = 0 } }
+                            .onTapGesture { close() }
                     }
                 }
         }
         .clipped()
+        .background(GeometryReader { g in Color.clear.onAppear { width = g.size.width }.onChange(of: g.size.width) { _, w in width = w } })
         .simultaneousGesture(
-            DragGesture(minimumDistance: 18, coordinateSpace: .local)
+            DragGesture(minimumDistance: 14, coordinateSpace: .local)
                 .onChanged { v in
-                    guard abs(v.translation.width) > abs(v.translation.height) * 1.6, v.startLocation.x > 30 else { return }
+                    guard abs(v.translation.width) > abs(v.translation.height) * 1.5, v.startLocation.x > 30 else { return }
                     // вправо тянем только если есть кнопка слева
                     if v.translation.width > 0 && leading == nil && base == 0 { return }
-                    drag = v.translation.width
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { drag = v.translation.width }
+                    let armed = leading != nil && base + v.translation.width > fullAt
+                    if armed != fullArmed {
+                        fullArmed = armed
+                        Haptics.impact(armed ? .medium : .light)
+                    }
                 }
                 .onEnded { v in
-                    let horizontal = abs(v.translation.width) > abs(v.translation.height) * 1.6 && v.startLocation.x > 30
+                    let horizontal = abs(v.translation.width) > abs(v.translation.height) * 1.5 && v.startLocation.x > 30
                     let final = base + (horizontal ? v.translation.width : 0)
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                        if horizontal, final < -trailingFull * 0.45 {
+                    let predicted = base + (horizontal ? v.predictedEndTranslation.width : 0)
+                    if horizontal, let leading, fullArmed || (final > leadingFull * 1.2 && predicted > width * 0.8) {
+                        // протянули архив до конца (или сильно смахнули) — сразу в архив
+                        fullArmed = false
+                        archiveNow(leading)
+                        return
+                    }
+                    fullArmed = false
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+                        if horizontal, final < -trailingFull * 0.4 {
                             if openID != id || side != -1 { Haptics.select() }
                             openID = id; side = -1
                         } else if horizontal, leading != nil, final > leadingFull * 0.5 {
@@ -333,7 +417,7 @@ struct SwipeActionsRow<Content: View>: View {
                     }
                 }
         )
-        .onChange(of: openID) { _, new in if new != id { drag = 0; side = 0 } }
+        .onChange(of: openID) { _, new in if new != id { withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { drag = 0; side = 0 } } }
     }
 }
 

@@ -65,6 +65,7 @@ struct ChatsListView: View {
     @State private var deleting: ChatSummary?
     @State private var peek: ChatSummary?
     @State private var swipedOpen: String?
+    @State private var archivedToast: ChatSummary?        // «Чат в архиве · Отменить»
     @State private var showArchive = false
     @State private var userHits: [ChatPeer] = []
     @State private var groupHits: [GroupPreview] = []
@@ -120,6 +121,7 @@ struct ChatsListView: View {
                 }
             }
                 .toolbar(.hidden, for: .navigationBar)
+                .overlay(alignment: .bottom) { archiveToastView }
                 .navigationDestination(item: Binding(get: { split ? nil : openChat }, set: { openChat = $0 })) { route in
                     ChatScreen(route: route, session: session)
                         .environmentObject(session)
@@ -645,8 +647,10 @@ struct ChatsListView: View {
 
     private func row(_ chat: ChatSummary) -> some View {
         SwipeActionsRow(id: chat.id, openID: $swipedOpen,
-            leading: .init(icon: "archivebox.fill", label: s.t("В архив", "Archive"), tint: .gray) {
-                withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
+            leading: .init(icon: "archivebox.fill", label: s.t("В архив", "Archive"), tint: Color(white: 0.55)) {
+                withAnimation(.easeInOut(duration: 0.25)) { prefs.toggleArchive(chat.id) }
+                Haptics.notify(.success)
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) { archivedToast = chat }
             },
             actions: [
             .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill",
@@ -663,6 +667,42 @@ struct ChatsListView: View {
                             : (prefs.isPinned(chat.id) ? pinnedFill : Color.clear))
         }
         .onAppear { ThreadPrefetcher.shared.visible(chat, repo: session.messengerRepo) }
+    }
+
+    /// Плашка после переноса в архив: «Чат перенесён в архив» и «Отменить» — 4 секунды
+    @ViewBuilder
+    private var archiveToastView: some View {
+        if let chat = archivedToast {
+            HStack(spacing: 12) {
+                Image(systemName: "archivebox.fill").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(s.t("Чат перенесён в архив", "Chat archived")).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                    Text(chat.peer.name).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    Haptics.impact(.light)
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                        if prefs.isArchived(chat.id) { prefs.toggleArchive(chat.id) }
+                        archivedToast = nil
+                    }
+                } label: {
+                    Text(s.t("Отменить", "Undo")).font(.system(size: 15, weight: .bold)).foregroundStyle(theme.accentColor)
+                        .padding(.horizontal, 6).frame(height: 36).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16).frame(height: 58)
+            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 96)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .task(id: chat.id) {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if archivedToast?.id == chat.id { withAnimation(.easeOut(duration: 0.25)) { archivedToast = nil } }
+            }
+        }
     }
 
     private var pinnedFill: Color { theme.dark ? Color.white.opacity(0.075) : Color.black.opacity(0.04) }
