@@ -68,6 +68,7 @@ struct ChatsListView: View {
     @State private var groupHits: [GroupPreview] = []
     @State private var messageHits: [MessageHit] = []
     @AppStorage("contacts.prompted") private var promptedImport = false
+    @State private var birthdayProfile: String?           // именинник из строки «Сегодня день рождения»
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -106,6 +107,8 @@ struct ChatsListView: View {
         // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
         // посреди открытия, список пересчитывался и на пару кадров пустел
         .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(id) }
+        .profileSheet(id: $birthdayProfile)
+        .environmentObject(session)
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
         .onAppear { takePushRoute() }
         .onChange(of: push.openChat) { _, _ in takePushRoute() }
@@ -176,6 +179,15 @@ struct ChatsListView: View {
         }
     }
 
+    /// Сколько переписок с новыми сообщениями в каждой папке (без заглушённых и архива) — счётчик на папке
+    private var folderCounts: [ChatFolder: Int] {
+        var out: [ChatFolder: Int] = [:]
+        for chat in model.chats where (chat.unread > 0 || chat.mentions > 0) && !prefs.isArchived(chat.id) && !isMuted(chat) {
+            for f in ChatFolder.allCases where f != .all && f != .unread && f.contains(chat) { out[f, default: 0] += 1 }
+        }
+        return out
+    }
+
     private func isMuted(_ chat: ChatSummary) -> Bool {
         _ = prefs.muteTick
         return chat.muted || (!chat.peer.isGroup && prefs.isDMMuted(chat.id))
@@ -241,9 +253,9 @@ struct ChatsListView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
 
-            ChatsTopIsland(session: session)
+            ChatsTopIsland(session: session) { id in birthdayProfile = id }
 
-            FolderBar(folder: $folder)
+            FolderBar(folder: $folder, counts: folderCounts)
 
             cards
 

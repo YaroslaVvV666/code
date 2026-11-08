@@ -9344,6 +9344,30 @@ def list_contacts(req, me):
     req.send_json(200, {"contacts": out})
 
 
+@route("GET", r"/v1/me/birthdays")
+def contact_birthdays(req, me):
+    """У кого из контактов сегодня день рождения. День — по часам телефона (?today=MM-DD), иначе по серверу.
+    Дата учитывается, только если человек показывает её этому собеседнику (настройка «День рождения»)"""
+    uid = me["id"]
+    today = str(req.query().get("today") or "")
+    if not re.match(r"^\d{2}-\d{2}$", today):
+        today = datetime.date.today().strftime("%m-%d")
+    out = []
+    for r in q("SELECT contact_id FROM contacts WHERE user_id = ?", (uid,)):
+        u = q1("SELECT * FROM users WHERE id = ?", (r["contact_id"],))
+        if not u:
+            continue
+        b = profile_json(u, uid).get("birthday") or ""
+        if not b or b[-5:] != today:
+            continue
+        item = user_brief(u["id"], uid)
+        if re.match(r"^\d{4}-", b):
+            item["age"] = datetime.date.today().year - int(b[:4])
+        out.append(item)
+    out.sort(key=lambda c: c["name"].lower())
+    req.send_json(200, {"birthdays": out, "today": today})
+
+
 @route("PUT", r"/v1/contacts/([A-Za-z0-9_\-]+)")
 def put_contact(req, me, cid):
     uid = me["id"]

@@ -89,6 +89,8 @@ enum ChatFolder: String, CaseIterable {
 
 struct FolderBar: View {
     @Binding var folder: ChatFolder
+    /// Сколько переписок с новыми сообщениями в папке — число рядом с названием (как в Telegram)
+    var counts: [ChatFolder: Int] = [:]
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
@@ -96,12 +98,26 @@ struct FolderBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(ChatFolder.allCases, id: \.self) { f in
+                    let on = folder == f
+                    let n = counts[f] ?? 0
                     Button { withAnimation(.easeInOut(duration: 0.2)) { folder = f }; Haptics.impact(.light) } label: {
-                        Text(f.title(Strings(lang: lang)))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(folder == f ? Color.white : theme.textSecondary)
-                            .padding(.horizontal, 14).frame(height: 32)
-                            .background(folder == f ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                        HStack(spacing: 6) {
+                            Text(f.title(Strings(lang: lang)))
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(on ? Color.white : theme.textSecondary)
+                            if n > 0 {
+                                Text(n > 99 ? "99+" : "\(n)")
+                                    .font(.system(size: 11, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(on ? theme.accentColor : .white)
+                                    .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                                    .background(on ? AnyShapeStyle(Color.white) : AnyShapeStyle(theme.accentColor), in: Capsule())
+                                    .contentTransition(.numericText())
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                        }
+                        .padding(.horizontal, 14).frame(height: 32)
+                        .background(on ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: n)
                     }
                     .buttonStyle(.plain)
                 }

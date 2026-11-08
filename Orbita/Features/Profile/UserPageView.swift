@@ -550,6 +550,12 @@ struct UserPageView: View {
         }
         .coordinateSpace(name: "userPageBody")
         .environmentObject(tracker)
+        // день рождения — хлопушки каждый раз, когда открываешь профиль именинника
+        .task(id: model.profile?.id) {
+            guard let p = model.profile, !p.blockedMe, BirthdayCalc.isToday(p.birthday) else { return }
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            if !Task.isCancelled { ConfettiWindow.fire() }
+        }
         .overlay(alignment: .topLeading) {
             if let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe { avatarStage(profile) }
             if showBigViewer, let profile = model.profile, !profile.avatars.isEmpty, !profile.blockedMe {
@@ -1081,13 +1087,22 @@ struct UserPageView: View {
                            value: profile.username.map { "@" + $0 } ?? "", accent: true,
                            kind: .username(link: DeepLink.profileLink(username: profile.username, userID: profile.id))),
             ProfileInfoRow(label: s.bioLabel, value: profile.bio),
-            ProfileInfoRow(label: s.birthday, value: s.birthdayText(profile.birthday) ?? ""),
+            ProfileInfoRow(label: s.birthday, value: birthdayValue(profile.birthday),
+                           kind: .birthday(today: BirthdayCalc.isToday(profile.birthday))),
         ].filter { !$0.value.isEmpty }
         // и в той же карточке — «Добавить в контакты» и «Заблокировать»
         let actions = infoActions(profile)
         if !rows.isEmpty || !actions.isEmpty {
             ProfileInfoCard(rows: rows, actions: actions).padding(.horizontal, 16)
         }
+    }
+
+    /// «17 мая 1999», а в сам день — «Сегодня! 🎉 · исполняется 27»
+    private func birthdayValue(_ b: String?) -> String {
+        guard let text = s.birthdayText(b) else { return "" }
+        guard BirthdayCalc.isToday(b) else { return text }
+        let age = BirthdayCalc.age(b).map { s.t(" · исполняется \($0)", " · turns \($0)") } ?? ""
+        return s.t("Сегодня", "Today") + age + "\n" + text
     }
 
     /// Кнопки под данными профиля (собираются вне @ViewBuilder: там нельзя изменять массив)

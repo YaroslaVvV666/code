@@ -79,7 +79,7 @@ final class ChatTranslator: ObservableObject {
     }
 
     private func request(_ items: [(String, String)]) {
-        let fresh = items.filter { results[$0.0] == nil && !queue.contains(where: { q in q.id == $0.0 }) }
+        let fresh = items.filter { item in results[item.0] == nil && !queue.contains(where: { q in q.id == item.0 }) }
         guard !fresh.isEmpty else { return }
         queue += fresh.map { (id: $0.0, text: $0.1) }
         tick += 1

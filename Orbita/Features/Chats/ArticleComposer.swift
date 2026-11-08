@@ -744,7 +744,8 @@ struct ArticleComposer: View {
                     }
                     .frame(width: 48, height: 48).clipShape(Circle())
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title.isEmpty ? name : title).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(2)
+                        Text(title.isEmpty ? name : title).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
+                            .lineLimit(1).truncationMode(.middle)
                         let mins = Int(duration) / 60, secs = Int(duration) % 60
                         Text((artist.isEmpty ? "" : artist + " · ") + String(format: "%d:%02d", mins, secs))
                             .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
@@ -781,7 +782,8 @@ struct ArticleComposer: View {
                 }
                 .frame(width: 48, height: 48).clipShape(Circle())
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(a.displayTitle).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(2)
+                    Text(a.displayTitle).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
+                        .lineLimit(1).truncationMode(.middle)
                     Text(((a.artist ?? "").isEmpty ? "" : (a.artist ?? "") + " · ") + MusicPickerSheet.time(a.duration))
                         .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
                 }

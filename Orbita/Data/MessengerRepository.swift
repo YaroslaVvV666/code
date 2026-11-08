@@ -727,6 +727,8 @@ protocol MessengerRepository: Sendable {
 
     // контакты
     func contacts() async throws -> [Contact]
+    /// У кого из контактов сегодня день рождения (today — «MM-dd» по часам телефона)
+    func birthdays(today: String) async throws -> [BirthdayPerson]
     func saveContact(id: String, name: String) async throws -> Contact
     func deleteContact(id: String) async throws
 
@@ -1674,6 +1676,11 @@ struct RemoteMessengerRepository: MessengerRepository {
     func contacts() async throws -> [Contact] {
         let data = try await api.request("GET", "/v1/contacts")
         return try decodeAPI(ContactListDTO.self, from: data).contacts.map(\.model)
+    }
+
+    func birthdays(today: String) async throws -> [BirthdayPerson] {
+        struct Box: Decodable { let birthdays: [BirthdayPerson] }
+        return try decodeAPI(Box.self, from: try await api.request("GET", "/v1/me/birthdays", query: ["today": today])).birthdays
     }
 
     func saveContact(id: String, name: String) async throws -> Contact {

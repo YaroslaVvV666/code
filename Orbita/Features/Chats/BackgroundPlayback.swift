@@ -30,23 +30,44 @@ struct ChatsBackgroundMedia: View {
 /// Музыка и голосовое сверху списка чатов: часть раскладки, поэтому не наезжает на строку поиска и папки
 struct ChatsTopIsland: View {
     let session: AppSession
+    var onOpenProfile: (String) -> Void = { _ in }
     @ObservedObject private var voice = VoicePlayer.shared
     @ObservedObject private var player: AudioPlayer
+    @ObservedObject private var birthdays = BirthdayStore.shared
     @Environment(\.theme) private var theme
     @State private var showPlayer = false
 
-    init(session: AppSession) {
+    init(session: AppSession, onOpenProfile: @escaping (String) -> Void = { _ in }) {
         self.session = session
+        self.onOpenProfile = onOpenProfile
         _player = ObservedObject(wrappedValue: session.player)
     }
 
+    private var line: some View { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.horizontal, 14) }
+
     var body: some View {
+        let party = birthdays.visible
+        let music = player.current != nil
+        let voiceOn = voice.currentID != nil
         Group {
-            if player.current != nil || voice.currentID != nil {
-                VStack(spacing: 8) {
-                    NowPlayingBar { showPlayer = true }
-                    VoiceNowBar(includeCircle: false)
+            if !party.isEmpty || music || voiceOn {
+                // одна карточка: день рождения, песня, голосовое — слитно, разделены тонкими линиями
+                VStack(spacing: 0) {
+                    if !party.isEmpty {
+                        BirthdayIslandRow(people: party, onOpen: { onOpenProfile($0.id) }, onClose: { birthdays.dismiss() })
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    if music {
+                        if !party.isEmpty { line }
+                        NowPlayingBar(embedded: true) { showPlayer = true }
+                    }
+                    if voiceOn {
+                        if !party.isEmpty || music { line }
+                        VoiceNowBar(includeCircle: false, embedded: true)
+                    }
                 }
+                .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .padding(.horizontal, 10)
                 .environmentObject(player)
                 .padding(.top, 2).padding(.bottom, 12)             // воздух до папок «Все», «Новые»…
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -54,6 +75,8 @@ struct ChatsTopIsland: View {
         }
         .animation(.spring(response: 0.36, dampingFraction: 0.84), value: voice.currentID)
         .animation(.spring(response: 0.36, dampingFraction: 0.84), value: player.current?.id)
+        .animation(.spring(response: 0.36, dampingFraction: 0.84), value: party.map(\.id))
+        .task { await birthdays.refresh(repo: session.messengerRepo) }
         .sheet(isPresented: $showPlayer) {
             FullPlayerSheet(items: [], addToProfile: nil)
                 .environmentObject(player).environmentObject(session)

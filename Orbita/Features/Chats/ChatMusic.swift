@@ -111,33 +111,53 @@ struct AudioBlock: View {
             }
             .buttonStyle(.plain)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(attachment.displayTitle)
+            // Название — всегда одной строкой: длинное сокращается в середине («Lose Yourself … Remaster»),
+            // ниже — исполнитель (у песен и звуков; у mp3, отправленного файлом, его нет), ещё ниже — время и формат
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.displayTitle.isEmpty ? "Без названия" : attachment.displayTitle)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(primary)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .truncationMode(.middle)
-                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let artist = shownArtist {
+                    Text(artist)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(mine ? Color.white.opacity(0.9) : theme.accentColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 Text(subtitle)
-                    .font(.system(size: 14))
+                    .font(.system(size: 13).monospacedDigit())
                     .foregroundStyle(secondary)
                     .lineLimit(1)
                     .padding(.trailing, 44)       // под время сообщения
             }
-            Spacer(minLength: 0)
+            .layoutPriority(1)
         }
-        .frame(width: 244)
+        .frame(width: 252)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
     }
 
+    /// Исполнитель — только у песни/звука (теги файла); mp3, отправленный как обычный файл, без исполнителя
+    private var shownArtist: String? {
+        guard attachment.kind == .audio, let a = attachment.artist?.trimmingCharacters(in: .whitespaces), !a.isEmpty else { return nil }
+        return a
+    }
+
+    /// Ниже исполнителя: длительность (у играющего — сколько прошло) и формат файла
     private var subtitle: String {
-        let main = [attachment.artist ?? "", attachment.duration > 0 ? mmss(Int(safe: attachment.duration)) : ""]
-            .filter { !$0.isEmpty }.joined(separator: " · ")
-        if !main.isEmpty { return main }
         let name = attachment.name ?? ""
         let ext = name.contains(".") ? (name.split(separator: ".").last.map { String($0).uppercased() } ?? "") : ""
-        return ext.count <= 5 ? ext : ""
+        var time = attachment.duration > 0 ? mmss(Int(safe: attachment.duration)) : ""
+        if playing || (track.map { player.isCurrent($0) } ?? false), attachment.duration > 0 {
+            time = mmss(Int(safe: player.elapsed)) + " / " + time
+        }
+        var parts = [time]
+        if attachment.kind == .file, ext.count <= 5 { parts.append(ext) }
+        if attachment.kind == .file, attachment.size > 0 { parts.append(ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file)) }
+        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -484,14 +504,16 @@ struct FullPlayerSheet: View {
 
 struct VoiceNowBar: View {
     var includeCircle = true
+    /// Внутри общей карточки (список чатов) — без своего «стекла» и отступов
+    var embedded = false
     @ObservedObject private var voice = VoicePlayer.shared
     @ObservedObject private var focus = CircleFocus.shared
 
     var body: some View {
         if includeCircle, let circle = focus.current {
-            CircleNowBar(playback: circle)
+            CircleNowBar(playback: circle, embedded: embedded)
         } else if voice.currentID != nil {
-            VoiceNowBarLive(voice: voice, clock: voice.clock)
+            VoiceNowBarLive(voice: voice, clock: voice.clock, embedded: embedded)
         }
     }
 }
@@ -500,9 +522,11 @@ struct VoiceNowBar: View {
 private struct VoiceNowBarLive: View {
     @ObservedObject var voice: VoicePlayer
     @ObservedObject var clock: PlaybackClock
+    var embedded = false
 
     var body: some View {
         NowBarLayout(title: nil, isPlaying: voice.isPlaying, progress: clock.value, duration: voice.duration, rate: voice.rate,
+                     embedded: embedded,
                      onToggle: { voice.isPlaying ? voice.pause() : voice.resume() },
                      onSeek: { voice.seek(toFraction: $0) },
                      onRate: { voice.cycleRate() },
@@ -513,10 +537,11 @@ private struct VoiceNowBarLive: View {
 /// Полоска «играет видеосообщение» — те же кнопки: пауза, перемотка, скорость, закрыть
 struct CircleNowBar: View {
     @ObservedObject var playback: CirclePlayback
+    var embedded = false
 
     var body: some View {
         NowBarLayout(title: Strings(lang: .ru).t("Видеосообщение", "Video message"), isPlaying: playback.isPlaying, progress: playback.progress,
-                     duration: playback.duration, rate: VoicePlayer.shared.rate,
+                     duration: playback.duration, rate: VoicePlayer.shared.rate, embedded: embedded,
                      onToggle: { playback.isPlaying ? playback.pause() : playback.resume() },
                      onSeek: { playback.seek(toFraction: $0) },
                      onRate: { VoicePlayer.shared.cycleRate(); playback.applyRate() },
@@ -530,6 +555,7 @@ struct NowBarLayout: View {
     let progress: Double
     let duration: Double
     let rate: Float
+    var embedded = false
     var onToggle: () -> Void
     var onSeek: (Double) -> Void
     var onRate: () -> Void
@@ -582,8 +608,8 @@ struct NowBarLayout: View {
             .padding(.trailing, -8)
         }
         .padding(.horizontal, 12).frame(height: 52)
-        .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .padding(.horizontal, 10)
+        .background { if !embedded { Color.clear.glass(RoundedRectangle(cornerRadius: 18, style: .continuous)) } }
+        .padding(.horizontal, embedded ? 0 : 10)
         .transition(.move(edge: .top).combined(with: .opacity))
     }
 }

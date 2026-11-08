@@ -93,6 +93,7 @@ struct ProfileInfoRow: Identifiable {
         case username(link: String?)
         case phone
         case link
+        case birthday(today: Bool)          // справа значок 🎂 (в сам день — покачивается)
     }
 
     /// Стабильный идентификатор: иначе при каждой перерисовке (скролл, таймеры) строка пересоздаётся и меню закрывается
@@ -229,6 +230,12 @@ struct ProfileInfoCard: View {
                 }
             } label: { content }
             .buttonStyle(.plain)
+        case .birthday(let today):
+            HStack(alignment: .center, spacing: 10) {
+                content.textSelection(.enabled)
+                BirthdayBadge(today: today)
+                    .onTapGesture { if today { ConfettiWindow.fire() } }       // ещё раз хлопнуть
+            }
         case .link:
             Menu {
                 Button { copy(row.value, toast: s.t("Ссылка скопирована", "Link copied")) } label: {
