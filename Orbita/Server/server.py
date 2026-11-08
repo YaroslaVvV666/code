@@ -415,6 +415,53 @@ ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0"
 ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
 ensure_column("posts", "sensitive", "sensitive INTEGER NOT NULL DEFAULT 0")          # 18+/чувствительный контент — показывается с размытием
 ensure_column("posts", "labels_enc", "labels_enc BLOB")                               # пометки шортса: «Создано ИИ», место, реклама…
+# теневое ограничение: шортсы с «бесплатно», «купить», «заработок», ссылками на мессенджеры и т.п. почти не попадают в
+# рекомендации и поиск (до SHADOW_CAP зрителей), а автор ничего не замечает — меньше мошенничества и навязчивых продаж
+ensure_column("posts", "shadow", "shadow INTEGER NOT NULL DEFAULT 0")
+ensure_column("posts", "shadow_admin", "shadow_admin INTEGER")                         # решение админа: 0 — снято навсегда, 1 — включено
+SHADOW_CAP = int(os.environ.get("ORBITA_SHADOW_CAP", "5"))
+SHADOW_STRONG = (r"бесплатн", r"халяв", r"\bкупи", r"\bпокупай", r"заработ", r"\bдоход", r"без вложени", r"пассивн\w* доход",
+                 r"казино", r"\bставк", r"букмекер", r"\bслот", r"предоплат", r"промокод", r"розыгрыш", r"\bраздач",
+                 r"\bдарю\b", r"крипт", r"инвестиц", r"\bx\d{1,3}\b", r"t\.me/", r"wa\.me/", r"telegram\.me",
+                 r"\bfree\b", r"giveaway", r"\bbuy\b", r"earn money", r"casino")
+SHADOW_WEAK = (r"скидк", r"\bакци", r"заказ", r"\bцен[аыу]\b", r"прайс", r"магазин", r"ссылк", r"\bдирект", r"\bв лс\b",
+               r"\bличк", r"\bоплат", r"доставк", r"\bпиши\w*\b", r"\bsale\b", r"discount", r"\bdm\b")
+_SHADOW_STRONG = [re.compile(x) for x in SHADOW_STRONG]
+_SHADOW_WEAK = [re.compile(x) for x in SHADOW_WEAK]
+
+
+def shadow_text(text):
+    """Нормализация против обходов: «б е с п л а т н о», «бeсплатно» (латиница), «бесплатно!!!»"""
+    t = (text or "").lower().replace("ё", "е")
+    t = t.translate(str.maketrans({"a": "а", "e": "е", "o": "о", "p": "р", "c": "с", "x": "х", "y": "у", "k": "к", "m": "м", "t": "т", "h": "н", "b": "в"})) \
+        if re.search(r"[а-я]", t) else t
+    squashed = re.sub(r"(?<=\w)[\s\.\-_*]{1,2}(?=\w\b|\w[\s\.\-_*])", "", t)      # «б е с п л а т н о» → «бесплатно»
+    return t + " " + squashed
+
+
+def shadow_score(text):
+    t = shadow_text(text)
+    strong = sum(1 for r in _SHADOW_STRONG if r.search(t))
+    weak = sum(1 for r in _SHADOW_WEAK if r.search(t))
+    return 1 if strong >= 1 or weak >= 2 else 0
+
+
+def shadow_update(pid):
+    """Пересчитать ограничение по подписи и пометкам (решение админа сильнее)"""
+    p = q1("SELECT * FROM posts WHERE id = ?", (pid,))
+    if not p or not p["reel"]:
+        return
+    if "shadow_admin" in p.keys() and p["shadow_admin"] is not None:
+        run("UPDATE posts SET shadow = ? WHERE id = ?", (p["shadow_admin"], pid))
+        return
+    text = dec(p["author"], "posts", COL["post_text"], pid, p["text_enc"]) or ""
+    extra = " ".join(l.get("text", "") for l in labels_of(p))
+    run("UPDATE posts SET shadow = ? WHERE id = ?", (shadow_score(text + " " + extra), pid))
+
+
+def shadow_sql(alias="p"):
+    """Ограниченный шортс в рекомендациях и поиске — только пока его посмотрели меньше SHADOW_CAP человек (автору — всегда)"""
+    return ("AND ({a}.shadow = 0 OR {a}.author = ? OR (SELECT COUNT(*) FROM post_viewers pv WHERE pv.post_id = {a}.id) < %d) " % SHADOW_CAP).format(a=alias)
 LABEL_KINDS = ("ai", "place", "ad", "custom")
 
 
@@ -3441,8 +3488,8 @@ def reel_search(req, me):
              "WHERE p.reel = 1 AND p.repost_of IS NULL AND (" + (kind_sql or "(m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)) OR m.kind = 'image' OR m.live = 1") + ") "
              "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
              "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
-             "AND p.id NOT IN (SELECT post_id FROM post_reports WHERE reporter = ?) "
-             "ORDER BY p.created_at DESC LIMIT 600", (MAX_REEL_SECONDS, uid, uid, uid))
+             "AND p.id NOT IN (SELECT post_id FROM post_reports WHERE reporter = ?) " + shadow_sql("p") +
+             "ORDER BY p.created_at DESC LIMIT 600", (MAX_REEL_SECONDS, uid, uid, uid, uid))
     seen_ids = {r["post_id"] for r in q("SELECT post_id FROM post_viewers WHERE user_id = ?", (uid,))} if flt in ("seen", "unseen") else set()
     hits = []
     for p in rows:
@@ -3603,6 +3650,9 @@ def list_reels(req, me):
            "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
            "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) " + hidden_sql("p"))
     args = [MAX_REEL_SECONDS, uid, uid, uid, uid]
+    if params.get("feed") not in ("friends", "following"):
+        sql += shadow_sql("p")                                # «Рекомендации»: ограниченные — только первым зрителям
+        args += [uid]
     if params.get("feed") == "friends":
         sql += "AND (p.author = ? OR p.author IN (SELECT b FROM friends WHERE a = ?)) "
         args += [uid, uid]
@@ -3772,6 +3822,9 @@ def make_post(req, me, author):
             if labels:
                 run("UPDATE posts SET labels_enc = ? WHERE id = ?",
                     (enc(author, "posts", COL["post_text"], pid + "#labels", json.dumps(labels, ensure_ascii=False)), pid))
+            if reel:
+                extra = " ".join(l.get("text", "") for l in labels)
+                run("UPDATE posts SET shadow = ? WHERE id = ?", (shadow_score(text + " " + extra), pid))
             if duet_of:
                 run("UPDATE posts SET duet_of = ? WHERE id = ?", (duet_of, pid))
             run("COMMIT")
@@ -4074,6 +4127,7 @@ def edit_post(req, me, pid):
         except Exception:
             run("ROLLBACK")
             raise
+    shadow_update(pid)                                     # изменили подпись — пересчитываем ограничение
     drop_orphan_media(uid, old)
     req.send_json(200, post_json(q1("SELECT * FROM posts WHERE id = ?", (pid,)), uid))
 
@@ -7751,7 +7805,7 @@ def promo_pick(viewer_id, exclude=(), limit=1, query_hits=None):
         if not promo_matches(p, me_row, viewer_id):
             continue
         post = q1("SELECT * FROM posts WHERE id = ? AND reel = 1", (p["post_id"],))
-        if not post:
+        if not post or post["shadow"]:
             continue
         out.append((p, post))
     return out
@@ -7935,6 +7989,8 @@ def admin_promotion_decide(req, me, prid):
     decision = d.get("decision")
     note = clean_line(d.get("note"), 300)
     erid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("erid") or ""))[:64] or None
+    if decision in ("personal", "ad"):
+        run("UPDATE posts SET shadow = 0, shadow_admin = 0 WHERE id = ?", (p["post_id"],))     # проверено человеком
     if decision == "personal":
         run("UPDATE promotions SET ad_kind = 'personal', note = ? WHERE id = ?", (note, prid))
         promo_start(prid)
@@ -7956,8 +8012,47 @@ def admin_promotion_decide(req, me, prid):
     req.send_json(200, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,)))})
 
 
+@route("GET", r"/v1/admin/shadow", auth=False)
+def admin_shadow_list(req, me):
+    """Шортсы под теневым ограничением (свежие сверху) — админ может снять ограничение"""
+    require_admin(req)
+    rows = q("SELECT * FROM posts WHERE reel = 1 AND shadow = 1 ORDER BY created_at DESC LIMIT 100")
+    out = []
+    for p in rows:
+        b = user_brief(p["author"])
+        media = [{"id": m["media_id"], "kind": m["kind"]} for m in q("SELECT * FROM post_media WHERE post_id = ? ORDER BY position", (p["id"],))]
+        out.append({"id": p["id"], "text": dec(p["author"], "posts", COL["post_text"], p["id"], p["text_enc"]) or "",
+                    "author": {"id": p["author"], "name": b["name"], "username": b.get("username")}, "media": media,
+                    "viewers": q1("SELECT COUNT(*) c FROM post_viewers WHERE post_id = ?", (p["id"],))["c"],
+                    "by_admin": p["shadow_admin"] == 1, "created_at": p["created_at"]})
+    admin_audit(req, "shadow_list")
+    req.send_json(200, {"posts": out, "cap": SHADOW_CAP})
+
+
+@route("POST", r"/v1/admin/posts/([a-f0-9]+)/shadow", auth=False)
+def admin_shadow_set(req, me, pid):
+    """on: true — ограничить вручную; false — снять (и больше не ограничивать автоматически)"""
+    require_admin(req)
+    on = 1 if req.body_json().get("on") else 0
+    run("UPDATE posts SET shadow = ?, shadow_admin = ? WHERE id = ?", (on, on, pid))
+    admin_audit(req, "shadow_on" if on else "shadow_off", pid)
+    req.send_json(200, {"ok": True, "shadow": bool(on)})
+
+
+def _shadow_backfill():
+    """Старые шортсы: один раз проверить подписи (в фоне, чтобы не задерживать запуск)"""
+    try:
+        for r in q("SELECT id FROM posts WHERE reel = 1 AND shadow = 0 AND shadow_admin IS NULL"):
+            shadow_update(r["id"])
+    except Exception as e:
+        print("shadow backfill: %s" % e.__class__.__name__)
+
+
+threading.Thread(target=_shadow_backfill, daemon=True).start()
+
+
 ADMIN_PROMO_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Orbita — модерация продвижений</title><style>
+<title>Orbita — модерация</title><style>
 body{font-family:-apple-system,system-ui,sans-serif;background:#0d0f14;color:#eef;margin:0;padding:16px}
 h1{font-size:20px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}input,select,textarea{background:#1a1d26;color:#eef;border:1px solid #2b3040;border-radius:10px;padding:9px}
 button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}.ok{background:#2fbf71;color:#fff}.ad{background:#ff8a3d;color:#fff}.no{background:#ff4d5e;color:#fff}.gh{background:#262b38;color:#eef}
@@ -7967,7 +8062,7 @@ button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:poin
 @media(max-width:640px){.card{grid-template-columns:1fr}}</style></head><body>
 <h1>Модерация продвижений</h1>
 <div class="bar"><input id="tok" type="password" placeholder="Токен администратора" size="28">
-<select id="st"><option value="review">На проверке</option><option value="needs_info">Ждут рекламодателя</option><option value="active">Идут</option><option value="rejected">Отклонены</option></select>
+<select id="st"><option value="review">На проверке</option><option value="needs_info">Ждут рекламодателя</option><option value="active">Идут</option><option value="rejected">Отклонены</option><option value="shadow">Теневое ограничение</option></select>
 <button class="gh" onclick="load()">Обновить</button></div>
 <p class="muted">Обычное видео (природа, жизнь, хобби) — «Обычное», без пометок. Продаёт товары/услуги, магазин, бренд, курс — «Реклама»: у зрителей будет пометка и данные рекламодателя.</p>
 <div id="list"></div>
@@ -7977,7 +8072,17 @@ document.getElementById("tok").value=localStorage.getItem("orbitaAdmin")||"";
 async function media(id,kind,el){const r=await fetch("/v1/admin/media/"+id,{headers:H()});if(!r.ok)return;const u=URL.createObjectURL(await r.blob());
 const x=document.createElement(kind==="video"?"video":"img");x.src=u;if(kind==="video"){x.controls=true;x.muted=true;x.loop=true}el.appendChild(x)}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+async function loadShadow(){const r=await fetch("/v1/admin/shadow",{headers:H()});const L=document.getElementById("list");
+if(!r.ok){L.innerHTML="<p>Нет доступа ("+r.status+")</p>";return}const d=await r.json();
+L.innerHTML="<p class=muted>Шортсы со словами вроде «бесплатно», «купить», «заработок» видят только первые "+d.cap+" человек в рекомендациях и поиске. Автор об этом не знает.</p>";
+for(const p of d.posts){const c=document.createElement("div");c.className="card";
+c.innerHTML="<div class=media></div><div><div><b>"+esc(p.author.name)+"</b> <span class=muted>@"+esc(p.author.username||"")+"</span></div><p>"+esc(p.text)+"</p>"+
+"<div class=muted>зрителей: "+p.viewers+(p.by_admin?" · ограничено вручную":"")+"</div><div class=bar style='margin-top:10px'><button class=ok>Снять ограничение</button></div></div>";
+const m=c.querySelector(".media");for(const x of p.media.slice(0,3))media(x.id,x.kind,m);
+c.querySelector(".ok").onclick=async()=>{const rr=await fetch("/v1/admin/posts/"+p.id+"/shadow",{method:"POST",headers:{...H(),"Content-Type":"application/json"},body:JSON.stringify({on:false})});if(rr.ok)c.remove()};
+L.appendChild(c)}}
 async function load(){localStorage.setItem("orbitaAdmin",document.getElementById("tok").value);
+if(document.getElementById("st").value==="shadow"){return loadShadow()}
 const r=await fetch("/v1/admin/promotions?status="+document.getElementById("st").value,{headers:H()});const L=document.getElementById("list");
 if(!r.ok){L.innerHTML="<p>Нет доступа ("+r.status+")</p>";return}const d=await r.json();L.innerHTML=d.promotions.length?"":"<p class=muted>Пусто</p>";
 for(const p of d.promotions){const c=document.createElement("div");c.className="card";const adv=p.advertiser?("<div>Рекламодатель: <b>"+esc(p.advertiser.name)+"</b>, ИНН "+esc(p.advertiser.inn)+"</div>"):"<div class=muted>Рекламодатель не указан</div>";
