@@ -168,7 +168,7 @@ struct ComposerView: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.fraction(0.62), .large])
                 .presentationDragIndicator(.visible)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .photosPicker(isPresented: $showSystemPicker, selection: $pickerItems,
                       maxSelectionCount: max(1, maxMedia - mediaCount), matching: .any(of: [.images, .videos]))
@@ -181,7 +181,7 @@ struct ComposerView: View {
                 .environment(\.theme, theme)
                 .environment(\.lang, lang)
                 .presentationDetents([.height(320)])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .interactiveDismissDisabled(uploading)
         .presentationDetents([.large])

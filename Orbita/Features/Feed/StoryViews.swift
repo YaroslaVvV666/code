@@ -304,7 +304,7 @@ struct StoryPresenters: ViewModifier {
                 }
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
             }
             .fullScreenCover(item: $store.open, onDismiss: {
                 Task { await store.reload(session.extras) }

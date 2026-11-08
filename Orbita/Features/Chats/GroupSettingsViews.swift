@@ -441,7 +441,7 @@ struct GroupRequestsView: View {
             PublicProfileSheet(source: .id(member.id))
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 

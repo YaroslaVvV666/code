@@ -157,14 +157,14 @@ struct ChatInfoView: View {
             .environmentObject(session)
             .environment(\.theme, theme)
             .presentationDetents([.height(300)])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showInvite) {
             if let group {
                 GroupInviteSheet(group: group) { await model.refresh() }
                     .environmentObject(session).environmentObject(flow)
                     .environment(\.theme, theme)
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
             }
         }
         .sheet(isPresented: $showEdit) {
@@ -173,7 +173,7 @@ struct ChatInfoView: View {
                                onDeleted: { onLeftGroup() })
                     .environmentObject(session)
                     .environment(\.theme, theme).environment(\.lang, lang)
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
             }
         }
         .sheet(isPresented: $showStats) {
@@ -183,14 +183,14 @@ struct ChatInfoView: View {
             }
             .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showQR) {
             if let link = groupLink {
                 GroupQRSheet(link: link, title: model.peer.name)
                     .environment(\.theme, theme).environment(\.lang, lang)
                     .presentationDetents([.medium])
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
             }
         }
         .sheet(item: $membersList) { kind in
@@ -204,20 +204,21 @@ struct ChatInfoView: View {
                                       onRemove: { remove($0) },
                                       canRemove: { canRemove($0, in: group) })
                     .environment(\.theme, theme).environment(\.lang, lang)
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
             }
         }
         .sheet(isPresented: $showRequests) {
             GroupRequestsSheet(groupID: model.peer.id) { await model.refresh() }
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
+                .sheetStyle(theme)
         }
         .fullScreenCover(isPresented: $showProfile) {
             PublicProfileSheet(source: .id(model.peer.id))
                 .environment(\.profileChatContext, model.peer.id)     // уже в переписке с ним — кнопка «Чат» не нужна
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .profileSheet(id: $openedMember)
         .overlay {
@@ -445,13 +446,13 @@ struct ChatInfoView: View {
                               repo: session.messengerRepo) { Task { await model.refresh() } }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showAppearance) {
             ChatAppearanceSheet(chatID: model.peer.id, chatName: model.peer.name)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .confirmationDialog(s.t("Удалить переписку?", "Delete chat?"), isPresented: $confirmDeleteChat, titleVisibility: .visible) {
             Button(s.t("Удалить у меня", "Delete for me"), role: .destructive) { deleteChat(forEveryone: false) }
@@ -623,7 +624,7 @@ struct ChatInfoView: View {
         }
         .environment(\.theme, theme).environment(\.lang, lang)
         .presentationDetents([.height(360)])
-        .presentationBackground(theme.sheet)
+        .sheetStyle(theme)
     }
 
     private func dmRow(_ icon: String, _ title: String, danger: Bool = false, action: @escaping () -> Void) -> some View {

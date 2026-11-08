@@ -481,7 +481,7 @@ struct PlaylistSheet: View {
         .onChange(of: model.tracks) { _, tracks in player.syncQueue(tracks) }
         .presentationDetents([.large])                 // на всю высоту, до самого низа — ничего не просвечивает
         .presentationDragIndicator(.visible)
-        .presentationBackground(theme.sheet)
+        .sheetStyle(theme)
         .tint(theme.accentColor)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.mp3, .mpeg4Audio, .audio],
                       allowsMultipleSelection: true) { result in

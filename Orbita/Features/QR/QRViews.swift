@@ -1053,14 +1053,14 @@ struct PostLinkSheet: View {
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $openedAuthor) { route in
             PublicProfileSheet(source: .id(route.id))
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)

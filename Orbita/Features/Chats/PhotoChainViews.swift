@@ -140,6 +140,7 @@ struct PhotoChainBlock: View {
                 .environment(\.chainModel, model)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
+                .sheetStyle(theme)
         }
     }
 

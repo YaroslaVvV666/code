@@ -135,7 +135,7 @@ struct ArticleComposer: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.fraction(0.62), .large])
                 .presentationDragIndicator(.visible)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showMusic) {
             MusicPickerSheet(onPick: { copies in
@@ -151,7 +151,7 @@ struct ArticleComposer: View {
             })
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showLocation) {
             LocationShareSheet { point, _ in
@@ -159,6 +159,7 @@ struct ArticleComposer: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.large])
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showEmoji) {
             // выбрали эмодзи — выбор закрывается, эмодзи сразу в статье
@@ -168,6 +169,7 @@ struct ArticleComposer: View {
             }
                 .environment(\.theme, theme)
                 .presentationDetents([.height(320)])
+                .sheetStyle(theme)
         }
         .sheet(item: $formulaDraft) { draft in
             FormulaSheet(draft: draft) { applyFormula(draft, latex: $0) }

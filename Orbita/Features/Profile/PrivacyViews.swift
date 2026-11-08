@@ -275,14 +275,14 @@ struct PrivacyScreen: View {
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showSupport, onDismiss: { Task { supportUnread = await session.extras.supportUnread() } }) {
             NavigationStack { SupportView() }
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 

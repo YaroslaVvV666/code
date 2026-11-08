@@ -603,6 +603,7 @@ struct ReelsView: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDragIndicator(.hidden)
                 .onAppear { soundTrackID = music.mediaID }
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $duetFor) { post in
             DuetRecorderView(original: post) { await model.showMine(session: session); current = model.reels.first?.id }
@@ -629,7 +630,7 @@ struct ReelsView: View {
                                 ? { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { duetFor = post } } : nil)
                 .environmentObject(session)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 

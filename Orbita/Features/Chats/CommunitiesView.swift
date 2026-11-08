@@ -277,7 +277,7 @@ struct CommunitiesView: View {
             }
             .environmentObject(session).environmentObject(flow)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
     }
 }

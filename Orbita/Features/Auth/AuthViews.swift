@@ -88,7 +88,7 @@ struct PhoneStepView: View {
                 }
             }
             .preferredColorScheme(theme.dark ? .dark : .light)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
     }
 

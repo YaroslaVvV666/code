@@ -212,6 +212,7 @@ struct AvatarViewer: View {
             }
             .environment(\.theme, theme)
             .presentationDetents([.large])
+            .sheetStyle(theme)
         }
         .sheet(item: $shareItems) { item in
             ActivitySheet(items: item.items).presentationDetents([.medium, .large])

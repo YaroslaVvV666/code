@@ -60,7 +60,7 @@ struct StickerCreatorSheet: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.height(300)])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .overlay(alignment: .top) {
             if let note = busyNote {

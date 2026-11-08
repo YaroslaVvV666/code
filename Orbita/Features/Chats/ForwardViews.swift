@@ -14,7 +14,7 @@ private struct ProfileSheetModifier: ViewModifier {
             PublicProfileSheet(source: .id(route.id))
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }

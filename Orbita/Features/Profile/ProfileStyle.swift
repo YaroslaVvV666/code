@@ -199,7 +199,7 @@ struct ProfileStyleScreen: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium, .large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         // предупреждение «вы не сохранили»: пока есть несохранённые изменения — помечаем экран «грязным»
         .onChange(of: changed) { _, v in leaveGuard.dirty = v }

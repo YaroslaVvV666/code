@@ -121,7 +121,7 @@ struct ChatsListView: View {
             .environmentObject(session)
             .environmentObject(flow)
             .preferredColorScheme(theme.dark ? .dark : .light)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
             .presentationDetents([.height(250)])
         }
         .sheet(isPresented: $showArchive) {
@@ -133,7 +133,7 @@ struct ChatsListView: View {
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .onChange(of: archivedChats.isEmpty) { _, empty in if empty { showArchive = false } }
         .sheet(isPresented: $showImport) {
@@ -143,7 +143,7 @@ struct ChatsListView: View {
             .environmentObject(session)
             .environmentObject(flow)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .overlay {
             if let chat = peek {
@@ -746,7 +746,7 @@ struct NewChatSheet: View {
             }
             .environmentObject(session).environmentObject(flow)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
     }
 
@@ -1068,7 +1068,7 @@ struct ChatScreen: View {
                              onSend: model.canWrite ? { model.sendSticker($0) } : nil)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 
@@ -1158,6 +1158,7 @@ struct ChatScreen: View {
             GroupRequestsSheet(groupID: route.peer.id) { await model.refresh() }
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showPlayer) {
             FullPlayerSheet(items: model.musicItems, addToProfile: { item in await addToProfile(item) })
@@ -1196,7 +1197,7 @@ struct ChatScreen: View {
             }
             .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
             .presentationDetents([.medium, .large])
         }
         .sheet(item: $forwardIDs) { route in
@@ -1204,7 +1205,7 @@ struct ChatScreen: View {
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
                 .onDisappear { selecting = false; selected = [] }
         }
         .sheet(item: $infoMessage) { m in
@@ -1212,20 +1213,20 @@ struct ChatScreen: View {
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showPollCreate) {
             PollCreateSheet(peerID: model.peer.id) { Task { await model.refresh(); scrollToBottom(animated: true, delay: 0.1) } }
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .profileSheet(id: $profileID)
         .sheet(item: $noteTarget) { m in
             MessageNoteSheet(message: m) { model.setNote(m, text: $0) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.height(320), .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .environment(\.editMessageNote, { id in noteTarget = model.messages.first { $0.id == id } })
         .sheet(item: $reportTarget) { m in
@@ -1234,14 +1235,14 @@ struct ChatScreen: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.height(440), .large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(item: $entitySheet) { e in
             EntityInfoSheet(entity: e, onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $commentsRoute) { r in
             // комментарии — отдельная переписка на весь экран, как в Telegram
@@ -1264,7 +1265,7 @@ struct ChatScreen: View {
             PostLinkSheet(postID: route.id)
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showSearchList) {
             SearchResultsSheet(hits: searchHits, query: searchQuery, current: searchCurrent, peer: model.peer,
@@ -1272,7 +1273,7 @@ struct ChatScreen: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { goToHit(i) }
             }
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
             .presentationDetents([.medium, .large])
         }
         .onChange(of: searchQuery) { _, _ in searchCurrent = nil; recomputeSearch() }
@@ -1666,7 +1667,7 @@ struct ChatScreen: View {
                     }
                     .environment(\.theme, theme).environment(\.lang, lang)
                     .presentationDetents([.medium, .large])
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
                 }
             }
         }
@@ -2426,7 +2427,7 @@ struct SendToChatSheet: View {
             ReelStatsSheet(postID: item.id)
                 .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .confirmationDialog(s.t("Удалить видео?", "Delete this video?"), isPresented: $deleteAsk, titleVisibility: .visible) {
             Button(s.t("Удалить", "Delete"), role: .destructive) { dismiss(); onDelete?() }

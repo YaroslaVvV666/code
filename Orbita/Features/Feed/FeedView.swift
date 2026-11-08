@@ -166,6 +166,7 @@ struct FeedView: View {
         }) {
             ActivityView(store: activity) { pendingAuthor = $0 }
                 .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
+                .sheetStyle(theme)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { session.taste.endAll() }
@@ -194,21 +195,21 @@ struct FeedView: View {
             BookmarksSheet(vm: vm)
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(item: $editingPost) { post in
             ComposerView(vm: vm, editing: post)
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(item: $commentsPost) { post in
             CommentsSheet(post: post, vm: vm)
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 
@@ -746,7 +747,7 @@ struct PostCard: View {
                 .environmentObject(flow)
                 .environment(\.theme, theme)
                 .presentationDetents([.medium, .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .padding(16)
         .confirmationDialog(s.t("На что жалуетесь?", "What's wrong?"), isPresented: $reportAsk, titleVisibility: .visible) {
@@ -773,7 +774,7 @@ struct PostCard: View {
             SendToChatSheet(postID: post.id)
                 .environmentObject(session)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }

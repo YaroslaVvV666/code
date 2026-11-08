@@ -150,6 +150,7 @@ struct ForumTopicsScreen: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium, .large])
+            .sheetStyle(theme)
         }
         .sheet(item: $editing) { t in
             TopicEditSheet(title: s.t("Изменить тему", "Edit topic"), initial: t) { title, icon, _ in

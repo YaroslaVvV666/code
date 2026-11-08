@@ -316,6 +316,6 @@ private extension View {
         self.environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
             .preferredColorScheme(theme.dark ? .dark : .light)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
     }
 }

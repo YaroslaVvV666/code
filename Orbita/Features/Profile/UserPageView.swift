@@ -646,7 +646,7 @@ struct UserPageView: View {
                     .environmentObject(session)
                     .environmentObject(flow)
                     .preferredColorScheme(theme.dark ? .dark : .light)
-                    .presentationBackground(theme.sheet)
+                    .sheetStyle(theme)
             }
         }
         .sheet(isPresented: $showComposer) {
@@ -654,14 +654,14 @@ struct UserPageView: View {
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(item: $editingPost) { post in
             ComposerView(vm: feed, editing: post, onSaved: { model.replace($0) })
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showWallCompose, onDismiss: { wallReplyTo = nil }) {
             WallComposeSheet(ownerName: model.profile?.name ?? "", replyTo: wallReplyTo) { [reply = wallReplyTo?.id] kind, text, image in
@@ -670,21 +670,21 @@ struct UserPageView: View {
             .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
             .preferredColorScheme(theme.dark ? .dark : .light)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(item: $commentsPost, onDismiss: { Task { await model.reloadWall() } }) { post in
             CommentsSheet(post: post, vm: feed)
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $friendSheet) { route in
             PublicProfileSheet(source: .id(route.id))
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .task {
             while !Task.isCancelled {
@@ -715,7 +715,7 @@ struct UserPageView: View {
                 .environmentObject(session)
                 .environment(\.theme, theme)
                 .presentationDetents([.height(300)])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
             }
         }
         .confirmationDialog(s.blockQuestion(model.profile?.name ?? ""), isPresented: $confirmBlock,
@@ -731,7 +731,7 @@ struct UserPageView: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.height(440), .large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
     }
 

@@ -68,7 +68,7 @@ struct PostLikersSheet: View {
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }

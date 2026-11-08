@@ -90,7 +90,7 @@ struct PollBlock: View {
             PollVotersSheet(question: question, poll: info)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 

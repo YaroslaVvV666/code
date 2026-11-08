@@ -172,6 +172,7 @@ struct ChatInputBar: View {
             ChainCreateSheet { theme, moderated in Task { _ = await model.sendChain(theme: theme, moderated: moderated) } }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showChecklist) {
             ChecklistCreateSheet { title, items, othersAdd in
@@ -179,6 +180,7 @@ struct ChatInputBar: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.large])
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showMusic) {
             MusicPickerSheet(onPick: { copies in
@@ -195,7 +197,7 @@ struct ChatInputBar: View {
             .environmentObject(session)
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showContactPick) {
             ContactPickerSheet(repo: model.repo) { c in
@@ -203,29 +205,31 @@ struct ChatInputBar: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium, .large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showCapsule) {
             CapsuleSheet { date in sendLocked(OutgoingLock(openAt: date)) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showSecretPlace) {
             SecretPlaceSheet { place, radius in sendLocked(OutgoingLock(place: place, radius: radius)) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.large])
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showSchedule) {
             ScheduleSheet { date in showSchedule = false; scheduleSend(at: date) }
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
                 .presentationDetents([.medium])
         }
         .sheet(isPresented: $showStickerCreator) {
             StickerCreatorSheet(onChanged: { Task { await model.loadStickers() } })
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(isPresented: $showArticle) {
             ArticleComposer(model: model, initialText: articleSeed) {
@@ -239,7 +243,7 @@ struct ChatInputBar: View {
             LocationShareSheet { point, live in model.sendLocation(point, live: live) }
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showAttach) {
             AttachSheet(canPoll: !model.peer.isChannel || model.group?.isAdmin == true,
@@ -267,7 +271,7 @@ struct ChatInputBar: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.fraction(0.62), .large])
                 .presentationDragIndicator(.visible)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems, maxSelectionCount: 10,
                       matching: .any(of: [.images, .videos]))
@@ -624,7 +628,7 @@ struct ChatInputBar: View {
             }
         } label: {
             Image(systemName: "paperclip")
-                .font(.system(size: 20, weight: .regular))
+                .font(.system(size: 21, weight: .regular))
                 .foregroundStyle(theme.text)
                 .frame(width: 44, height: 44)
                 .glassCircle()
@@ -673,8 +677,8 @@ struct ChatInputBar: View {
             if locked {
                 Button { finishRecording(cancel: false) } label: {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
+                        .font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 44, height: 44)              // как скрепка и микрофон
                         .background(theme.accent, in: Circle())
                 }
                 .buttonStyle(PressStyle())
@@ -692,11 +696,11 @@ struct ChatInputBar: View {
                             ProgressView().tint(.white).scaleEffect(0.8)
                         } else {
                             Image(systemName: model.editing != nil ? "checkmark" : "arrow.up")
-                                .font(.system(size: 17, weight: .bold))
+                                .font(.system(size: 18, weight: .bold))
                                 .foregroundStyle(.white)
                         }
                     }
-                    .frame(width: 38, height: 38)
+                    .frame(width: 44, height: 44)                  // один размер со скрепкой и микрофоном
                     .background(busy ? AnyShapeStyle(theme.textTertiary.opacity(0.55)) : AnyShapeStyle(theme.accent), in: Circle())
                     .shadow(color: theme.accentColor.opacity(busy ? 0 : 0.45), radius: 7, y: 3)
                     .animation(.easeOut(duration: 0.2), value: busy)
@@ -739,7 +743,8 @@ struct ChatInputBar: View {
             // микрофон — отдельная стеклянная кнопка, как и скрепка
             if micVisible && !recording && !(canSend) { Color.clear.glassCircle() }
         }
-        .animation(.easeOut(duration: 0.15), value: canSend)
+        // микрофон ↔ «отправить»: пружинкой, одна кнопка уменьшается и гаснет, другая вырастает
+        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: canSend)
         .overlay(alignment: .top) {
             // замок остаётся на экране всё время записи: закрыт — можно в любой момент остановить и отправить
             if recording {
@@ -756,8 +761,9 @@ struct ChatInputBar: View {
     private var micButton: some View {
         ZStack {
             Image(systemName: cameraMode ? "video" : "mic")
-                .font(.system(size: 22))
-                .foregroundStyle(recording ? Color.white : theme.textSecondary)
+                .font(.system(size: 21))
+                .foregroundStyle(recording ? Color.white : theme.text)          // как скрепка: тот же цвет и размер значка
+                .contentTransition(.symbolEffect(.replace))
                 .frame(width: 40, height: 40)
                 .background {
                     if recording { Circle().fill(willCancel ? theme.danger : theme.accentColor) }

@@ -110,3 +110,11 @@ extension View {
         modifier(CardModifier(theme: theme, radius: radius))
     }
 }
+
+extension View {
+    /// Все шторки одного вида: фон темы и одинаковое скругление сверху
+    func sheetStyle(_ theme: Theme) -> some View {
+        self.presentationBackground(theme.sheet)
+            .presentationCornerRadius(28)
+    }
+}

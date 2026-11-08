@@ -144,14 +144,14 @@ struct MainTabView: View {
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $openedAuthor) { route in
             PublicProfileSheet(source: .id(route.id))
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(item: Binding(get: { router.pending.flatMap { Self.isProfileLink($0) ? nil : $0 } },
                               set: { if $0 == nil { router.pending = nil } })) { link in
@@ -167,7 +167,7 @@ struct MainTabView: View {
                 .environmentObject(session)
                 .environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .task { await session.profile.load() }
         .task { await session.syncInterests() }

@@ -2096,7 +2096,7 @@ struct StickerPackSheet: View {
         .sheet(isPresented: $showCreator) {
             StickerCreatorSheet(onChanged: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } })
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(item: $editSticker) { st in
             StickerEditorView(sticker: st, packID: packID, repo: repo,

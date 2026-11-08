@@ -272,6 +272,7 @@ struct AdvertiserCabinetView: View {
                     catch { self.error = s.t("Не удалось создать", "Couldn't create") }
                 }
                 .environmentObject(session).environment(\.theme, theme).environment(\.lang, lang)
+                .sheetStyle(theme)
             }
             .alert(s.t("Пополнить баланс", "Top up"), isPresented: $showTopUp) {
                 Button(s.t("1000 ₽", "$10")) { topUp(100000) }

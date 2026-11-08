@@ -542,7 +542,7 @@ struct ProfileView: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showStatus) {
             EmojiStatusSheet(current: store.profile?.statusEmoji) { emoji in
@@ -550,7 +550,7 @@ struct ProfileView: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
         .sheet(isPresented: $showPlaylist) {
             if let musicModel {
@@ -564,13 +564,13 @@ struct ProfileView: View {
             ContactsImportSheet()
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .sheet(isPresented: $showAds) {
             AdvertiserCabinetView()
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
         .fullScreenCover(isPresented: $showQR) {
             ProfileQRScreen(link: DeepLink.profileLink(username: store.profile?.username,

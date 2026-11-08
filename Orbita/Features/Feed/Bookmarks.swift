@@ -67,7 +67,7 @@ struct BookmarksSheet: View {
         .sheet(item: $commentsPost) { post in
             CommentsSheet(post: post, vm: vm)
                 .environmentObject(session).environmentObject(flow)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }
