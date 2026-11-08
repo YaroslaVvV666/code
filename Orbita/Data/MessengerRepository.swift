@@ -220,6 +220,7 @@ struct Contact: Identifiable, Equatable {
     var username: String?
     var avatarID: String?
     var phone: String? = nil        // номер, если человек его показывает
+    var lastSeen: Date? = nil       // когда был в сети (если показывает)
 }
 
 struct ChatSummary: Identifiable, Equatable {
@@ -1309,7 +1310,11 @@ private struct ContactDTO: Decodable {
     let username: String?
     let avatar: String?
     let phone: String?
-    var model: Contact { Contact(id: id, name: name, realName: realName, username: username, avatarID: avatar, phone: phone) }
+    let lastSeen: Double?
+    var model: Contact {
+        Contact(id: id, name: name, realName: realName, username: username, avatarID: avatar, phone: phone,
+                lastSeen: lastSeen.map { Date(timeIntervalSince1970: $0) })
+    }
 }
 
 private struct ContactListDTO: Decodable { let contacts: [ContactDTO] }

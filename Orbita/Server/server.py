@@ -10274,8 +10274,10 @@ def list_contacts(req, me):
         u = q1("SELECT * FROM users WHERE id = ?", (r["contact_id"],))
         if not u:
             continue
+        pj = profile_json(u, uid)
         out.append({**user_brief(u["id"], uid), "real_name": names(u)[2],
-                    **({"phone": ph} if (ph := profile_json(u, uid).get("phone")) else {})})
+                    **({"phone": pj["phone"]} if pj.get("phone") else {}),
+                    "last_seen": pj.get("last_seen")})                # как в профиле: только если человек это показывает
     out.sort(key=lambda c: c["name"].lower())
     req.send_json(200, {"contacts": out})
 

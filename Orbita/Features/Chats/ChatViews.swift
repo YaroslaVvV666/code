@@ -158,7 +158,7 @@ struct ChatsListView: View {
             .environmentObject(flow)
             .preferredColorScheme(theme.dark ? .dark : .light)
             .sheetStyle(theme)
-            .presentationDetents([.height(250)])
+            .presentationDetents([.large])
         }
         .sheet(isPresented: $showArchive) {
             ArchivedChatsView(chats: archivedChats, prefs: prefs,
@@ -870,27 +870,64 @@ struct NewChatSheet: View {
     let onPick: (ChatRoute) -> Void
 
     @EnvironmentObject private var flow: AuthFlow
+    @Environment(\.dismiss) private var dismiss
     @State private var create: CreateKind?
+    @State private var showImport = false
+    @State private var contacts: [Contact] = []
+    @State private var loaded = false
+    @State private var query = ""
+    @AppStorage("newchat.sort") private var sortByName = false     // «Сортировка»: по времени в сети или по имени
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
     private var s: Strings { Strings(lang: lang) }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(s.t("Создать", "Create")).font(.system(size: 22, weight: .bold)).foregroundStyle(theme.text)
-            Text(s.t("Найти человека можно в поиске на экране чатов — по имени пользователя.",
-                     "To find someone, use the search on the chats screen — by username."))
-                .font(.system(size: 14)).foregroundStyle(theme.textSecondary)
-            // кнопки группы и канала — отдельной строкой, стекло
-            HStack(spacing: 12) {
-                bigAction("person.3.fill", s.t("Новая группа", "New group")) { create = CreateKind(id: "group") }
-                bigAction("megaphone.fill", s.t("Новый канал", "New channel")) { create = CreateKind(id: "channel") }
+    /// Контакты: сверху те, кто в сети / был недавно (как в Telegram), или по алфавиту; поиск — по имени, @нику, номеру
+    private var shown: [Contact] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var list = contacts.filter { $0.id != session.serverID }
+        if !q.isEmpty {
+            list = list.filter {
+                $0.name.lowercased().contains(q) || $0.realName.lowercased().contains(q)
+                    || ($0.username ?? "").lowercased().contains(q) || ($0.phone ?? "").contains(q)
             }
-            Spacer(minLength: 0)
         }
-        .padding(20)
+        if sortByName { return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending } }
+        return list.sorted { ($0.lastSeen ?? .distantPast) > ($1.lastSeen ?? .distantPast) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            searchField.padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if query.isEmpty {
+                        action("person.2", s.t("Создать группу", "New group")) { create = CreateKind(id: "group") }
+                        action("person.badge.plus", s.t("Создать контакт", "New contact")) { showImport = true }
+                        action("megaphone", s.t("Создать канал", "New channel")) { create = CreateKind(id: "channel") }
+                    }
+                    if !loaded {
+                        ProgressView().padding(.top, 30)
+                    } else if shown.isEmpty {
+                        Text(query.isEmpty ? s.t("В контактах пока никого. Добавьте людей из Orbita — они появятся здесь.",
+                                                 "No contacts yet. Add people from Orbita and they'll show up here.")
+                                           : s.t("Никого не нашли", "Nobody found"))
+                            .font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+                            .multilineTextAlignment(.center).padding(.horizontal, 32).padding(.top, 28)
+                    } else {
+                        ForEach(shown) { c in contactRow(c) }
+                    }
+                }
+                .padding(.bottom, 30)
+            }
+            .scrollDismissesKeyboard(.immediately)
+        }
+        .task {
+            if let list = try? await session.messengerRepo.contacts() { contacts = list }
+            loaded = true
+        }
         .sheet(item: $create) { kind in
             GroupCreateSheet(type: kind.id) { info in
                 create = nil
@@ -900,19 +937,100 @@ struct NewChatSheet: View {
             .environment(\.theme, theme).environment(\.lang, lang)
             .sheetStyle(theme)
         }
+        .sheet(isPresented: $showImport, onDismiss: {
+            Task { if let list = try? await session.messengerRepo.contacts() { contacts = list } }     // новые контакты — сразу в списке
+        }) {
+            ContactsImportSheet(onOpenChat: { peer in
+                showImport = false
+                onPick(ChatRoute(peer: peer))
+            })
+            .environmentObject(session)
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .sheetStyle(theme)
+        }
     }
 
-    private func bigAction(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 24))
-                Text(title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+    private var header: some View {
+        HStack(spacing: 10) {
+            Menu {
+                Picker(selection: $sortByName) {
+                    Label(s.t("По времени в сети", "By last seen"), systemImage: "clock").tag(false)
+                    Label(s.t("По имени", "By name"), systemImage: "textformat").tag(true)
+                } label: { EmptyView() }
+            } label: {
+                Text(s.t("Сортировка", "Sort"))
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                    .lineLimit(1)
+                    .padding(.horizontal, 14).frame(height: 38)
+                    .glass(Capsule(), interactive: true)
+            }
+            Text(s.t("Написать сообщение", "New message"))
+                .font(.system(size: 17, weight: .bold)).foregroundStyle(theme.text)
+                .lineLimit(1).minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+            Button { dismiss() } label: {
+                Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                    .frame(width: 38, height: 38)
+                    .glassCircle()
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16).padding(.top, 18)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
+            TextField(s.t("Поиск", "Search"), text: $query)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .foregroundStyle(theme.text)
+            if !query.isEmpty {
+                Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(theme.textTertiary) }
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14).frame(height: 42)
+        .background(theme.text.opacity(theme.dark ? 0.08 : 0.06), in: Capsule())
+    }
+
+    /// Спокойная строка-действие: значок и надпись цветом темы, без плашек
+    private func action(_ icon: String, _ title: String, run: @escaping () -> Void) -> some View {
+        Button { Haptics.select(); run() } label: {
+            HStack(spacing: 18) {
+                Image(systemName: icon).font(.system(size: 21, weight: .regular))
+                    .frame(width: 44)
+                Text(title).font(.system(size: 17, weight: .medium))
+                Spacer(minLength: 0)
             }
             .foregroundStyle(theme.accentColor)
-            .frame(maxWidth: .infinity).frame(height: 96)
-            .glass(RoundedRectangle(cornerRadius: 22, style: .continuous), interactive: true)
+            .padding(.horizontal, 16).frame(height: 54)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(PressStyle())
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 78) }
+    }
+
+    private func contactRow(_ c: Contact) -> some View {
+        let status = s.lastSeenText(c.lastSeen)
+        let online = c.lastSeen.map { Date().timeIntervalSince($0) < 60 } ?? false
+        return Button {
+            Haptics.select()
+            onPick(ChatRoute(peer: ChatPeer(id: c.id, name: c.name, username: c.username, avatarID: c.avatarID)))
+        } label: {
+            HStack(spacing: 12) {
+                AvatarView(name: c.name, size: 46, avatarID: c.avatarID).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.name).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(status).font(.system(size: 13))
+                        .foregroundStyle(online ? theme.accentColor : theme.textSecondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16).frame(height: 62)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 74) }
     }
 }
 
