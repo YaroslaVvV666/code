@@ -382,6 +382,7 @@ struct ChatsListView: View {
                                 Color.clear
                                     .onAppear { if filterRest == nil { filterRest = g.frame(in: .named("chatsScroll")).minY } }
                                     .onChange(of: g.frame(in: .named("chatsScroll")).minY) { _, raw in
+                                    if #available(iOS 18.0, *) { return }       // на iOS 18 — точный сдвиг из ChatsFilterWatcher
                                     // «верх списка» — где он стоит в покое (с отступами системы он не обязательно 0)
                                     if filterRest == nil { filterRest = raw }
                                     let y = raw - (filterRest ?? 0)
@@ -420,6 +421,8 @@ struct ChatsListView: View {
                 }
                 .scrollIndicators(.hidden)
                 .coordinateSpace(name: "chatsScroll")
+                // iOS 18+: точный сдвиг списка — потянул выше верха → фильтры; чуть пролистал вниз → прячутся
+                .modifier(ChatsFilterWatcher { off in handleFilterOffset(off) })
                 // повторное нажатие «Чаты» — в начало списка (и сброс поиска)
                 .onReceive(TabReselect.shared.publisher(.chats)) { _ in
                     if !query.isEmpty { query = "" }
@@ -680,6 +683,17 @@ struct ChatsListView: View {
                             : (prefs.isPinned(chat.id) ? pinnedFill : Color.clear))
         }
         .onAppear { ThreadPrefetcher.shared.visible(chat, repo: session.messengerRepo) }
+    }
+
+    /// off: 0 — список в самом верху, минус — потянули выше верха, плюс — пролистали вниз
+    private func handleFilterOffset(_ off: CGFloat) {
+        if off < -44, !filtersShown {
+            Haptics.impact(.soft)
+            filtersShownAt = Date()
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { filtersShown = true }
+        } else if off > 10, filtersShown, folder == .all, Date().timeIntervalSince(filtersShownAt) > 0.35 {
+            withAnimation(.easeInOut(duration: 0.28)) { filtersShown = false }
+        }
     }
 
     /// Плашка после переноса в архив: «Чат перенесён в архив» и «Отменить» — 4 секунды
@@ -3113,3 +3127,20 @@ enum ChatSearchFilter { case all, media, links, voice }
 
 /// Какой свой стикерпак показать в шторке
 struct StickerPackRoute: Identifiable { let id: String }
+
+/// Сдвиг списка чатов (iOS 18+): сколько пролистали от верха, без догадок по рамкам
+struct ChatsFilterWatcher: ViewModifier {
+    let onOffset: (CGFloat) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(for: Int.self) { g in
+                Int((g.contentOffset.y + g.contentInsets.top) / 4)          // шаг 4 pt: без лишних пересчётов
+            } action: { _, step in
+                onOffset(CGFloat(step) * 4)
+            }
+        } else {
+            content
+        }
+    }
+}
