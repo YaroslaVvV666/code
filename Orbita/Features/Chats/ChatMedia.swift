@@ -460,6 +460,8 @@ final class CircleRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         // параллельный выход кадров для распознавания жестов (Vision): маленькие кадры в родном формате камеры —
         // без перевода в BGRA и без полноразмерных буферов 30 раз в секунду
         g.data.alwaysDiscardsLateVideoFrames = true
+        // маленькие кадры можно включить только после отключения авторазмера — иначе AVFoundation роняет приложение
+        g.data.automaticallyConfiguresOutputBufferDimensions = false
         g.data.deliversPreviewSizedOutputBuffers = true
         g.data.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
         g.data.setSampleBufferDelegate(g.gestures, queue: g.gestureQueue)
