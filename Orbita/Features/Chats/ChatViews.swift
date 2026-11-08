@@ -647,19 +647,23 @@ struct ChatsListView: View {
 
     private func row(_ chat: ChatSummary) -> some View {
         SwipeActionsRow(id: chat.id, openID: $swipedOpen,
-            leading: .init(icon: "archivebox.fill", label: s.t("В архив", "Archive"), tint: Color(white: 0.55)) {
+            // вправо — «Закрепить»
+            leading: [
+                .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill",
+                      label: prefs.isPinned(chat.id) ? s.t("Открепить", "Unpin") : s.t("Закрепить", "Pin"),
+                      tint: Color(red: 0.2, green: 0.72, blue: 0.4)) { prefs.toggle(chat.id) },
+            ],
+            // влево — по одной: «В архив» (у края, полный свайп), «Удалить», звук
+            trailing: [
+            .init(icon: "archivebox.fill", label: s.t("В архив", "Archive"), tint: Color(white: 0.42)) {
                 withAnimation(.easeInOut(duration: 0.25)) { prefs.toggleArchive(chat.id) }
                 Haptics.notify(.success)
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) { archivedToast = chat }
             },
-            actions: [
-            .init(icon: prefs.isPinned(chat.id) ? "pin.slash.fill" : "pin.fill",
-                  label: prefs.isPinned(chat.id) ? s.t("Открепить", "Unpin") : s.t("Закрепить", "Pin"), tint: .green) {
-                prefs.toggle(chat.id)
-            },
+            .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.85, green: 0.12, blue: 0.16)) { deleting = chat },
             .init(icon: isMuted(chat) ? "bell.fill" : "bell.slash.fill",
-                  label: isMuted(chat) ? s.t("Вкл. звук", "Unmute") : s.t("Откл. звук", "Mute"), tint: .orange) { toggleMute(chat) },
-            .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.95, green: 0.27, blue: 0.33)) { deleting = chat },
+                  label: isMuted(chat) ? s.t("Вкл. звук", "Unmute") : s.t("Убрать звук", "Mute"),
+                  tint: Color(red: 0.85, green: 0.5, blue: 0.08)) { toggleMute(chat) },
         ]) {
             rowBody(chat)
                 // закреплённые — на чуть более светлом фоне, как в Telegram
@@ -687,7 +691,7 @@ struct ChatsListView: View {
                         archivedToast = nil
                     }
                 } label: {
-                    Text(s.t("Отменить", "Undo")).font(.system(size: 15, weight: .bold)).foregroundStyle(theme.accentColor)
+                    Text(s.t("Отмена", "Undo")).font(.system(size: 15, weight: .bold)).foregroundStyle(theme.accentColor)
                         .padding(.horizontal, 6).frame(height: 36).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -857,11 +861,11 @@ struct ArchivedChatsView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(chats) { chat in
                             SwipeActionsRow(id: chat.id, openID: $swipedOpen,
-                                leading: .init(icon: "tray.and.arrow.up.fill", label: s.t("Из архива", "Unarchive"), tint: .green) {
+                                trailing: [
+                                .init(icon: "tray.and.arrow.up.fill", label: s.t("Из архива", "Unarchive"), tint: Color(red: 0.2, green: 0.72, blue: 0.4)) {
                                     withAnimation(.easeInOut(duration: 0.2)) { prefs.toggleArchive(chat.id) }
                                 },
-                                actions: [
-                                .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.95, green: 0.27, blue: 0.33)) { onDelete(chat) },
+                                .init(icon: "trash.fill", label: s.t("Удалить", "Delete"), tint: Color(red: 0.85, green: 0.12, blue: 0.16)) { onDelete(chat) },
                             ]) {
                                 archiveRowBody(chat)
                             }
