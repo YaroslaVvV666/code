@@ -63,6 +63,10 @@ def main():
     s, b, _ = req("GET", "/v1/chats/%s/messages" % bot_id, tu)
     bot = (jbody(b) or {}).get("bot") or {}
     check("после /start — начат, 1 пользователь", bot.get("started") is True and bot.get("users") == 1, bot)
+    # удалил переписку с ботом (у себя) — снова «Старт»; число пользователей не меняется
+    req("DELETE", "/v1/chats/%s" % bot_id, tu)
+    bot = (jbody(req("GET", "/v1/chats/%s/messages" % bot_id, tu)[1]) or {}).get("bot") or {}
+    check("чат удалён — снова «Старт»", bot.get("started") is False and bot.get("users") == 1, bot)
 
     s, b, _ = req("GET", "/bot%s/getUpdates" % token)
     ups = (jbody(b) or {}).get("result", [])

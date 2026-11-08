@@ -5454,9 +5454,10 @@ def bot_info_json(bot_id, viewer):
         desc, banner, kind, owner = BUILTIN_BOTS[bot_id]["description"], None, None, None
     else:
         return None
-    # старые переписки (до появления «Старт») тоже считаются начатыми
-    started = bot_started(bot_id, viewer) or q1(
-        "SELECT 1 FROM messages WHERE sender = ? AND recipient = ? LIMIT 1", (viewer, bot_id)) is not None
+    # «Старт» нажат, пока переписка с ботом есть: удалил чат (или ещё не писал) — снова «Старт», как в Telegram
+    started = q1("SELECT 1 FROM messages WHERE (sender = ? AND recipient = ? AND del_sender = 0) "
+                 "OR (sender = ? AND recipient = ? AND del_recipient = 0) LIMIT 1",
+                 (viewer, bot_id, bot_id, viewer)) is not None
     users = q1("SELECT COUNT(*) c FROM bot_starts WHERE bot_id = ?", (bot_id,))["c"]
     return {"description": desc or "", "banner": banner, "banner_kind": kind or "photo",
             "commands": bot_commands_of(bot_id) or [], "started": started, "users": users,

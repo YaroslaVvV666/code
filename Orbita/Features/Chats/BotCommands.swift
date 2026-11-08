@@ -261,47 +261,87 @@ struct BotStartBar: View {
     let action: () -> Void
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    @State private var hint = false
+    @State private var shown = false          // появление: подсказка выезжает, кнопка «вырастает»
+    @State private var bob = false            // стрелочки покачиваются вниз — к кнопке
+    @State private var glow = false           // кнопка мягко «дышит» свечением
+    @State private var shine: CGFloat = -1    // блик пробегает по кнопке
 
     private var s: Strings { Strings(lang: lang) }
+    private var hintFill: Color { theme.dark ? Color(white: 0.13) : Color.white }
 
     var body: some View {
-        VStack(spacing: 10) {
-            // подсказка над кнопкой, как в Telegram
+        VStack(spacing: 14) {
+            // подсказка над кнопкой (как в Telegram): «⌄⌄ Чтобы использовать бота, нажмите здесь»
             HStack(spacing: 10) {
-                Image(systemName: "chevron.down.2").font(.system(size: 15, weight: .semibold))
-                    .offset(y: hint ? 2 : -2)
+                VStack(spacing: -7) {
+                    Image(systemName: "chevron.down").opacity(bob ? 1 : 0.45)
+                    Image(systemName: "chevron.down").opacity(bob ? 0.45 : 1)
+                }
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(theme.accentColor)
+                .offset(y: bob ? 3 : -2)
                 Text(s.t("Чтобы использовать бота, нажмите здесь", "Tap here to use this bot"))
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1).minimumScaleFactor(0.8)
             }
-            .foregroundStyle(theme.text)
-            .padding(.horizontal, 16).frame(height: 46)
-            .background(theme.dark ? Color(white: 0.12) : Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.horizontal, 18).frame(height: 50)
+            .background(hintFill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(alignment: .bottom) {
-                BotHintTail().fill(theme.dark ? Color(white: 0.12) : Color.white)
-                    .frame(width: 16, height: 8).offset(y: 8)
+                BotHintTail().fill(hintFill).frame(width: 18, height: 9).offset(y: 8.5)
             }
-            .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { hint = true }
-            }
+            .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.12), radius: 12, y: 4)
+            .offset(y: shown ? (bob ? 2 : -2) : 24)
+            .opacity(shown ? 1 : 0)
+            .scaleEffect(shown ? 1 : 0.9, anchor: .bottom)
 
             Button {
                 Haptics.impact(.medium)
                 action()
             } label: {
                 Text(s.t("Старт", "Start"))
-                    .font(.system(size: 19, weight: .bold)).foregroundStyle(.white)
-                    .frame(maxWidth: .infinity).frame(height: 56)
-                    .background(theme.accent, in: Capsule())
-                    .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
-                    .shadow(color: theme.accentColor.opacity(0.45), radius: 12, y: 4)
+                    .font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 58)
+                    .background {
+                        ZStack {
+                            Capsule().fill(theme.accent)
+                            Capsule().fill(LinearGradient(colors: [.white.opacity(0.22), .clear], startPoint: .top, endPoint: .center))
+                            // блик: светлая полоса раз в несколько секунд пробегает слева направо
+                            GeometryReader { g in
+                                LinearGradient(colors: [.clear, .white.opacity(0.38), .clear], startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: g.size.width * 0.35)
+                                    .rotationEffect(.degrees(18))
+                                    .offset(x: shine * g.size.width * 1.4)
+                            }
+                            .clipShape(Capsule())
+                        }
+                    }
+                    .overlay(Capsule().stroke(.white.opacity(0.28), lineWidth: 1))
+                    .shadow(color: theme.accentColor.opacity(glow ? 0.65 : 0.3), radius: glow ? 20 : 10, y: 5)
+                    .scaleEffect(glow ? 1.012 : 1)
             }
             .buttonStyle(PressStyle())
+            .scaleEffect(shown ? 1 : 0.85)
+            .opacity(shown ? 1 : 0)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8).padding(.bottom, 12)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
+                                removal: .scale(scale: 0.9).combined(with: .opacity)))
+        .onAppear {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.72).delay(0.15)) { shown = true }
+            withAnimation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true).delay(0.6)) { bob = true }
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true).delay(0.6)) { glow = true }
+        }
+        .task {
+            // блик каждые ~3 секунды, пока кнопка на экране (ушла — цикл останавливается сам)
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            while !Task.isCancelled {
+                shine = -1
+                withAnimation(.easeInOut(duration: 1.1)) { shine = 1 }
+                try? await Task.sleep(nanoseconds: 3_200_000_000)
+            }
+        }
     }
 }
 
