@@ -294,9 +294,12 @@ struct ChatsListView: View {
             .transition(.move(edge: .top).combined(with: .opacity))
 
             if filtersShown || folder != .all {
+                // плавно: фильтры не «выпрыгивают», а проявляются сверху вниз с лёгким размытием
                 FolderTiles(folder: $folder, counts: folderCounts)
                     .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.94, anchor: .top)).combined(with: .offset(y: -10)),
+                        removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .top))))
             }
             }
 
@@ -373,11 +376,12 @@ struct ChatsListView: View {
                             // потянули список вниз (выше поиска) — сверху выезжают фильтры; пролистали вниз — прячутся
                             .background(GeometryReader { g in
                                 Color.clear.onChange(of: g.frame(in: .named("chatsScroll")).minY) { _, y in
-                                    if y > 56, !filtersShown {
-                                        Haptics.impact(.light)
-                                        withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { filtersShown = true }
-                                    } else if y < -60, filtersShown, folder == .all {
-                                        withAnimation(.easeOut(duration: 0.25)) { filtersShown = false }
+                                    if y > 44, !filtersShown {
+                                        Haptics.impact(.soft)
+                                        withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { filtersShown = true }
+                                    } else if y < -6, filtersShown, folder == .all {
+                                        // чуть пролистали вниз — фильтры сразу и мягко уходят
+                                        withAnimation(.easeInOut(duration: 0.28)) { filtersShown = false }
                                     }
                                 }
                             })
