@@ -406,6 +406,8 @@ struct StickyProfileBar: View {
     let name: String
     let subtitle: String
     let color: Int?
+    /// Аватарка сжимается в маленький кружок рядом с ником (как в Telegram)
+    var avatarID: String? = nil
     var height: CGFloat = 54
     var startAt: CGFloat = 92
     @Environment(\.theme) private var theme
@@ -417,14 +419,19 @@ struct StickyProfileBar: View {
         let appear = Double(max(0, min(1, (offset - startAt) / 30)))
         ZStack {
             ProfileBarBackground(color: color, height: height + topInset)
-            VStack(spacing: 1) {
-                Text(name).font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(ProfilePalette.ink(color, fallback: theme.text)).lineLimit(1)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: 12))
-                        .foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary)).lineLimit(1)
+            HStack(spacing: 10) {
+                AvatarView(name: name, size: 34, avatarID: avatarID).clipShape(Circle())
+                    .scaleEffect(0.6 + 0.4 * appear)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(ProfilePalette.ink(color, fallback: theme.text)).lineLimit(1)
+                    if !subtitle.isEmpty {
+                        Text(subtitle).font(.system(size: 12))
+                            .foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary)).lineLimit(1)
+                    }
                 }
             }
+            .offset(y: CGFloat(1 - appear) * 8)              // въезжает снизу, пока большая шапка уходит вверх
             .padding(.horizontal, 60)
             .padding(.top, topInset)
         }

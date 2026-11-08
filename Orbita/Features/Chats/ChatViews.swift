@@ -289,6 +289,13 @@ struct ChatsListView: View {
                         }
                         globalResults
                         messageResults
+                        if searchingNow && filtered.filter({ $0.id != session.serverID }).isEmpty
+                            && userHits.isEmpty && groupHits.isEmpty && messageHits.isEmpty {
+                            EmptyStateView(icon: "magnifyingglass", title: s.t("Ничего не найдено", "No results"),
+                                           subtitle: s.t("Попробуйте другое имя, @username или слово из переписки.",
+                                                         "Try another name, @username or a word from a chat."))
+                                .padding(.top, 60)
+                        }
                     }
                     .padding(.bottom, 90)
                     // чат с новым сообщением плавно переезжает наверх, остальные мягко сдвигаются (а не перескакивают)
@@ -645,11 +652,10 @@ struct ArchivedChatsView: View {
             .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 10)
 
             if chats.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "archivebox").font(.system(size: 34, weight: .light)).foregroundStyle(theme.textSecondary)
-                    Text(s.t("Архив пуст", "Archive is empty")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(icon: "archivebox", title: s.t("Архив пуст", "Archive is empty"),
+                               subtitle: s.t("Смахните переписку вправо, чтобы убрать её сюда.",
+                                             "Swipe a chat right to move it here."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {

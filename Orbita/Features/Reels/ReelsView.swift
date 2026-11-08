@@ -784,17 +784,34 @@ struct ReelsView: View {
     private var emptyState: some View {
         VStack(spacing: 14) {
             if model.loading || !model.loaded {
-                ProgressView().tint(.white).scaleEffect(1.3)
+                // заглушка шортса: серый кадр с бликом, справа — кружки кнопок, снизу — строки подписи
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 0).fill(Color.white.opacity(0.05))
+                    HStack(alignment: .bottom) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) { Circle().fill(Color.white.opacity(0.12)).frame(width: 36, height: 36)
+                                RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)).frame(width: 120, height: 14) }
+                            RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.1)).frame(width: 220, height: 12)
+                            RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.1)).frame(width: 160, height: 12)
+                        }
+                        Spacer()
+                        VStack(spacing: 22) { ForEach(0..<4, id: \.self) { _ in Circle().fill(Color.white.opacity(0.12)).frame(width: 40, height: 40) } }
+                    }
+                    .padding(.horizontal, 16).padding(.bottom, 120)
+                }
+                .shimmer()
+                .ignoresSafeArea()
             } else {
-                Image(systemName: "play.rectangle.on.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(.white.opacity(0.7))
-                Text(model.failed ?? (model.kind == .friends
+                EmptyStateView(icon: model.kind == .following ? "person.crop.rectangle.stack" : "play.rectangle.on.rectangle",
+                               title: model.failed ?? (model.kind == .friends
                                        ? s.t("У друзей пока нет коротких видео", "Your friends have no short videos yet")
                                        : model.kind == .following
+                                       ? s.t("Пока пусто", "Nothing here yet")
+                                       : s.t("Пока нет коротких видео", "No short videos yet")),
+                               subtitle: model.failed == nil && model.kind == .following
                                        ? s.t("Подпишитесь на авторов — их новые шортсы появятся здесь",
-                                             "Follow creators — their new shorts will show up here")
-                                       : s.t("Пока нет коротких видео", "No short videos yet")))
-                    .font(.system(size: 16, weight: .medium)).foregroundStyle(.white.opacity(0.85))
-                    .multilineTextAlignment(.center).padding(.horizontal, 40)
+                                             "Follow creators — their new shorts will show up here") : nil,
+                               onDark: true)
                 Button { onCompose() } label: {
                     Text(s.t("Опубликовать видео", "Post a video"))
                         .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)

@@ -449,16 +449,13 @@ struct UserPageView: View {
         if avail.isEmpty {
             Group {
                 if mediaKnown {
-                    VStack(spacing: 10) {
-                        Image(systemName: "photo.on.rectangle.angled").font(.system(size: 30)).foregroundStyle(theme.textTertiary)
-                        Text(s.t("Публикаций пока нет", "No posts yet"))
-                            .font(.system(size: 15)).foregroundStyle(theme.textSecondary)
-                    }
+                    EmptyStateView(icon: "photo.on.rectangle.angled", title: s.t("Публикаций пока нет", "No posts yet"))
+                        .padding(.vertical, 40)
                 } else {
-                    ProgressView()
+                    GridSkeleton(rows: 2).padding(.horizontal, 16)            // медиа ещё грузятся — серая сетка с бликом
                 }
             }
-            .frame(maxWidth: .infinity).padding(.vertical, 40)
+            .frame(maxWidth: .infinity)
         } else {
             let current = avail.contains(mediaFilter) ? mediaFilter : avail[0]
             VStack(spacing: 12) {
@@ -545,7 +542,7 @@ struct UserPageView: View {
                     .padding(.top, 80)
                     .padding(.horizontal, 30)
             } else {
-                ProgressView().padding(.top, 80)
+                profileSkeleton.padding(.top, 40)
             }
         }
         .coordinateSpace(name: "userPageBody")
@@ -584,7 +581,8 @@ struct UserPageView: View {
         }
         .overlay(alignment: .top) {
             if let profile = model.profile, !profile.blockedMe, stage == 0, namesReady {
-                StickyProfileBar(name: profile.displayName, subtitle: statusLine(profile), color: profile.styleColor, tracker: tracker)
+                StickyProfileBar(name: profile.displayName, subtitle: statusLine(profile), color: profile.styleColor,
+                                 avatarID: profile.avatarID, tracker: tracker)
             }
         }
         .task {
@@ -923,13 +921,14 @@ struct UserPageView: View {
     @ViewBuilder
     private func actions(_ profile: UserProfile) -> some View {
         if model.isMe {
-            HStack(spacing: 10) {
-                pill(icon: "square.and.pencil", title: s.newPost) { showComposer = true }
-                pill(icon: "music.note.list", title: s.playlistTitle) { showPlaylist = true }
+            // свой профиль — те же стеклянные плитки, что «Чат / Звонок / Видео / Ещё» у чужого
+            HStack(spacing: 8) {
+                tile(icon: "square.and.pencil", title: s.newPost) { showComposer = true }
+                tile(icon: "music.note.list", title: s.playlistTitle) { showPlaylist = true }
             }
             .padding(.horizontal, 16)
         } else if profile.blockedByMe {
-            pill(icon: "hand.raised.slash", title: s.unblockUser) { Task { await model.setBlocked(false) } }
+            halfButton(icon: "hand.raised.slash", title: s.unblockUser, filled: false) { Task { await model.setBlocked(false) } }
                 .padding(.horizontal, 16)
         } else {
             VStack(spacing: 12) {
@@ -1042,7 +1041,9 @@ struct UserPageView: View {
     private func tileLabel(icon: String, title: String) -> some View {
         VStack(spacing: 6) {
             Image(systemName: icon).font(.system(size: 21, weight: .regular)).foregroundStyle(theme.accentColor)
-            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accentColor).lineLimit(1)
+                .frame(height: 24)                                    // разные значки — одна высота строки
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.accentColor)
+                .lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity).frame(height: 66)
         .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
@@ -1103,6 +1104,21 @@ struct UserPageView: View {
         guard BirthdayCalc.isToday(b) else { return text }
         let age = BirthdayCalc.age(b).map { s.t(" · исполняется \($0)", " · turns \($0)") } ?? ""
         return s.t("Сегодня", "Today") + age + "\n" + text
+    }
+
+    /// Профиль ещё грузится: аватарка, имя, плитки и карточка — серыми заглушками с бликом
+    private var profileSkeleton: some View {
+        VStack(spacing: 16) {
+            Circle().fill(theme.text.opacity(theme.dark ? 0.09 : 0.07)).frame(width: 118, height: 118)
+            SkeletonBlock(height: 20, width: 160)
+            SkeletonBlock(height: 12, width: 100)
+            HStack(spacing: 8) { ForEach(0..<4, id: \.self) { _ in SkeletonBlock(height: 66, radius: 16) } }
+                .padding(.horizontal, 16)
+            SkeletonBlock(height: 120, radius: 18).padding(.horizontal, 16)
+            GridSkeleton(rows: 2).padding(.horizontal, 16)
+        }
+        .shimmer()
+        .frame(maxWidth: .infinity)
     }
 
     /// Кнопки под данными профиля (собираются вне @ViewBuilder: там нельзя изменять массив)
