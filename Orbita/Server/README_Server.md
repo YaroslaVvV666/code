@@ -332,3 +332,12 @@ while True:
 `POST /v1/messages/<id>/once-open` — ровно один раз (повторно — 410). После прослушивания приложение зовёт
 `POST /v1/messages/<id>/once-done` — в личке файл удаляется совсем, у отправителя голосовое помечается `consumed`
 (в группе — счётчик `listened`). Переслать такое сообщение нельзя. Проверка: `python3 tests/test_once_voice.py`.
+
+## Поиск по шортсам: вкладки, подфильтры, статистика
+
+- `GET /v1/reels/search?q=&tab=best|video|photo&filter=all|unseen|seen|recent` — «Лучшее» ранжирует по совпадению и популярности,
+  первый ролик помечен `top: true` («Топовое в поиске»). «Просмотрено» — только ролики, открытые на весь экран.
+- `GET /v1/reels/search/extra?kind=people|music|tags&q=` — вкладки «Люди», «Музыка», «Хэштеги» («Места» ищет телефон через Карты Apple).
+- `POST /v1/reels/search/track {"q", "events": [{"post_id", "kind": "shown"|"autoplay"|"open"}]}` — для статистики автора:
+  в `GET /v1/posts/<id>/stats` поле `search` (увидели, проигрывалось само, открыли, доля открытий, запросы).
+  Проверка: `python3 tests/test_reel_search_tabs.py`.

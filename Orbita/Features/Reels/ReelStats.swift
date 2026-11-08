@@ -21,6 +21,17 @@ struct ReelStatsDTO: Decodable {
     let followersWeek: Int
     let followersFromVideo: Int
     let daily: [Int]
+    let search: SearchDTO?
+
+    /// Из поиска: сколько человек увидели ролик в результатах, у скольких он сам проигрывался, сколько открыли и по каким запросам
+    struct SearchDTO: Decodable {
+        struct Query: Decodable, Hashable { let q: String; let opens: Int; let shown: Int }
+        let shown: Int
+        let autoplay: Int
+        let opened: Int
+        let openRate: Double
+        let queries: [Query]
+    }
 }
 
 extension ExtrasAPI {
@@ -83,6 +94,8 @@ struct ReelStatsSheet: View {
                         }
                         .padding(.horizontal, 16)
 
+                        if let sr = st.search { searchBlock(sr) }
+
                         Text(s.t("Просмотры, удержание, время и подписки с видео считаются с момента выхода этого обновления. В «подписались с этого видео» входят подписки, сделанные в шортсах (кнопка «+» у аватарки); подписки с профиля сюда не попадают.",
                                  "Views, retention, watch time and follows are counted since this update. “Followed from this video” counts follows made in Shorts (the “+” by the avatar); follows from a profile aren't included."))
                             .font(.system(size: 12)).foregroundStyle(theme.textTertiary).multilineTextAlignment(.center)
@@ -101,6 +114,61 @@ struct ReelStatsSheet: View {
         .task {
             if let st = await session.extras.reelStats(postID: postID) { stats = st } else { failed = true }
         }
+    }
+
+    /// «Из поиска»: показали в результатах → проигрывалось само → открыли на весь экран, и запросы, по которым находят
+    private func searchBlock(_ sr: ReelStatsDTO.SearchDTO) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.accentColor)
+                Text(s.t("Из поиска", "From search")).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
+            }
+            HStack(spacing: 8) {
+                funnel(num(sr.shown), s.t("увидели в поиске", "saw in search"))
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.textTertiary)
+                funnel(num(sr.autoplay), s.t("проигрывалось само", "autoplayed"))
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.textTertiary)
+                funnel(num(sr.opened), s.t("открыли", "opened") + " · " + percent(sr.openRate))
+            }
+            if !sr.queries.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(s.t("По каким запросам находят", "Top search terms")).font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+                    let peak = max(1, sr.queries.map { max($0.opens, $0.shown) }.max() ?? 1)
+                    ForEach(sr.queries, id: \.self) { item in
+                        HStack(spacing: 8) {
+                            Text(item.q).font(.system(size: 14, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                            Spacer(minLength: 6)
+                            Text(s.t("открыли \(item.opens) из \(item.shown)", "\(item.opens) of \(item.shown) opened"))
+                                .font(.system(size: 12).monospacedDigit()).foregroundStyle(theme.textSecondary)
+                        }
+                        GeometryReader { g in
+                            Capsule().fill(theme.accentColor.opacity(0.18))
+                                .overlay(alignment: .leading) {
+                                    Capsule().fill(theme.accentColor)
+                                        .frame(width: g.size.width * CGFloat(max(item.opens, 0)) / CGFloat(peak))
+                                }
+                        }
+                        .frame(height: 5)
+                    }
+                }
+            }
+            Text(s.t("Просмотр засчитывается, только если ролик открыли на весь экран; автопроигрывание в результатах — отдельно.",
+                     "A view counts only when the video was opened full screen; autoplay in results is counted separately."))
+                .font(.system(size: 11)).foregroundStyle(theme.textTertiary)
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.textTertiary.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 16)
+    }
+
+    private func funnel(_ value: String, _ label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value).font(.system(size: 20, weight: .bold).monospacedDigit()).foregroundStyle(theme.text)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(.system(size: 11)).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center)
+                .lineLimit(2).minimumScaleFactor(0.85)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func chart(_ days: [Int]) -> some View {

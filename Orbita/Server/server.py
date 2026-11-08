@@ -3357,6 +3357,7 @@ def post_stats(req, me, pid):
                                    "WHERE fs.post_id = ?", (pid,))["c"],
         "daily": [days.get(today - i, 0) for i in range(6, -1, -1)],
         "since": st["since"] if st else 0,
+        "search": search_stats(pid),
     })
 
 
@@ -3389,28 +3390,150 @@ def reel_search(req, me):
     uid = me["id"]
     tokens = reel_tokens(query)
     phrase = query.lower().replace("ё", "е").lstrip("#@")
+    # вкладка: best — всё, лучшее сверху; video — только видео; photo — фото и коллажи.
+    # подфильтр «Лучшего»: all / unseen / seen (смотрел на весь экран) / recent (свежие сверху)
+    tab = params.get("tab", "best")
+    flt = params.get("filter", "all")
+    kind_sql = {"video": "m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)",
+                "photo": "(m.kind = 'image' OR m.live = 1) AND ? > 0"}.get(tab)
     rows = q("SELECT p.* FROM posts p JOIN post_media m ON m.post_id = p.id AND m.position = 0 "
-             "WHERE p.reel = 1 AND p.repost_of IS NULL AND ((m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)) OR m.kind = 'image' OR m.live = 1) "
+             "WHERE p.reel = 1 AND p.repost_of IS NULL AND (" + (kind_sql or "(m.kind = 'video' AND (m.duration IS NULL OR m.duration <= ?)) OR m.kind = 'image' OR m.live = 1") + ") "
              "AND p.author NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?) "
              "AND p.author NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) "
              "AND p.id NOT IN (SELECT post_id FROM post_reports WHERE reporter = ?) "
              "ORDER BY p.created_at DESC LIMIT 600", (MAX_REEL_SECONDS, uid, uid, uid))
+    seen_ids = {r["post_id"] for r in q("SELECT post_id FROM post_viewers WHERE user_id = ?", (uid,))} if flt in ("seen", "unseen") else set()
     hits = []
     for p in rows:
         h = reel_haystack(p)
-        if all(t in h for t in tokens):
-            hits.append((0 if phrase in h else 1, p))
-    hits.sort(key=lambda x: x[0])            # точное совпадение фразы — выше, внутри — свежие сверху (порядок сохраняется)
+        if not all(t in h for t in tokens):
+            continue
+        if flt == "seen" and p["id"] not in seen_ids or flt == "unseen" and p["id"] in seen_ids:
+            continue
+        hits.append((0 if phrase in h else 1, p))
+    if flt == "recent":
+        hits.sort(key=lambda x: -x[1]["created_at"])
+    elif tab == "best":
+        # «Лучшее»: совпадение фразы, потом популярность (лайки и просмотры), свежесть немного помогает
+        ids = [p["id"] for _, p in hits[:400]]
+        pop = {}
+        if ids:
+            marks = ",".join("?" * len(ids))
+            for r in q("SELECT post_id, COUNT(*) c FROM likes WHERE post_id IN (%s) GROUP BY post_id" % marks, tuple(ids)):
+                pop[r["post_id"]] = pop.get(r["post_id"], 0) + r["c"] * 3
+            for r in q("SELECT post_id, views FROM post_stats WHERE post_id IN (%s)" % marks, tuple(ids)):
+                pop[r["post_id"]] = pop.get(r["post_id"], 0) + r["views"]
+        now = time.time()
+        hits.sort(key=lambda x: (x[0], -((pop.get(x[1]["id"], 0) + (x[1]["likes_seed"] or 0) * 3) / (1 + (now - x[1]["created_at"]) / 86400 / 30))))
+    else:
+        hits.sort(key=lambda x: x[0])        # точное совпадение фразы — выше, внутри — свежие сверху (порядок сохраняется)
     page = [p for _, p in hits[offset:offset + limit]]
     if offset == 0 and hits:
         run("INSERT INTO reel_queries(q, user_id, created_at) VALUES (?,?,?)", (phrase[:60], uid, time.time()))
     if offset == 0:
         taste_search(uid, query)                 # что ищет — то и интересно
     out = []
-    for p, j in zip(page, posts_json(page, uid)):
+    for i, (p, j) in enumerate(zip(page, posts_json(page, uid))):
         j["author_state"] = "me" if p["author"] == uid else ("following" if is_following(uid, p["author"]) else "none")
+        if tab == "best" and flt == "all" and offset == 0 and i == 0:
+            j["top"] = True                      # «Топовое в поиске»
         out.append(j)
     req.send_json(200, {"reels": out, "total": len(hits), "more": offset + limit < len(hits)})
+
+
+@route("GET", r"/v1/reels/search/extra")
+def reel_search_extra(req, me):
+    """Вкладки поиска «Люди», «Музыка», «Хэштеги»"""
+    params = req.query()
+    query = re.sub(r"\s+", " ", params.get("q", "")).strip()[:80]
+    kind = params.get("kind", "")
+    if len(query) < 2 or kind not in ("people", "music", "tags"):
+        raise ApiError(400, "bad_value")
+    if moderation.query_blocked(query):
+        raise ApiError(422, "query_blocked")
+    uid = me["id"]
+    tokens = reel_tokens(query)
+    phrase = query.lower().replace("ё", "е").lstrip("#@")
+    if kind == "people":
+        out, seen = [], set()
+        cands = [r["author"] for r in q("SELECT author, MAX(created_at) t FROM posts WHERE reel = 1 GROUP BY author ORDER BY t DESC LIMIT 1500")]
+        cands += [r["contact_id"] for r in q("SELECT contact_id FROM contacts WHERE user_id = ?", (uid,))]
+        for cid in cands:
+            if cid in seen or cid == uid or either_blocked(uid, cid):
+                continue
+            seen.add(cid)
+            b = user_brief(cid, uid)
+            h = ((b.get("name") or "") + " " + (b.get("username") or "")).lower().replace("ё", "е")
+            if all(t in h for t in tokens):
+                out.append((0 if phrase in h else 1, -followers_count(cid), b))
+        out.sort(key=lambda x: (x[0], x[1]))
+        people = []
+        for _, neg, b in out[:30]:
+            people.append({**b, "followers": -neg, "following": is_following(uid, b["id"]),
+                           "reels": q1("SELECT COUNT(*) c FROM posts WHERE author = ? AND reel = 1", (b["id"],))["c"]})
+        req.send_json(200, {"people": people})
+        return
+    rows = q("SELECT * FROM posts WHERE reel = 1 AND repost_of IS NULL ORDER BY created_at DESC LIMIT 1500")
+    if kind == "music":
+        tracks = {}
+        for p in rows:
+            m = music_of(p)
+            if not m or not p["music_media"]:
+                continue
+            h = ((m.get("title") or "") + " " + (m.get("artist") or "")).lower().replace("ё", "е")
+            if not all(t in h for t in tokens):
+                continue
+            key = p["music_key"] or p["music_media"]
+            t = tracks.setdefault(key, {"media_id": p["music_media"], "title": m.get("title") or "", "artist": m.get("artist") or "",
+                                        "reels": 0, "duration": m.get("duration") or 0})
+            t["reels"] += 1
+        req.send_json(200, {"music": sorted(tracks.values(), key=lambda t: -t["reels"])[:30]})
+        return
+    counts = {}
+    for p in rows:
+        text = dec(p["author"], "posts", COL["post_text"], p["id"], p["text_enc"]) or ""
+        for tag in set(re.findall(r"#(\w{2,40})", text.lower().replace("ё", "е"))):
+            if all(t in tag for t in tokens) or phrase.replace(" ", "") in tag:
+                counts[tag] = counts.get(tag, 0) + 1
+    tags = sorted(counts.items(), key=lambda x: (-x[1], len(x[0])))[:40]
+    req.send_json(200, {"tags": [{"tag": t, "reels": n} for t, n in tags]})
+
+
+# ---- поиск для автора: сколько человек увидели ролик в поиске, у скольких он сам проигрывался, сколько открыли и по каким запросам
+DB.execute("CREATE TABLE IF NOT EXISTS search_events(post_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, "
+           "q TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(post_id, user_id, kind, q))")
+
+
+@route("POST", r"/v1/reels/search/track")
+def reel_search_track(req, me):
+    d = req.body_json()
+    query = re.sub(r"\s+", " ", str(d.get("q") or "")).strip().lower()[:60]
+    events = d.get("events") or []
+    if not query or not isinstance(events, list):
+        raise ApiError(400, "bad_value")
+    now = time.time()
+    for e in events[:60]:
+        if not isinstance(e, dict) or e.get("kind") not in ("shown", "autoplay", "open"):
+            continue
+        pid = str(e.get("post_id") or "")
+        if not q1("SELECT 1 FROM posts WHERE id = ? AND reel = 1", (pid,)):
+            continue
+        try:
+            run("INSERT INTO search_events(post_id, user_id, kind, q, at) VALUES (?,?,?,?,?)", (pid, me["id"], e["kind"], query, now))
+        except INTEGRITY_ERRORS:
+            pass
+    req.send_json(200, {"ok": True})
+
+
+def search_stats(pid):
+    def users(kind):
+        return q1("SELECT COUNT(DISTINCT user_id) c FROM search_events WHERE post_id = ? AND kind = ?", (pid, kind))["c"]
+    shown, auto, opened = users("shown"), users("autoplay"), users("open")
+    queries = [{"q": r["q"], "opens": r["o"], "shown": r["s"]} for r in q(
+        "SELECT q, SUM(CASE WHEN kind = 'open' THEN 1 ELSE 0 END) o, SUM(CASE WHEN kind = 'shown' THEN 1 ELSE 0 END) s FROM search_events WHERE post_id = ? GROUP BY q "
+        "ORDER BY o DESC, s DESC LIMIT 10", (pid,))]
+    return {"shown": shown, "autoplay": auto, "opened": opened,
+            "open_rate": round(opened / shown, 3) if shown else 0, "queries": queries}
 
 
 @route("GET", r"/v1/reels")

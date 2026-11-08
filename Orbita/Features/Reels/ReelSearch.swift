@@ -55,6 +55,8 @@ struct ReelSearchView: View {
     @State private var submitted = ""
     @State private var phase: Phase = .idle
     @State private var results: [Reel] = []
+    @State private var best: [SearchReel] = []        // первая страница «Лучшего» (с пометкой «Топовое в поиске»)
+    @State private var openedList: [Reel] = []        // откуда открыли ролик: листается эта вкладка
     @State private var more = false
     @State private var loadingMore = false
     @State private var popular: [String] = []
@@ -82,7 +84,7 @@ struct ReelSearchView: View {
             if phase == .idle { focused = true }
         }
         .fullScreenCover(item: $opened) { reel in
-            MusicShortsCover(reels: results, startID: reel.id, onClose: { opened = nil })
+            MusicShortsCover(reels: openedList.isEmpty ? results : openedList, startID: reel.id, onClose: { opened = nil })
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
@@ -133,7 +135,15 @@ struct ReelSearchView: View {
         switch phase {
         case .idle: suggestions
         case .loading: VStack { ProgressView().tint(.white).padding(.top, 60); Spacer() }
-        case .results: grid
+        case .results:
+            ReelSearchResults(query: submitted, initialBest: best, initialMore: more, suspended: opened != nil,
+                              onOpen: { list, id in
+                                  focused = false
+                                  openedList = list
+                                  opened = list.first { $0.id == id }
+                              },
+                              onSearch: { q in text = q; search(q) })
+                .id(submitted)
         case .empty:
             message(icon: "magnifyingglass", title: s.t("Ничего не найдено", "Nothing found"),
                     text: s.t("По запросу «\(submitted)» видео нет. Попробуйте другие слова.", "No videos for “\(submitted)”. Try different words."))
@@ -271,11 +281,14 @@ struct ReelSearchView: View {
         results = []
         Task {
             do {
-                let r = try await session.extras.reelSearch(q, offset: 0)
+                let r = try await session.extras.reelSearchTab(q, tab: .best, filter: .all, offset: 0)
                 guard submitted == q else { return }
-                results = r.reels
+                best = r.items
+                results = r.items.map(\.reel)
                 more = r.more
-                if r.reels.isEmpty { phase = .empty } else { phase = .results; remember(q) }
+                // вкладки показываем всегда: роликов может не быть, а люди, звуки или хэштеги — найдутся
+                phase = .results
+                remember(q)
             } catch ReelSearchError.blocked {
                 guard submitted == q else { return }
                 Haptics.notify(.warning)
