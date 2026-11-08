@@ -8199,11 +8199,12 @@ def search_messages(req, me):
     """Поиск слова по тексту всех переписок (личные и группы/каналы)"""
     uid = me["id"]
     needle = (req.query().get("q") or "").strip().lower()
+    scope = req.query().get("scope", "all")             # all | personal | groups | channels — «Из всех чатов»
     if len(needle) < 2:
         return req.send_json(200, {"hits": []})
     hits = []
     rows = q("SELECT * FROM messages WHERE ((sender = ?1 AND del_sender = 0) OR (recipient = ?1 AND del_recipient = 0)) "
-             "ORDER BY created_at DESC LIMIT 4000", (uid,))
+             "ORDER BY created_at DESC LIMIT 4000", (uid,)) if scope in ("all", "personal") else []
     users = {}
     for m in rows:
         if len(hits) >= 40:
@@ -8219,9 +8220,11 @@ def search_messages(req, me):
             users[peer] = user_brief(peer, uid)
         hits.append({"peer": users[peer], "id": m["id"], "text": text, "mine": m["sender"] == uid,
                      "created_at": m["created_at"]})
-    for mem in q("SELECT * FROM group_members WHERE user_id = ?", (uid,)):
+    for mem in (q("SELECT * FROM group_members WHERE user_id = ?", (uid,)) if scope != "personal" else []):
         g = group_row(mem["group_id"])
         if not g:
+            continue
+        if scope == "groups" and g["type"] == "channel" or scope == "channels" and g["type"] != "channel":
             continue
         since = history_since(g, mem)
         grows = q("SELECT * FROM group_messages WHERE group_id = ? AND created_at >= ? AND id NOT IN "
@@ -8238,7 +8241,9 @@ def search_messages(req, me):
             if needle in text.lower():
                 found += 1
                 hits.append({"peer": group_peer(g), "id": m["id"], "text": text, "mine": m["sender"] == uid,
-                             "created_at": m["created_at"]})
+                             "created_at": m["created_at"],
+                             # кто написал (в группе): строка под названием чата, как в Telegram
+                             **({"sender": user_brief(m["sender"], uid)["name"]} if g["type"] != "channel" and m["sender"] != uid else {})})
     hits.sort(key=lambda h: h["created_at"], reverse=True)
     req.send_json(200, {"hits": hits[:60]})
 

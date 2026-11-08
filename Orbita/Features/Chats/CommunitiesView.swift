@@ -407,24 +407,49 @@ struct MessageHitRow: View {
     @Environment(\.lang) private var lang
 
     var body: some View {
+        // как в Telegram: аватар чата, название и время, ниже — кто написал, ещё ниже — текст, найденное слово выделено
         Button(action: onOpen) {
-            HStack(spacing: 12) {
-                AvatarView(name: hit.peer.name, size: 48, avatarID: hit.peer.avatarID).clipShape(Circle())
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(hit.peer.name).font(.system(size: 16, weight: .semibold))
+            HStack(alignment: .top, spacing: 12) {
+                AvatarView(name: hit.peer.name, size: 58, avatarID: hit.peer.avatarID).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(hit.peer.name).font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(theme.text).lineLimit(1)
                         Spacer(minLength: 6)
-                        Text(hit.date, format: .dateTime.day().month(.abbreviated))
-                            .font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+                        Text(time).font(.system(size: 14).monospacedDigit()).foregroundStyle(theme.textTertiary)
                     }
-                    Text((hit.mine ? Strings(lang: lang).t("Вы: ", "You: ") : "") + snippet)
-                        .font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(2)
+                    if let who = hit.mine ? Strings(lang: lang).t("Вы", "You") : hit.sender {
+                        Text(who).font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                    }
+                    highlighted
+                        .font(.system(size: 15)).lineLimit(2)
                 }
             }
-            .padding(.horizontal, 16).padding(.vertical, 7).contentShape(Rectangle())
+            .padding(.horizontal, 16).padding(.vertical, 9)
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 86) }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var time: String {
+        Calendar.current.isDateInToday(hit.date) ? FormatterCache.format(hit.date, "HH:mm")
+            : (Calendar.current.isDate(hit.date, equalTo: Date(), toGranularity: .year)
+               ? FormatterCache.format(hit.date, "d MMM") : FormatterCache.format(hit.date, "dd.MM.yy"))
+    }
+
+    /// Найденное слово — ярко и жирно, остальное приглушено
+    private var highlighted: Text {
+        let text = snippet
+        let q = query.trimmingCharacters(in: .whitespaces)
+        var out = Text("")
+        var rest = Substring(text)
+        while !q.isEmpty, let r = rest.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) {
+            out = out + Text(String(rest[rest.startIndex..<r.lowerBound])).foregroundColor(theme.textSecondary)
+                + Text(String(rest[r])).foregroundColor(theme.text).bold()
+            rest = rest[r.upperBound...]
+        }
+        return out + Text(String(rest)).foregroundColor(theme.textSecondary)
     }
 
     /// Обрезаем длинный текст вокруг найденного слова

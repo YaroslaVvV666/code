@@ -773,6 +773,8 @@ protocol MessengerRepository: Sendable {
     func dismissNotices(ids: [String]) async throws
     func publicGroups(query: String, type: String?) async throws -> [GroupPreview]
     func searchMessages(query: String) async throws -> [MessageHit]
+    /// scope: all | personal | groups | channels
+    func searchMessages(query: String, scope: String) async throws -> [MessageHit]
     func groupPreview(code: String) async throws -> GroupPreview
     func joinGroup(code: String) async throws -> GroupInfo
     func joinGroup(id: String) async throws -> GroupInfo
@@ -784,6 +786,7 @@ protocol MessengerRepository: Sendable {
 extension MessengerRepository {
     func savedStickers() -> [StickerPack]? { nil }
     func searchMessages(query: String) async throws -> [MessageHit] { [] }
+    func searchMessages(query: String, scope: String) async throws -> [MessageHit] { try await searchMessages(query: query) }
 
     func thread(peerID: String) async throws -> ChatThread { try await thread(peerID: peerID, limit: 100, peek: false) }
     func thread(peerID: String, limit: Int) async throws -> ChatThread { try await thread(peerID: peerID, limit: limit, peek: false) }
@@ -849,6 +852,7 @@ private struct MessageHitDTO: Decodable {
     let text: String
     let mine: Bool
     let createdAt: Double
+    let sender: String?
 }
 
 private struct MessageHitListDTO: Decodable { let hits: [MessageHitDTO] }
@@ -1929,10 +1933,14 @@ struct RemoteMessengerRepository: MessengerRepository {
     }
 
     func searchMessages(query: String) async throws -> [MessageHit] {
-        let data = try await api.request("GET", "/v1/search/messages", query: ["q": query])
+        try await searchMessages(query: query, scope: "all")
+    }
+
+    func searchMessages(query: String, scope: String) async throws -> [MessageHit] {
+        let data = try await api.request("GET", "/v1/search/messages", query: ["q": query, "scope": scope])
         return try decodeAPI(MessageHitListDTO.self, from: data).hits.map {
             MessageHit(id: $0.id, peer: $0.peer.model, text: $0.text, mine: $0.mine,
-                       date: Date(timeIntervalSince1970: $0.createdAt))
+                       date: Date(timeIntervalSince1970: $0.createdAt), sender: $0.sender)
         }
     }
 

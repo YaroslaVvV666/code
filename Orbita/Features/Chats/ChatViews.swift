@@ -69,6 +69,8 @@ struct ChatsListView: View {
     @State private var userHits: [ChatPeer] = []
     @State private var groupHits: [GroupPreview] = []
     @State private var messageHits: [MessageHit] = []
+    @State private var messageScope = "all"                // «Из всех чатов» / личные / группы / каналы
+    @State private var globalExpanded = false              // «Показать больше» в глобальном поиске
     @AppStorage("contacts.prompted") private var promptedImport = false
     @State private var birthdayProfile: String?           // именинник из строки «Сегодня день рождения»
     @State private var hubOpen = false                     // нажали на поиск: частые собеседники, недавние, всё присланное
@@ -146,7 +148,7 @@ struct ChatsListView: View {
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
         .onAppear { takePushRoute() }
         .onChange(of: push.openChat) { _, _ in takePushRoute() }
-        .task(id: query) { await globalSearch() }
+        .task(id: query + "|" + messageScope) { await globalSearch() }
         .sheet(isPresented: $showNew) {
             NewChatSheet(session: session) { route in
                 showNew = false
@@ -450,11 +452,42 @@ struct ChatsListView: View {
 
     @ViewBuilder
     private var messageResults: some View {
-        if !messageHits.isEmpty {
-            sectionTitle(s.t("СООБЩЕНИЯ", "MESSAGES"))
-            ForEach(messageHits) { hit in
-                MessageHitRow(hit: hit, query: query) { openChat = ChatRoute(peer: hit.peer) }
+        if searchingNow && query.trimmingCharacters(in: .whitespaces).count >= 2 && !query.hasPrefix("@")
+            && (!messageHits.isEmpty || messageScope != "all") {
+            HStack {
+                Text(s.t("СООБЩЕНИЯ", "MESSAGES")).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                Spacer()
+                Menu {
+                    Picker("", selection: $messageScope) {
+                        Text(s.t("Из всех чатов", "All chats")).tag("all")
+                        Text(s.t("Личные чаты", "Private chats")).tag("personal")
+                        Text(s.t("Группы", "Groups")).tag("groups")
+                        Text(s.t("Каналы", "Channels")).tag("channels")
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(scopeTitle).font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text)
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                    }
+                }
             }
+            .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 6)
+            if messageHits.isEmpty {
+                Text(s.t("Сообщений не найдено", "No messages found")).font(.system(size: 14)).foregroundStyle(theme.textTertiary)
+                    .padding(.vertical, 12)
+            }
+            ForEach(messageHits) { hit in
+                MessageHitRow(hit: hit, query: query) { openChat = ChatRoute(peer: hit.peer, focus: hit.id) }
+            }
+        }
+    }
+
+    private var scopeTitle: String {
+        switch messageScope {
+        case "personal": return s.t("Личные чаты", "Private chats")
+        case "groups": return s.t("Группы", "Groups")
+        case "channels": return s.t("Каналы", "Channels")
+        default: return s.t("Из всех чатов", "All chats")
         }
     }
 
@@ -470,11 +503,22 @@ struct ChatsListView: View {
     @ViewBuilder
     private var globalResults: some View {
         if !userHits.isEmpty || !groupHits.isEmpty {
-            Text(s.t("АККАУНТЫ И КАНАЛЫ", "ACCOUNTS AND CHANNELS"))
-                .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 4)
-            ForEach(userHits, id: \.id) { peer in
+            let total = userHits.count + groupHits.count
+            HStack {
+                Text(s.t("ГЛОБАЛЬНЫЙ ПОИСК", "GLOBAL SEARCH")).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.textSecondary)
+                Spacer()
+                if total > 3 {
+                    Button(globalExpanded ? s.t("Свернуть", "Show less") : s.t("Показать больше", "Show more")) {
+                        Haptics.select()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { globalExpanded.toggle() }
+                    }
+                    .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text)
+                }
+            }
+            .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 4)
+            let shownUsers = globalExpanded ? userHits : Array(userHits.prefix(3))
+            let shownGroups = globalExpanded ? groupHits : Array(groupHits.prefix(max(0, 3 - shownUsers.count)))
+            ForEach(shownUsers, id: \.id) { peer in
                 Button { openChat = ChatRoute(peer: peer) } label: {
                     HStack(spacing: 12) {
                         AvatarView(name: peer.name, size: 48, avatarID: peer.avatarID).clipShape(Circle())
@@ -489,7 +533,7 @@ struct ChatsListView: View {
                 }
                 .buttonStyle(.plain)
             }
-            ForEach(groupHits) { g in
+            ForEach(shownGroups) { g in
                 Button { openChat = ChatRoute(peer: ChatPeer(preview: g)) } label: {
                     HStack(spacing: 12) {
                         AvatarView(name: g.name, size: 48).clipShape(Circle())
@@ -499,8 +543,9 @@ struct ChatsListView: View {
                                     .font(.system(size: 11)).foregroundStyle(theme.textTertiary)
                                 Text(g.name).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
                             }
-                            Text("\(g.members) \(s.memberWord(channel: g.isChannel))" + (g.handle.map { " · @" + $0 } ?? ""))
-                                .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                            (Text(g.handle.map { "@" + $0 + ", " } ?? "").foregroundColor(theme.accentColor)
+                             + Text("\(g.members) \(s.memberWord(channel: g.isChannel))").foregroundColor(theme.textSecondary))
+                                .font(.system(size: 14)).lineLimit(1)
                         }
                         Spacer()
                     }
@@ -517,7 +562,7 @@ struct ChatsListView: View {
         if raw.count >= 2, !raw.hasPrefix("@") {
             try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
-            let hits = (try? await session.messengerRepo.searchMessages(query: raw)) ?? []
+            let hits = (try? await session.messengerRepo.searchMessages(query: raw, scope: messageScope)) ?? []
             if Task.isCancelled { return }
             messageHits = hits
         } else {
@@ -2012,15 +2057,17 @@ struct ChatScreen: View {
                 if model.loaded {
                     if topKey == nil, let first = list.first { topKey = first.id }       // предзагруженные сообщения: список на этом и стоит
                     seedUnread()
+                    if let f = route.focus {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { scrollTarget = f }
+                    } else if model.firstUnreadID != nil {
                     // чат открылся с предзагруженными сообщениями — к плашке «Новые сообщения», как и при обычной загрузке
-                    if model.firstUnreadID != nil {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("unreadStrip", anchor: .top) }
                     }
                 }
             }
             .onChange(of: model.items.count) { old, new in
                 // пришла более длинная история (предзагруженные 10 → 100): остаёмся внизу, а не у начала переписки
-                if new > old, !userDragged {
+                if new > old, !userDragged, route.focus == nil {
                     let id = model.firstUnreadID != nil && unreadIDs.isEmpty == false ? "unreadStrip" : "bottom"
                     let anchor: UnitPoint = id == "bottom" ? .bottom : .top
                     DispatchQueue.main.async { proxy.scrollTo(id, anchor: anchor) }
@@ -2040,6 +2087,11 @@ struct ChatScreen: View {
                     topKey = all[max(0, i - 5)].id          // первое непрочитанное должно быть в построенной части
                 }
                 seedUnread()
+                if ok, let f = route.focus {
+                    // открыли из поиска по сообщениям — сразу к найденному сообщению, с подсветкой
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { scrollTarget = f }
+                    return
+                }
                 guard ok, model.firstUnreadID != nil else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     proxy.scrollTo("unreadStrip", anchor: .top)

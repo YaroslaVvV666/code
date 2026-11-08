@@ -909,6 +909,8 @@ struct ChatRoute: Identifiable, Hashable {
     let peer: ChatPeer
     /// Тема группы-форума: открывается переписка только этой темы
     var topic: ForumTopicRef? = nil
+    /// Открыть сразу на этом сообщении (нашли поиском) — подсвечивается
+    var focus: String? = nil
     var id: String { peer.id + (topic.map { "#" + $0.id } ?? "") }
 }
 
@@ -920,4 +922,5 @@ struct MessageHit: Identifiable, Hashable {
     let text: String
     let mine: Bool
     let date: Date
+    var sender: String? = nil       // в группе — кто написал
 }

@@ -23,5 +23,12 @@ check("ссылки из всех чатов", "https://example.com/page" in url
 voice = (jbody(req("GET", "/v1/me/shared?kind=voice", ta)[1]) or {}).get("items", [])
 check("голосовые из всех чатов", voice and voice[0]["chat"]["id"] == b and voice[0]["attachment"]["media_id"] == mid, voice[:1])
 check("неверный вид — отказ", req("GET", "/v1/me/shared?kind=hack", ta)[0] == 400)
+import urllib.parse
+qq = urllib.parse.quote("привет")
+allh = (jbody(req("GET", "/v1/search/messages?q=%s" % qq, ta)[1]) or {}).get("hits", [])
+pers = (jbody(req("GET", "/v1/search/messages?q=%s&scope=personal" % qq, ta)[1]) or {}).get("hits", [])
+grp = (jbody(req("GET", "/v1/search/messages?q=%s&scope=groups" % qq, ta)[1]) or {}).get("hits", [])
+check("поиск слова в переписках", len(allh) >= 3 and all("привет" in h["text"] for h in allh), allh[:1])
+check("«Личные чаты» находят, «Группы» — нет", len(pers) == len(allh) and grp == [], (len(pers), len(grp)))
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)
