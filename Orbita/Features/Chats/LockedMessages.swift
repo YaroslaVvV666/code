@@ -133,7 +133,7 @@ struct LockedBubble: View {
                         }
                         .buttonStyle(PressStyle())
                         .disabled(checking)
-                        .modifier(ShakeEffect(amount: shake))
+                        .modifier(ShakeEffect(travel: 8, shakes: 4, animatableData: shake))
                         Button { route(place) } label: {
                             Image(systemName: "arrow.triangle.turn.up.right.diamond.fill").font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(textColor).frame(width: 36, height: 36)
@@ -210,17 +210,6 @@ struct LockedBubble: View {
         let item = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: place.lat, longitude: place.lon)))
         item.name = place.title
         item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking])
-    }
-}
-
-private struct ShakeEffect: GeometryEffect {
-    var amount: CGFloat
-    var animatableData: CGFloat {
-        get { amount }
-        set { amount = newValue }
-    }
-    func effectValue(size: CGSize) -> ProjectionTransform {
-        ProjectionTransform(CGAffineTransform(translationX: 8 * sin(amount * .pi * 4), y: 0))
     }
 }
 
