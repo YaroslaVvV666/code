@@ -264,7 +264,7 @@ struct SwipeActionsRow<Content: View>: View {
 
     private let pill: CGFloat = 62              // ширина капсулы
     private let gap: CGFloat = 8
-    private func span(_ n: Int) -> CGFloat { n == 0 ? 0 : CGFloat(n) * (pill + gap) + 12 }
+    private func span(_ n: Int) -> CGFloat { n == 0 ? 0 : CGFloat(n) * pill + CGFloat(n - 1) * gap + 22 }     // все капсулы полного размера + поля
     private var trailingFull: CGFloat { span(trailing.count) }
     private var leadingFull: CGFloat { span(leading.count) }
     private var fullAt: CGFloat { max(trailingFull + 50, width * 0.62) }
@@ -291,49 +291,64 @@ struct SwipeActionsRow<Content: View>: View {
         withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { openID = nil; side = 0; drag = 0 }
     }
 
-    private func capsule(_ a: Action, reveal: CGFloat, stretched: CGFloat? = nil) -> some View {
-        Button {
+    /// Капсула размером `size` (0…pill): маленькая, пока места мало, и растёт вместе с открывшимся местом
+    private func capsule(_ a: Action, size: CGFloat, stretched: CGFloat? = nil) -> some View {
+        let k = stretched != nil ? 1 : max(0, min(1, size / pill))
+        return Button {
             Haptics.impact(.light)
             close()
             a.run()
         } label: {
-            VStack(spacing: 3) {
+            VStack(spacing: 3 * k) {
                 ZStack(alignment: stretched != nil ? .leading : .center) {
                     Capsule().fill(a.tint)
                     Image(systemName: a.icon).font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
+                        .scaleEffect(max(0.3, k))
                         .padding(.leading, stretched != nil ? 22 : 0)
                 }
-                .frame(width: stretched ?? pill, height: 46)
+                .frame(width: stretched ?? size, height: 46 * max(k, 0.0001))
                 if !a.label.isEmpty {
                     Text(a.label).font(.system(size: 10, weight: .medium)).foregroundStyle(theme.textSecondary)
                         .lineLimit(1).minimumScaleFactor(0.7).frame(width: pill + 6)
-                        .opacity(stretched == nil ? 1 : 0)
+                        .frame(height: 13 * k)
+                        .opacity(stretched == nil ? Double(max(0, (k - 0.75) * 4)) : 0)
                 }
             }
-            .scaleEffect(0.35 + 0.65 * reveal)
-            .opacity(Double(reveal))
+            .opacity(Double(min(1, k * 2.5)))
         }
         .buttonStyle(.plain)
+        .allowsHitTesting(k > 0.6)
     }
 
-    /// Капсула i появляется, когда строка отъехала на её место: по одной, с пружинкой
-    private func reveal(_ i: Int, shown: CGFloat) -> CGFloat {
-        let start = CGFloat(i) * (pill + gap) + 6
-        return max(0, min(1, (shown - start) / (pill * 0.75)))
+    /// Размеры капсул по порядку появления: каждая занимает только то место, что уже открылось, —
+    /// сначала маленькая у самого края карточки, растёт до полного размера и дальше не увеличивается;
+    /// закрываешь — уменьшается вместе с местом, ничего не мешает
+    private func sizes(_ count: Int, shown: CGFloat) -> [CGFloat] {
+        var left = max(0, shown - 10 - 4)
+        var out: [CGFloat] = []
+        for _ in 0..<count {
+            let w = max(0, min(pill, left))
+            out.append(w)
+            left -= w + gap
+        }
+        return out
     }
 
     var body: some View {
         let shownRight = max(0, -offset)
         let shownLeft = max(0, offset)
+        let rightSizes = sizes(trailing.count, shown: shownRight)
+        let leftSizes = sizes(leading.count, shown: shownLeft)
         ZStack {
-            // справа: первая капсула у края; на полном свайпе она тянется на всё освободившееся место
-            HStack(spacing: gap) {
+            // справа: капсулы прилегают к краю карточки, первая — у края экрана; на полном свайпе первая тянется на всё место
+            HStack(spacing: 0) {
                 Spacer(minLength: 0)
                 ForEach(Array(trailing.enumerated().reversed()), id: \.element.id) { i, a in
                     if armed && i == 0 {
-                        capsule(a, reveal: 1, stretched: max(pill, shownRight - 20))
-                    } else if !armed {
-                        capsule(a, reveal: reveal(i, shown: shownRight))
+                        capsule(a, size: pill, stretched: max(pill, shownRight - 20))
+                    } else if !armed && rightSizes[i] > 0.5 {
+                        capsule(a, size: rightSizes[i])
+                            .padding(.trailing, i == 0 ? 0 : gap * min(1, rightSizes[i] / pill))
                     }
                 }
             }
@@ -341,9 +356,11 @@ struct SwipeActionsRow<Content: View>: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.75), value: armed)
 
             // слева: закрепить
-            HStack(spacing: gap) {
+            HStack(spacing: 0) {
                 ForEach(Array(leading.enumerated()), id: \.element.id) { i, a in
-                    capsule(a, reveal: reveal(i, shown: shownLeft))
+                    if leftSizes[i] > 0.5 {
+                        capsule(a, size: leftSizes[i]).padding(.leading, i == 0 ? 0 : gap * min(1, leftSizes[i] / pill))
+                    }
                 }
                 Spacer(minLength: 0)
             }
