@@ -735,6 +735,8 @@ protocol MessengerRepository: Sendable {
 
     // контакты
     func contacts() async throws -> [Contact]
+    /// Фильтр списка чатов («фокус»): пока выбран, сервер не шлёт уведомления из неподходящих чатов (nil — все)
+    func setChatFocus(_ folder: String?) async
     /// У кого из контактов сегодня день рождения (today — «MM-dd» по часам телефона)
     func birthdays(today: String) async throws -> [BirthdayPerson]
     func saveContact(id: String, name: String) async throws -> Contact
@@ -1697,6 +1699,11 @@ struct RemoteMessengerRepository: MessengerRepository {
     func contacts() async throws -> [Contact] {
         let data = try await api.request("GET", "/v1/contacts")
         return try decodeAPI(ContactListDTO.self, from: data).contacts.map(\.model)
+    }
+
+    func setChatFocus(_ folder: String?) async {
+        let body: [String: Any] = ["folder": folder.map { $0 as Any } ?? NSNull()]
+        _ = try? await api.request("PUT", "/v1/me/chat-focus", body: ServerAPI.json(body))
     }
 
     func birthdays(today: String) async throws -> [BirthdayPerson] {

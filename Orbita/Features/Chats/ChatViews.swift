@@ -52,7 +52,9 @@ struct ChatsListView: View {
     @Environment(\.lang) private var lang
 
     @State private var query = ""
-    @State private var folder: ChatFolder = .all
+    @State private var folder: ChatFolder = ChatFolder(rawValue: UserDefaults.standard.string(forKey: "chats.folder") ?? "") ?? .all
+    /// Фильтры над поиском: показываются, если потянуть список вниз (и всегда, пока выбран не «Все»)
+    @State private var filtersShown = (UserDefaults.standard.string(forKey: "chats.folder") ?? "all") != "all"
     @ObservedObject private var prefs = ChatListPrefs.shared
     @ObservedObject private var drafts = ChatDraftSignal.shared          // «Черновик: …» в строках — сразу
     @ObservedObject private var net = NetworkState.shared
@@ -122,6 +124,16 @@ struct ChatsListView: View {
         // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
         // посреди открытия, список пересчитывался и на пару кадров пустел. На iPad переписка рядом со списком — панель остаётся
         .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(split ? nil : id) }
+        // выбранный фильтр запоминается и уходит на сервер: уведомления из неподходящих чатов не приходят
+        .onChange(of: folder) { _, f in
+            UserDefaults.standard.set(f.rawValue, forKey: "chats.folder")
+            let repo = session.messengerRepo
+            Task { await repo.setChatFocus(f == .all || f == .unread ? nil : f.rawValue) }
+        }
+        .task {
+            let f = folder
+            await session.messengerRepo.setChatFocus(f == .all || f == .unread ? nil : f.rawValue)
+        }
         .profileSheet(id: $birthdayProfile)
         .environmentObject(session)
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
@@ -198,7 +210,7 @@ struct ChatsListView: View {
     private var folderCounts: [ChatFolder: Int] {
         var out: [ChatFolder: Int] = [:]
         for chat in model.chats where (chat.unread > 0 || chat.mentions > 0) && !prefs.isArchived(chat.id) && !isMuted(chat) {
-            for f in ChatFolder.allCases where f != .all && f != .unread && f.contains(chat) { out[f, default: 0] += 1 }
+            for f in ChatFolder.allCases where f != .all && f.contains(chat) { out[f, default: 0] += 1 }
         }
         return out
     }
@@ -270,6 +282,12 @@ struct ChatsListView: View {
             .padding(.horizontal, 20)
             .padding(.top, 8)
 
+            if filtersShown || folder != .all {
+                FolderTiles(folder: $folder, counts: folderCounts)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
                 TextField(s.chatsSearch, text: $query)
@@ -287,8 +305,6 @@ struct ChatsListView: View {
             .padding(.vertical, 10)
 
             ChatsTopIsland(session: session) { id in birthdayProfile = id }
-
-            FolderBar(folder: $folder, counts: folderCounts)
 
             cards
 
@@ -312,6 +328,17 @@ struct ChatsListView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         Color.clear.frame(height: 0).id("chatsTop")
+                            // потянули список вниз (выше поиска) — сверху выезжают фильтры; пролистали вниз — прячутся
+                            .background(GeometryReader { g in
+                                Color.clear.onChange(of: g.frame(in: .named("chatsScroll")).minY) { _, y in
+                                    if y > 56, !filtersShown {
+                                        Haptics.impact(.light)
+                                        withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { filtersShown = true }
+                                    } else if y < -60, filtersShown, folder == .all {
+                                        withAnimation(.easeOut(duration: 0.25)) { filtersShown = false }
+                                    }
+                                }
+                            })
                         if query.trimmingCharacters(in: .whitespaces).isEmpty && !archivedChats.isEmpty { archiveRow }
                         if folder == .all && query.trimmingCharacters(in: .whitespaces).isEmpty { savedRow }
                         if searchingNow && !filtered.filter({ $0.id != session.serverID }).isEmpty {
@@ -335,6 +362,7 @@ struct ChatsListView: View {
                     .animation(.spring(response: 0.42, dampingFraction: 0.86), value: filtered.map(\.id))
                 }
                 .scrollIndicators(.hidden)
+                .coordinateSpace(name: "chatsScroll")
                 // повторное нажатие «Чаты» — в начало списка (и сброс поиска)
                 .onReceive(TabReselect.shared.publisher(.chats)) { _ in
                     if !query.isEmpty { query = "" }

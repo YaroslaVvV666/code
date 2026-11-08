@@ -7976,9 +7976,37 @@ def unread_total(uid):
                (uid,))["c"] + group_unread_total(uid))
 
 
+# ---------- фильтр в списке чатов («фокус»): пока выбран, уведомления из неподходящих чатов не приходят ----------
+FOCUS_KINDS = ("unread", "personal", "groups", "channels", "mentions", "bots")
+ensure_column("users", "chat_focus", "chat_focus TEXT")
+
+
+@route("PUT", r"/v1/me/chat-focus")
+def set_chat_focus(req, me):
+    f = req.body_json().get("folder")
+    f = f if f in FOCUS_KINDS else None
+    run("UPDATE users SET chat_focus = ? WHERE id = ?", (f, me["id"]))
+    req.send_json(200, {"folder": f})
+
+
+def focus_allows(uid, kind, mentioned=False, bot=False):
+    """kind: dm | group | channel. «Новые» пропускает всё (новое и есть новое)"""
+    r = q1("SELECT chat_focus FROM users WHERE id = ?", (uid,))
+    f = r["chat_focus"] if r and "chat_focus" in r.keys() else None
+    if not f or f == "unread":
+        return True
+    if f == "mentions":
+        return mentioned
+    if f == "bots":
+        return bot
+    return {"personal": kind == "dm" and not bot, "groups": kind == "group", "channels": kind == "channel"}.get(f, True)
+
+
 def notify_message(sender, recipient, text):
     """Отправляет push всем устройствам получателя. Ошибки доставки не влияют на сообщение."""
     if not push.configured():
+        return
+    if not focus_allows(recipient, "dm", bot=is_bot_user(sender)):
         return
     try:
         rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (recipient,))
@@ -10493,6 +10521,8 @@ def notify_group(g, sender, text, mentioned=frozenset()):
             tagged = rid in mentioned
             if m["muted"] and not tagged:                   # выключенный чат молчит, но если тегнули — уведомление приходит
                 continue
+            if not focus_allows(rid, "channel" if g["type"] == "channel" else "group", mentioned=tagged):
+                continue                                    # выбран другой фильтр — из этого чата не уведомляем
             rows = q("SELECT * FROM push_tokens WHERE user_id = ? AND kind = 'alert'", (rid,))
             if not rows:
                 continue

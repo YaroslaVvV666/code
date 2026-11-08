@@ -346,3 +346,8 @@ while True:
 
 `POST /v1/posts` с `"reel": true` принимает `"labels": [{"kind": "ai"|"place"|"ad"|"custom", "text"?}]` — до трёх
 («Создано ИИ», место, «Реклама», своя). В ответе поста — поле `labels`. Показываются над ником автора.
+
+## Фильтр чатов («фокус»)
+
+`PUT /v1/me/chat-focus {"folder": "personal"|"groups"|"channels"|"mentions"|null}` — пока выбран фильтр, push-уведомления
+приходят только из подходящих чатов (в «Упоминаниях» — только когда вас отметили). `null` или «Новые» — все. Проверка: `python3 tests/test_chat_focus.py`.
