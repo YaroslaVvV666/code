@@ -6546,6 +6546,8 @@ def clean_attachments(raw, uid):
             item["gif"] = True                       # видео без звука, отправлено как GIF — у получателя крутится по кругу
         if t == "voice" and isinstance(a.get("waveform"), list):
             item["waveform"] = [max(0, min(31, int(v))) for v in a["waveform"][:64] if isinstance(v, (int, float))]
+        if t == "voice" and a.get("once") is True:
+            item["once"] = True                      # сгорающее: получатель слушает один раз
         out.append(item)
     return out
 
@@ -6554,6 +6556,84 @@ DB.execute("CREATE TABLE IF NOT EXISTS live_locations(message_id TEXT PRIMARY KE
            "chat TEXT NOT NULL, pos_enc BLOB NOT NULL, updated_at REAL NOT NULL, live_until REAL NOT NULL, "
            "stopped INTEGER NOT NULL DEFAULT 0)")
 LIVE_COL = "live_locations.pos"
+
+
+# ---------- сгорающее голосовое: прослушать можно один раз ----------
+# Получатель не видит media_id в сообщении: его выдаёт POST /v1/messages/<id>/once-open — один раз. Потом голосовое «сгорело».
+# В личке после прослушивания файл удаляется совсем (и у отправителя тоже). Переслать нельзя.
+DB.execute("CREATE TABLE IF NOT EXISTS once_views(message_id TEXT NOT NULL, user_id TEXT NOT NULL, opened_at REAL NOT NULL, "
+           "PRIMARY KEY(message_id, user_id))")
+
+
+def has_once(atts):
+    return any(a.get("once") for a in atts)
+
+
+def once_view(atts, m, me_id, group=False):
+    """Вложения сгорающего голосового глазами этого человека"""
+    if not has_once(atts):
+        return atts
+    mid = m["id"]
+    out = []
+    for a in atts:
+        if not a.get("once"):
+            out.append(a)
+            continue
+        a = dict(a)
+        if m["sender"] == me_id:
+            if group:
+                n = q1("SELECT COUNT(*) n FROM once_views WHERE message_id = ?", (mid,))["n"]
+                a["listened"] = n                 # сколько участников уже прослушали
+            else:
+                seen = q1("SELECT 1 FROM once_views WHERE message_id = ?", (mid,))
+                a["consumed"] = bool(seen)
+                if seen:
+                    a.pop("media_id", None)
+        else:
+            a["consumed"] = bool(q1("SELECT 1 FROM once_views WHERE message_id = ? AND user_id = ?", (mid, me_id)))
+            a.pop("media_id", None)              # файл — только через once-open, один раз
+        out.append(a)
+    return out
+
+
+@route("POST", r"/v1/messages/([a-f0-9]+)/once-open")
+def once_open(req, me, mid):
+    uid = me["id"]
+    m, grp, _ = find_message(mid, uid)
+    att = next((a for a in attachments_of(m) if a.get("once")), None)
+    if not att:
+        raise ApiError(404, "not_found")
+    if m["sender"] == uid:
+        if att.get("media_id") and STORE.exists(att["media_id"]) and (grp or not q1("SELECT 1 FROM once_views WHERE message_id = ?", (mid,))):
+            req.send_json(200, {"media_id": att["media_id"], "duration": att.get("duration") or 0})
+            return
+        raise ApiError(410, "once_consumed")
+    try:
+        run("INSERT INTO once_views(message_id, user_id, opened_at) VALUES (?,?,?)", (mid, uid, time.time()))
+    except INTEGRITY_ERRORS:
+        raise ApiError(410, "once_consumed")
+    if not att.get("media_id") or not STORE.exists(att["media_id"]):
+        raise ApiError(410, "once_consumed")
+    chain_wake(m, grp)                            # отправитель видит «прослушано»
+    req.send_json(200, {"media_id": att["media_id"], "duration": att.get("duration") or 0})
+
+
+@route("POST", r"/v1/messages/([a-f0-9]+)/once-done")
+def once_done(req, me, mid):
+    """Получатель дослушал (или закрыл) — в личке файл удаляется насовсем"""
+    uid = me["id"]
+    m, grp, _ = find_message(mid, uid)
+    if grp or m["sender"] == uid or not q1("SELECT 1 FROM once_views WHERE message_id = ? AND user_id = ?", (mid, uid)):
+        req.send_json(200, {"ok": True})
+        return
+    for a in attachments_of(m):
+        if a.get("once") and a.get("media_id") and not RETAIN_FOREVER:
+            run("DELETE FROM media WHERE id = ? AND owner = ?", (a["media_id"], m["sender"]))
+            try:
+                STORE.remove(a["media_id"])
+            except OSError:
+                pass
+    req.send_json(200, {"ok": True})
 
 
 def with_live(atts, mid):
@@ -6913,7 +6993,7 @@ def _message_json(m, me_id):
         "text": dec(m["sender"], "messages", COL["msg_text"], mid, m["text_enc"]) or "",
         "entities": json.loads(dec(m["sender"], "messages", COL["msg_entities"], mid, m["entities_enc"]) or "[]"),
         "created_at": m["created_at"], "edited_at": m["edited_at"],
-        "read": m["read_at"] is not None, "reply": reply, "attachments": with_live(attachments_of(m), m["id"]),
+        "read": m["read_at"] is not None, "reply": reply, "attachments": once_view(with_live(attachments_of(m), m["id"]), m, me_id),
         "reactions": reactions_of(mid, me_id),
         **note_field(mid, me_id),
         **({"poll": poll_json(mid, me_id)} if m["kind"] == "poll" else {}),
@@ -7067,6 +7147,8 @@ def forward_messages(req, me, peer):
             continue
         if not grp and "locked" in m.keys() and m["locked"] and (lock_of(m["id"]) or {"open": True})["open"] is False:
             raise ApiError(403, "locked")                  # нераскрытую капсулу / секрет переслать нельзя
+        if has_once(attachments_of(m)):
+            raise ApiError(403, "no_forward")             # сгорающее голосовое не пересылается
         items.append(m)
     items.sort(key=lambda r: r["created_at"])
     now = time.time()
@@ -9765,7 +9847,7 @@ def gmsg_json(m, me_id, channel=None):
         "text": dec(m["sender"], "messages", COL["msg_text"], mid, m["text_enc"]) or "",
         "entities": json.loads(dec(m["sender"], "messages", COL["msg_entities"], mid, m["entities_enc"]) or "[]"),
         "created_at": m["created_at"], "edited_at": m["edited_at"], "read": read,
-        "reply": reply, "attachments": with_live(attachments_of(m), m["id"]), "sender": user_brief(m["sender"], me_id),
+        "reply": reply, "attachments": once_view(with_live(attachments_of(m), m["id"]), m, me_id, group=True), "sender": user_brief(m["sender"], me_id),
         "reactions": reactions_of(mid, me_id), **note_field(mid, me_id),
     }
     if "topic_id" in m.keys() and m["topic_id"]:

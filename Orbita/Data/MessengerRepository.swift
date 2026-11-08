@@ -274,8 +274,11 @@ struct ChatAttachment: Identifiable, Equatable {
     var phone: String? = nil
     var username: String? = nil
     var avatarID: String? = nil
+    var once = false                        // сгорающее голосовое: получатель слушает один раз
+    var consumed = false                    // уже прослушано (у получателя — сгорело; у отправителя — «прослушано»)
+    var listened = 0                        // в группе: сколько участников прослушали
 
-    var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? userID ?? name ?? "local") }
+    var id: String { kind.rawValue + ":" + (mediaID ?? sticker ?? userID ?? name ?? (once ? "once" : "local")) }
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
 
     /// Для просмотрщика фото и видео
@@ -619,9 +622,11 @@ struct OutgoingAttachment {
     var live = 0
     var userID: String? = nil           // контакт
     var phone: String? = nil
+    var once = false                    // сгорающее голосовое
 
     var json: [String: Any] {
         var d: [String: Any] = ["type": type]
+        if once { d["once"] = true }
         if let userID { d["user_id"] = userID }
         if let phone { d["phone"] = phone }
         if let geo {
@@ -699,6 +704,9 @@ protocol MessengerRepository: Sendable {
     func recentAudio() async throws -> [RecentAudio]
     func audioCopy(messageID: String, mediaID: String) async throws -> AudioCopy
     func playlistCopy(trackID: String) async throws -> AudioCopy
+    /// Сгорающее голосовое: открыть один раз (файл выдаётся только сейчас) и «сжечь» после прослушивания
+    func onceOpen(messageID: String) async throws -> String
+    func onceDone(messageID: String) async
     // темы в группах
     func topics(groupID: String) async throws -> ForumTopicList
     func createTopic(groupID: String, title: String, icon: String?, color: Int) async throws -> ForumTopic
@@ -878,6 +886,9 @@ private struct AttachmentDTO: Decodable {
     let phone: String?
     let username: String?
     let avatar: String?
+    let once: Bool?
+    let consumed: Bool?
+    let listened: Int?
 
     var model: ChatAttachment? {
         guard let kind = ChatAttachment.Kind(rawValue: type) else { return nil }
@@ -892,7 +903,8 @@ private struct AttachmentDTO: Decodable {
                               duration: duration ?? 0, size: size ?? 0, name: name, mime: mime,
                               waveform: waveform ?? [], sticker: sticker, title: kind == .location ? nil : title, artist: artist,
                               stickerPack: pack, gif: gif ?? false, geo: geo,
-                              userID: userId, phone: phone, username: username, avatarID: avatar)
+                              userID: userId, phone: phone, username: username, avatarID: avatar,
+                              once: once ?? false, consumed: consumed ?? false, listened: listened ?? 0)
     }
 }
 
@@ -1508,6 +1520,15 @@ struct RemoteMessengerRepository: MessengerRepository {
     func audioCopy(messageID: String, mediaID: String) async throws -> AudioCopy {
         try decodeAPI(AudioCopy.self, from: try await api.request("POST", "/v1/messages/\(messageID)/audio-copy",
                                                                   body: ServerAPI.json(["media_id": mediaID])))
+    }
+
+    func onceOpen(messageID: String) async throws -> String {
+        struct Box: Decodable { let mediaId: String }
+        return try decodeAPI(Box.self, from: try await api.request("POST", "/v1/messages/\(messageID)/once-open")).mediaId
+    }
+
+    func onceDone(messageID: String) async {
+        _ = try? await api.request("POST", "/v1/messages/\(messageID)/once-done")
     }
 
     func playlistCopy(trackID: String) async throws -> AudioCopy {

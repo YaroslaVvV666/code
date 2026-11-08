@@ -230,6 +230,7 @@ final class VoicePlayer: ObservableObject {
 
     /// Дослушали до конца: следующее голосовое из чата, если оно есть
     private func finished(_ id: String) {
+        if onceFinish != nil { stop(save: false); return }      // сгорающее — без автопроигрывания следующего
         positions[id] = nil
         UserDefaults.standard.set(positions, forKey: "voice_positions")
         stop(save: false)
@@ -255,6 +256,51 @@ final class VoicePlayer: ObservableObject {
         onStart?()
         guard let url = MediaFileCache.shared.playableURL(mediaID) else { return }      // скачано — с телефона, без сети тоже
         if !url.isFileURL { MediaFileCache.shared.prefetch(mediaID, fallback: "m4a") }
+        begin(id: id, url: url, duration: duration)
+    }
+
+    // MARK: Сгорающее голосовое
+
+    /// Что сделать, когда сгорающее голосовое закончилось или его закрыли (сообщить серверу «прослушано»)
+    private var onceFinish: (() -> Void)?
+    /// Голосовое поставили на паузу из-за записи экрана
+    @Published private(set) var captureBlocked = false
+    private var captureObserver: NSObjectProtocol?
+
+    /// Один раз, прямо из сети: на телефон не сохраняется, не продолжается с места, при записи экрана — пауза
+    func playOnce(id: String, mediaID: String, duration: Double, onDone: @escaping () -> Void) -> Bool {
+        guard !UIScreen.main.isCaptured else { captureBlocked = true; return false }
+        guard let url = ServerConfig.mediaURL(mediaID) else { return false }
+        stop()
+        CircleFocus.shared.stop()
+        onStart?()
+        positions[id] = nil
+        begin(id: id, url: url, duration: duration)
+        onceFinish = onDone
+        captureBlocked = false
+        if captureObserver == nil {
+            captureObserver = NotificationCenter.default.addObserver(forName: UIScreen.capturedDidChangeNotification, object: nil,
+                                                                     queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.onceFinish != nil, UIScreen.main.isCaptured else { return }
+                    self.pause()                       // начали запись экрана — сгорающее не звучит
+                    self.captureBlocked = true
+                }
+            }
+        }
+        return true
+    }
+
+    /// Возобновить сгорающее после паузы — только если экран не записывается
+    func resumeOnce() {
+        guard !UIScreen.main.isCaptured else { captureBlocked = true; return }
+        captureBlocked = false
+        resume()
+    }
+
+    var playingOnce: Bool { onceFinish != nil }
+
+    private func begin(id: String, url: URL, duration: Double) {
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         AudioSessionGate.willActivate()
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -294,7 +340,11 @@ final class VoicePlayer: ObservableObject {
     func stop() { stop(save: true) }
 
     private func stop(save: Bool) {
-        if save, let id = currentID { remember(id, progress) }
+        if let done = onceFinish {                 // сгорающее: остановили или дослушали — больше не прослушать
+            onceFinish = nil
+            if let id = currentID { positions[id] = nil }
+            done()
+        } else if save, let id = currentID { remember(id, progress) }
         if let observer, let player { player.removeTimeObserver(observer) }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         observer = nil

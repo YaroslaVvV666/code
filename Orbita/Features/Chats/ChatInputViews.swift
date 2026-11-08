@@ -35,6 +35,9 @@ struct ChatInputBar: View {
     @State private var slide: CGFloat = 0
     @State private var slideY: CGFloat = 0
     @State private var locked = false
+    @State private var onceVoice = false          // голосовое уйдёт сгорающим (кнопка «1» над замком)
+    @State private var onceHint = false           // подсказка «Получатель сможет прослушать… один раз»
+    @State private var onceHintTask: Task<Void, Never>?
     @State private var zoomBase: CGFloat = 1          // приближение кружка на момент начала жеста
     @State private var holdStarted: Date?               // когда зажали кнопку записи — чтобы отличить «слишком коротко» от сбоя
     @State private var cameraLive = false               // камера кружка уже показывает картинку (заглушка гаснет)
@@ -742,6 +745,7 @@ struct ChatInputBar: View {
             if recording {
                 if locked {
                     lockedStop.offset(y: -92)
+                    if active == .voice { onceToggle.offset(y: -150) }
                 } else {
                     lockHint.offset(y: -158).allowsHitTesting(false)
                 }
@@ -797,6 +801,60 @@ struct ChatInputBar: View {
         .glassCapsule()
         .offset(y: -p * 22)
         .animation(.easeOut(duration: 0.12), value: p)
+    }
+
+    /// Кнопка «1» над замком: голосовое можно будет прослушать только один раз (как в Telegram).
+    /// Выключено — пунктирный круг; включено — белый круг и подсказка слева на 5 секунд
+    private var onceToggle: some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { onceVoice.toggle() }
+            onceHintTask?.cancel()
+            if onceVoice {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { onceHint = true }
+                onceHintTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.25)) { onceHint = false }
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) { onceHint = false }
+            }
+        } label: {
+            ZStack {
+                if onceVoice {
+                    Circle().fill(Color.white)
+                    Text("1").font(.system(size: 17, weight: .bold)).foregroundStyle(Color.black)
+                } else {
+                    Circle().stroke(theme.text.opacity(0.9), style: StrokeStyle(lineWidth: 1.6, dash: [3.2, 3.2]))
+                        .padding(9)
+                    Text("1").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.text)
+                }
+            }
+            .frame(width: 48, height: 48)
+            .background { if !onceVoice { Color.clear.glassCircle() } }
+            .scaleEffect(onceVoice ? 1.04 : 1)
+        }
+        .buttonStyle(PressStyle())
+        .overlay(alignment: .trailing) {
+            if onceHint {
+                HStack(spacing: 12) {
+                    Image(systemName: "flame.fill").font(.system(size: 20)).foregroundStyle(.white)
+                    Text(s.t("Получатель сможет прослушать сообщение только один раз.",
+                             "The recipient will be able to listen to this message only once."))
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .frame(width: 270, alignment: .leading)
+                .background(Color.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .offset(x: -58)
+                .transition(.scale(scale: 0.85, anchor: .trailing).combined(with: .opacity))
+                .allowsHitTesting(false)
+            }
+        }
+        .transition(.scale.combined(with: .opacity))
+        .accessibilityLabel(s.t("Прослушать один раз", "Listen once"))
     }
 
     /// Закрытый замок: нажмите — запись останавливается и уходит
@@ -985,6 +1043,8 @@ struct ChatInputBar: View {
         slide = 0
         slideY = 0
         locked = false
+        onceVoice = false
+        onceHint = false
         zoomBase = 1
         Haptics.impact(.medium)
         if emojiOpen { emojiOpen = false; controller.resetInputPanel() }
@@ -1033,8 +1093,11 @@ struct ChatInputBar: View {
                 withAnimation(.easeOut(duration: 0.2)) { trashing = false }
             }
         }
+        let sendOnce = onceVoice
         locked = false
         holding = false
+        onceHintTask?.cancel()
+        onceHint = false
         withAnimation(.easeOut(duration: 0.2)) { active = .none }
         slide = 0
         slideY = 0
@@ -1044,7 +1107,8 @@ struct ChatInputBar: View {
                 voice.cancel()
             } else if let r = voice.finish() {
                 Haptics.notify(.success)
-                model.sendVoice(url: r.url, duration: r.duration, waveform: r.waveform)
+                model.sendVoice(url: r.url, duration: r.duration, waveform: r.waveform, once: sendOnce)
+                onceVoice = false
                 onSent()
             } else {
                 flash(s.tooShort)

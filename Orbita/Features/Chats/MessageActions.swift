@@ -148,10 +148,13 @@ struct MessageActionOverlay: View {
     /// Высота списка действий — считается заранее, чтобы сразу знать, сколько места нужно под сообщением
     private var canNote: Bool { onNote != nil && !message.isPending && message.system == nil }
 
+    /// Пересылка и копирование закрыты: запрет в чате или сгорающее голосовое
+    private var blocksForward: Bool { noForward || message.attachments.contains { $0.once } }
+
     private var actionCount: Int {
         var n = 4                                                                   // ответить, напомнить, выбрать, удалить
-        if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
-        if !message.text.isEmpty && !noForward && message.poll == nil { n += 1 }
+        if !blocksForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") { n += 1 }
+        if !message.text.isEmpty && !blocksForward && message.poll == nil { n += 1 }
         if model.canPin { n += 1 }
         if showSender { n += 1 }
         if canEdit && message.poll == nil && !message.isArticle { n += 1 }
@@ -407,11 +410,11 @@ struct MessageActionOverlay: View {
             sentHeader
             divider
             row("arrowshape.turn.up.left", s.reply) { dismiss(onReply) }
-            if !noForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") {
+            if !blocksForward && message.system == nil && !message.text.hasPrefix("\u{200B}call:") {
                 divider
                 row("arrowshape.turn.up.right", s.t("Переслать", "Forward")) { dismiss(onForward) }
             }
-            if !message.text.isEmpty && !noForward && message.poll == nil {
+            if !message.text.isEmpty && !blocksForward && message.poll == nil {
                 divider
                 row("doc.on.doc", s.copy) { UIPasteboard.general.string = message.text; dismiss() }
             }

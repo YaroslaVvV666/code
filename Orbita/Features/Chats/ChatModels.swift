@@ -571,6 +571,7 @@ final class ChatModel: ObservableObject {
         var replyID: String?
         var silent: Bool
         var cleanup: URL?
+        var once = false            // голосовое уходит сгорающим
     }
     private var outbox: [(key: String, item: Outgoing)] = []
     private var retrying = false
@@ -579,7 +580,7 @@ final class ChatModel: ObservableObject {
     /// Нет сети — сообщение остаётся «Отправляется…» с красным значком и уходит само, как только связь вернётся.
     @discardableResult
     func deliver(text: String, entities: [TextEntity], media: [OutgoingMedia] = [],
-                 placeholders: [ChatAttachment] = [], silent: Bool = false, cleanup: URL? = nil) async -> Bool {
+                 placeholders: [ChatAttachment] = [], silent: Bool = false, cleanup: URL? = nil, once: Bool = false) async -> Bool {
         guard !text.isEmpty || !media.isEmpty else { return false }
         let reply = replyTo
         replyTo = nil
@@ -588,7 +589,7 @@ final class ChatModel: ObservableObject {
                                 reply: reply.map { ReplyRef(id: $0.id, name: "", text: String($0.summary.prefix(140)), fromMe: $0.mine) },
                                 attachments: placeholders, isPending: true)
         pending.append(local)
-        let item = Outgoing(text: text, entities: entities, media: media, replyID: reply?.id, silent: silent, cleanup: cleanup)
+        let item = Outgoing(text: text, entities: entities, media: media, replyID: reply?.id, silent: silent, cleanup: cleanup, once: once)
         return await attempt(local.key, item, restoreReply: reply)
     }
 
@@ -605,7 +606,9 @@ final class ChatModel: ObservableObject {
                 case .sticker, .location: break
                 default: ping(Self.action(for: m))
                 }
-                uploaded.append(try await repo.upload(m))
+                var up = try await repo.upload(m)
+                if item.once, up.type == "voice" { up.once = true }
+                uploaded.append(up)
             }
             var sent = try await repo.send(peerID: peerID, text: item.text, entities: item.entities,
                                            attachments: uploaded, replyTo: item.replyID, silent: item.silent,
@@ -803,10 +806,11 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    func sendVoice(url: URL, duration: Double, waveform: [Int]) {
+    func sendVoice(url: URL, duration: Double, waveform: [Int], once: Bool = false) {
         Task {
             await deliver(text: "", entities: [], media: [.voice(url: url, duration: duration, waveform: waveform)],
-                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform)], cleanup: url)
+                          placeholders: [ChatAttachment(kind: .voice, duration: duration, waveform: waveform, once: once)],
+                          cleanup: url, once: once)
         }
     }
 

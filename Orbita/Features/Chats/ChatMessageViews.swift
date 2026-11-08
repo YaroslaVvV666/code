@@ -709,7 +709,8 @@ struct MessageRow: View {
                                                   || $0.kind == .contact }) { a in
                 Group {
                     switch a.kind {
-                    case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
+                    case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly,
+                                            messageID: message.isPending ? nil : message.id)
                     case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onPlayAudio(a) } }
                     case .file:
                         if a.isMusic {
@@ -1069,17 +1070,93 @@ struct VoiceBlock: View {
     let mine: Bool
     var pending = false
     var metaSpace = false           // время сообщения лежит поверх нижнего правого угла
+    var messageID: String? = nil    // нужен сгорающему голосовому (открыть один раз)
 
     @ObservedObject private var player = VoicePlayer.shared
     @ObservedObject private var transcriber = VoiceTranscriber.shared
+    @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @State private var burnt = false            // прослушали сейчас — сгорело, не дожидаясь обновления с сервера
+    @State private var opening = false
 
-    private var playerID: String { attachment.mediaID ?? attachment.id }
+    private var playerID: String {
+        attachment.once ? "once:" + (messageID ?? attachment.id) : (attachment.mediaID ?? attachment.id)
+    }
+    /// Сгорающее, которое получатель слушает через «открыть один раз»
+    private var onceIncoming: Bool { attachment.once && !mine }
+    private var consumed: Bool { attachment.consumed || burnt }
     private var isCurrent: Bool { player.isCurrent(playerID) }
     private var playing: Bool { isCurrent && player.isPlaying }
     /// Только у играющего голосового часы настоящие; остальные пузыри подписаны на «вечно стоящие» и не перерисовываются
     private var clock: PlaybackClock { isCurrent ? player.clock : .idle }
+    private var onceBadge: some View {
+        Text("1")
+            .font(.system(size: 10, weight: .heavy))
+            .foregroundStyle(mine ? theme.accentColor : .white)
+            .frame(width: 17, height: 17)
+            .background(Circle().fill(mine ? Color.white : theme.accentColor))
+            .overlay(Circle().stroke(mine ? theme.accentColor : Color.white, lineWidth: 1.5))
+    }
+
+    /// Уже прослушано: вместо плеера — «сгоревшее» голосовое
+    private func burntRow(tint: Color) -> some View {
+        let s = Strings(lang: lang)
+        return HStack(spacing: 10) {
+            Image(systemName: "flame.fill")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(mine ? theme.accentColor : .white)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(mine ? Color.white.opacity(0.9) : theme.accentColor.opacity(0.85)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(s.t("Голосовое сообщение", "Voice message"))
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(mine ? Color.white : theme.text)
+                Text((mine ? s.t("Прослушано", "Listened") : s.t("Прослушано один раз", "Played once"))
+                     + (attachment.duration > 0 ? " · " + mmss(Int(safe: attachment.duration)) : ""))
+                    .font(.system(size: 12)).foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textSecondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, metaSpace ? 14 : 0)
+    }
+
+    /// Сгорающее: у отправителя — обычное прослушивание; у получателя — файл выдаётся один раз и сгорает после
+    private func playOnce() {
+        if isCurrent {
+            if player.isPlaying { player.pause() } else if player.playingOnce { player.resumeOnce() } else { player.resume() }
+            return
+        }
+        if mine, let mediaID = attachment.mediaID {
+            player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
+            return
+        }
+        guard let messageID, !opening, !consumed else { return }
+        guard !UIScreen.main.isCaptured else {
+            Haptics.notify(.warning)
+            AppToast.show(Strings(lang: lang).t("Выключите запись экрана, чтобы прослушать", "Stop screen recording to listen"))
+            return
+        }
+        opening = true
+        let repo = session.messengerRepo
+        Task {
+            defer { opening = false }
+            do {
+                let mid = try await repo.onceOpen(messageID: messageID)
+                Haptics.impact(.light)
+                let ok = player.playOnce(id: playerID, mediaID: mid, duration: attachment.duration) {
+                    withAnimation(.easeOut(duration: 0.3)) { burnt = true }
+                    Task { await repo.onceDone(messageID: messageID) }
+                }
+                if !ok {
+                    withAnimation { burnt = true }
+                    Task { await repo.onceDone(messageID: messageID) }
+                }
+            } catch {
+                withAnimation { burnt = true }          // уже прослушано (на другом устройстве) или файла нет
+            }
+        }
+    }
+
     /// Палец ведёт по волне — перемотка
     @State private var scrubbing = false
     @State private var lastTick = -1
@@ -1136,10 +1213,23 @@ struct VoiceBlock: View {
     var body: some View {
         let tint = mine ? Color.white : theme.accentColor
         VStack(alignment: .leading, spacing: 6) {
-            playerRow(tint: tint)
-            transcript(tint: tint)
+            if attachment.once && consumed && !(isCurrent && player.playingOnce) {
+                burntRow(tint: tint)
+            } else {
+                playerRow(tint: tint)
+                if attachment.once && isCurrent && player.captureBlocked {
+                    Label(Strings(lang: lang).t("Пауза: идёт запись экрана", "Paused: screen is being recorded"),
+                          systemImage: "record.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(mine ? Color.white : theme.danger)
+                }
+                if !attachment.once { transcript(tint: tint) }
+            }
         }
         .frame(width: 218, alignment: .leading)
+        .onChange(of: player.captureBlocked) { _, blocked in
+            if blocked && !isCurrent && onceIncoming { Haptics.notify(.warning) }
+        }
         .onAppear {
             // голосовое сохраняется на телефон — слушается и без сети
             if let id = attachment.mediaID, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id, fallback: "m4a") }
@@ -1173,12 +1263,14 @@ struct VoiceBlock: View {
         HStack(spacing: 10) {
             Button {
                 // зажали голосовое ради реакций — отпускание пальца не должно его включать
-                guard !MessageMenu.isOpen, let mediaID = attachment.mediaID else { return }
+                guard !MessageMenu.isOpen else { return }
+                if attachment.once { playOnce(); return }
+                guard let mediaID = attachment.mediaID else { return }
                 player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
             } label: {
                 ZStack {
                     Circle().fill(mine ? Color.white : theme.accentColor)
-                    if pending {
+                    if pending || opening {
                         SpinnerRing(size: 24, lineWidth: 2.2, color: mine ? theme.accentColor : .white)
                     } else {
                         Image(systemName: playing ? "pause.fill" : "play.fill")
@@ -1187,6 +1279,10 @@ struct VoiceBlock: View {
                     }
                 }
                 .frame(width: 40, height: 40)
+                .overlay(alignment: .bottomTrailing) {
+                    // сгорающее — значок «1» на кнопке, как в Telegram
+                    if attachment.once { onceBadge.offset(x: 4, y: 4) }
+                }
             }
             .buttonStyle(.plain)
 
@@ -1217,7 +1313,12 @@ struct VoiceBlock: View {
                         .buttonStyle(.plain)
                         .transition(.scale.combined(with: .opacity))
                     }
-                    if !pending, let id = attachment.mediaID {
+                    if attachment.once && mine && attachment.listened > 0 {
+                        Label("\(attachment.listened)", systemImage: "ear")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.85))
+                    }
+                    if !pending, !attachment.once, let id = attachment.mediaID {
                         Button {
                             Haptics.impact(.light)
                             withAnimation(.easeOut(duration: 0.2)) { transcriber.toggle(mediaID: id, lang: lang) }
