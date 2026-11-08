@@ -16,6 +16,8 @@ struct ProfilePatch {
     var styleEmoji: String?
     var resetStyle = false
     var statusEmoji: String?        // "" — убрать
+    var gender: String?             // "m" | "f" | "" — не указан
+    var city: String?               // "" — убрать
 
     var body: Data {
         var object: [String: Any] = [:]
@@ -27,6 +29,8 @@ struct ProfilePatch {
         if let phoneVisibility { object["phone_visibility"] = phoneVisibility }
         if let phone { object["phone"] = phone }
         if let statusEmoji { object["status_emoji"] = statusEmoji }
+        if let gender { object["gender"] = gender.isEmpty ? NSNull() as Any : gender as Any }
+        if let city { object["city"] = city }
         if let commentsPolicy { object["comments_policy"] = commentsPolicy }
         if let privacy { object["privacy"] = privacy }
         if resetStyle {
@@ -136,6 +140,8 @@ private struct ProfileDTO: Decodable {
     let monthlyUsers: Int?
     let activity: ActivityDTO?
     let botOwned: Bool?
+    let gender: String?
+    let city: String?
 
     var model: UserProfile {
         UserProfile(id: id, name: name, username: username, bio: bio, avatarID: avatar, phone: phone,
@@ -152,7 +158,8 @@ private struct ProfileDTO: Decodable {
                     requestsCount: requestsCount, statusEmoji: statusEmoji, listening: listening ?? false,
                     orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar, activity: $0.activity?.model) },
                     activity: activity?.model,
-                    isBot: bot ?? false, botOwned: botOwned ?? false, monthlyUsers: monthlyUsers)
+                    isBot: bot ?? false, botOwned: botOwned ?? false, monthlyUsers: monthlyUsers,
+                    gender: gender, city: city)
     }
 }
 

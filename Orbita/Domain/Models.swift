@@ -284,6 +284,8 @@ struct UserProfile: Equatable {
     var isBot: Bool = false             // бот: вместо «был(а) в сети» — ничего или «N пользователей в месяц»
     var botOwned = false                // это мой бот: могу публиковать от его имени
     var monthlyUsers: Int? = nil        // у бота: сколько пишут за месяц (только если владелец разрешил и их 10 000+)
+    var gender: String? = nil           // свой профиль: «m» / «f» — видно только себе (аудитория продвижения)
+    var city: String? = nil             // свой профиль: город — видно только себе
     /// Имя с эмодзи-статусом (для шапок профиля)
     var displayName: String { statusEmoji.flatMap { $0.isEmpty ? nil : name + " " + $0 } ?? name }
 }

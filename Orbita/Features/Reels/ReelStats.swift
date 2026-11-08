@@ -96,6 +96,8 @@ struct ReelStatsSheet: View {
 
                         if let sr = st.search { searchBlock(sr) }
 
+                        PromotionsBlock(postID: postID)                 // продвижение: запуск и результаты
+
                         Text(s.t("Просмотры, удержание, время и подписки с видео считаются с момента выхода этого обновления. В «подписались с этого видео» входят подписки, сделанные в шортсах (кнопка «+» у аватарки); подписки с профиля сюда не попадают.",
                                  "Views, retention, watch time and follows are counted since this update. “Followed from this video” counts follows made in Shorts (the “+” by the avatar); follows from a profile aren't included."))
                             .font(.system(size: 12)).foregroundStyle(theme.textTertiary).multilineTextAlignment(.center)

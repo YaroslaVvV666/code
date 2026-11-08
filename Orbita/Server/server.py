@@ -957,6 +957,10 @@ def profile_json(r, me_id=None):
         "followers_count": followers_count(uid) if (own or vis("followers")) else None,
         "following": (not own) and is_following(me_id, uid),
         "requests_count": q1("SELECT COUNT(*) c FROM friend_requests WHERE to_id = ?", (uid,))["c"] if own else None,
+        # пол и город видит только сам человек: нужны для показа продвигаемых шортсов нужной аудитории
+        **({"gender": (r["gender"] if "gender" in r.keys() else None),
+            "city": (dec(uid, "profile", COL["bio"], uid + "#city", r["city_enc"]) if "city_enc" in r.keys() and r["city_enc"] else None)}
+           if own else {}),
     }
     if is_bot_user(uid):
         # у ботов «был(а) в сети» не пишем; вместо этого — «N пользователей в месяц», если владелец разрешил и их 10 000+
@@ -1658,6 +1662,12 @@ def update_me(req, me):
         if len(last) > 40:
             raise ApiError(400, "name_invalid")
         fields["last_name_enc"] = enc(uid, "profile", COL["last_name"], uid, last) if last else None
+    if "gender" in d:
+        fields["gender"] = d["gender"] if d["gender"] in ("m", "f") else None
+    if "city" in d:
+        c = clean_line(d.get("city"), 60)
+        fields["city_enc"] = enc(uid, "profile", COL["bio"], uid + "#city", c) if c else None
+        fields["city_idx"] = city_key(c) if c else None
     if "birthday" in d:
         b = str(d["birthday"] or "").strip()
         if b and not valid_birthday(b):
@@ -3456,6 +3466,16 @@ def reel_search(req, me):
         hits.sort(key=lambda x: (x[0], -((pop.get(x[1]["id"], 0) + (x[1]["likes_seed"] or 0) * 3) / (1 + (now - x[1]["created_at"]) / 86400 / 30))))
     else:
         hits.sort(key=lambda x: x[0])        # точное совпадение фразы — выше, внутри — свежие сверху (порядок сохраняется)
+    if offset == 0 and hits and flt != "seen":
+        # продвигаемые ролики, подходящие под запрос, — выше в выдаче (без пометки)
+        ids = {p["id"] for _, p in hits}
+        boosted = promo_pick(uid, query_hits=ids, limit=2)
+        if boosted:
+            bids = [post["id"] for _, post in boosted]
+            for promo, _ in boosted:
+                promo_shown(promo, uid)
+            front = [h for h in hits if h[1]["id"] in bids]
+            hits = front + [h for h in hits if h[1]["id"] not in bids]
     page = [p for _, p in hits[offset:offset + limit]]
     if offset == 0 and hits:
         run("INSERT INTO reel_queries(q, user_id, created_at) VALUES (?,?,?)", (phrase[:60], uid, time.time()))
@@ -3593,6 +3613,12 @@ def list_reels(req, me):
         rows = rows[:limit]
     else:
         rows = ranked_feed(me, rows, limit)
+        # продвигаемый ролик: один на страницу, без пометки — просто чаще попадается в «Рекомендациях»
+        for promo, post in promo_pick(uid, exclude=exclude):
+            rows = [r for r in rows if r["id"] != post["id"]]          # уже был в подборке — поднимаем выше
+            at = 0 if promo["kind"] == "top" else min(len(rows), random.randint(2, 5))
+            rows.insert(at, post)
+            promo_shown(promo, uid)
     out = []
     for p, j in zip(rows, posts_json(rows, uid)):
         j["author_state"] = "me" if p["author"] == uid else ("following" if is_following(uid, p["author"]) else "none")
@@ -7561,6 +7587,261 @@ def playlist_track_copy(req, me, tid):
     cover = clone_media(j["cover"], uid) if j.get("cover") else None
     req.send_json(200, {"media_id": nid, "thumb": cover, "title": j["title"], "artist": j["artist"],
                         "name": j["title"], "duration": j["duration"]})
+
+
+# ---------- продвижение шортсов (как в Instagram / VK / Avito) ----------
+# Автор покупает показы: пакет просмотров, бюджет по дням или «поднять в топ» на N дней. Цель — просмотры, подписчики
+# или переходы в профиль; аудитория — возраст, пол, страна, город, интересы (или автоматически).
+# Зрители пометку не видят: ролик просто чаще попадается в «Рекомендациях» и выше в поиске.
+# Сейчас тестовый период: продвижение бесплатное (PROMO_FREE=1), цена считается и показывается.
+ensure_column("users", "gender", "gender TEXT")
+ensure_column("users", "city_enc", "city_enc BLOB")
+ensure_column("users", "city_idx", "city_idx TEXT")
+DB.execute("CREATE TABLE IF NOT EXISTS promotions(id TEXT PRIMARY KEY, post_id TEXT NOT NULL, owner TEXT NOT NULL, kind TEXT NOT NULL, "
+           "goal TEXT NOT NULL, target INTEGER NOT NULL, daily INTEGER NOT NULL DEFAULT 0, days INTEGER NOT NULL, "
+           "targeting TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL, "
+           "starts_at REAL NOT NULL, ends_at REAL NOT NULL, impressions INTEGER NOT NULL DEFAULT 0)")
+DB.execute("CREATE TABLE IF NOT EXISTS promo_shows(promo_id TEXT NOT NULL, user_id TEXT NOT NULL, at REAL NOT NULL, "
+           "PRIMARY KEY(promo_id, user_id))")
+PROMO_FREE = os.environ.get("ORBITA_PROMO_FREE", "1") == "1"
+PROMO_CPM = 150                   # ₽ за 1000 показов
+PROMO_TOP_DAY = 199               # ₽ за сутки «в топе»
+PROMO_PACKS = [1000, 5000, 20000, 50000]
+PROMO_COUNTRIES = {"RU": ("+7", "Россия"), "KZ": ("+77", "Казахстан"), "BY": ("+375", "Беларусь"), "UA": ("+380", "Украина"),
+                   "UZ": ("+998", "Узбекистан"), "AM": ("+374", "Армения"), "GE": ("+995", "Грузия"), "AZ": ("+994", "Азербайджан"),
+                   "KG": ("+996", "Кыргызстан"), "TJ": ("+992", "Таджикистан"), "US": ("+1", "США"), "DE": ("+49", "Германия"),
+                   "TR": ("+90", "Турция"), "AE": ("+971", "ОАЭ")}
+
+
+def city_key(c):
+    return KR.blind_index(re.sub(r"\s+", " ", c.strip().lower().replace("ё", "е")), "city")
+
+
+def user_country(u):
+    phone = _dec_try(lambda: dec_profile(u, "phone_enc", COL["phone"])) or ""
+    best = None
+    for code, (prefix, _) in PROMO_COUNTRIES.items():
+        if phone.startswith(prefix) and (best is None or len(prefix) > len(PROMO_COUNTRIES[best][0])):
+            best = code
+    return best
+
+
+def user_age(u):
+    b = _dec_try(lambda: dec_profile(u, "birthday_enc", COL["birthday"])) or ""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", b)
+    if not m:
+        return None
+    today = datetime.date.today()
+    y, mo, d = map(int, m.groups())
+    return today.year - y - ((today.month, today.day) < (mo, d))
+
+
+def clean_targeting(t):
+    t = t if isinstance(t, dict) else {}
+    out = {}
+    try:
+        a1, a2 = int(t.get("age_min") or 0), int(t.get("age_max") or 0)
+    except (TypeError, ValueError):
+        a1 = a2 = 0
+    if a1 or a2:
+        out["age_min"], out["age_max"] = max(13, min(a1 or 13, 65)), max(13, min(a2 or 65, 65))
+    if t.get("gender") in ("m", "f"):
+        out["gender"] = t["gender"]
+    countries = [c for c in (t.get("countries") or []) if c in PROMO_COUNTRIES][:10]
+    if countries:
+        out["countries"] = countries
+    cities = [clean_line(c, 60) for c in (t.get("cities") or []) if isinstance(c, str)]
+    cities = [c for c in cities if c][:10]
+    if cities:
+        out["cities"] = cities
+    interests = [i for i in (t.get("interests") or []) if i in TOPICS][:10]
+    if interests:
+        out["interests"] = interests
+    return out
+
+
+def promo_matches(promo, viewer_row, viewer_id):
+    """Подходит ли зритель под настройки аудитории (неизвестное — не мешает: нет даты рождения — показываем)"""
+    t = json.loads(promo["targeting"] or "{}")
+    if promo["goal"] in ("followers", "profile") and is_following(viewer_id, promo["owner"]):
+        return False                                   # цель — подписчики: уже подписанным не показываем
+    if "age_min" in t:
+        age = user_age(viewer_row)
+        if age is not None and not (t["age_min"] <= age <= t["age_max"]):
+            return False
+    if "gender" in t and "gender" in viewer_row.keys() and viewer_row["gender"] and viewer_row["gender"] != t["gender"]:
+        return False
+    if "countries" in t:
+        c = user_country(viewer_row)
+        if c is not None and c not in t["countries"]:
+            return False
+    if "cities" in t:
+        idx = viewer_row["city_idx"] if "city_idx" in viewer_row.keys() else None
+        if idx and idx not in {city_key(c) for c in t["cities"]}:
+            return False
+    if "interests" in t:
+        prof = taste_profile(viewer_id)
+        mine = {x["topic"] for x in prof["long"] + prof["recent"]} | set(interests_of(viewer_id) or [])
+        if mine and not mine & set(t["interests"]):
+            return False
+    return True
+
+
+def promo_active_rows():
+    now = time.time()
+    return q("SELECT * FROM promotions WHERE status = 'active' AND starts_at <= ? AND ends_at > ? AND impressions < target",
+             (now, now))
+
+
+def promo_today(promo):
+    day = time.time() - 86400
+    return q1("SELECT COUNT(*) c FROM promo_shows WHERE promo_id = ? AND at > ?", (promo["id"], day))["c"]
+
+
+def promo_pick(viewer_id, exclude=(), limit=1, query_hits=None):
+    """Продвигаемые ролики для этого зрителя: «в топе» — первыми, потом остальные по недобору показов"""
+    me_row = q1("SELECT * FROM users WHERE id = ?", (viewer_id,))
+    if not me_row:
+        return []
+    out = []
+    rows = promo_active_rows()
+    rows.sort(key=lambda r: (0 if r["kind"] == "top" else 1, r["impressions"] / max(1, r["target"])))
+    for p in rows:
+        if len(out) >= limit:
+            break
+        if p["owner"] == viewer_id or p["post_id"] in exclude or either_blocked(viewer_id, p["owner"]):
+            continue
+        if query_hits is not None and p["post_id"] not in query_hits:
+            continue
+        if q1("SELECT 1 FROM promo_shows WHERE promo_id = ? AND user_id = ?", (p["id"], viewer_id)):
+            continue                                    # одному человеку — один раз
+        if p["daily"] and promo_today(p) >= p["daily"]:
+            continue                                    # дневной лимит показов уже набран
+        if not promo_matches(p, me_row, viewer_id):
+            continue
+        post = q1("SELECT * FROM posts WHERE id = ? AND reel = 1", (p["post_id"],))
+        if not post:
+            continue
+        out.append((p, post))
+    return out
+
+
+def promo_shown(promo, viewer_id):
+    try:
+        run("INSERT INTO promo_shows(promo_id, user_id, at) VALUES (?,?,?)", (promo["id"], viewer_id, time.time()))
+        run("UPDATE promotions SET impressions = impressions + 1 WHERE id = ?", (promo["id"],))
+        if promo["impressions"] + 1 >= promo["target"]:
+            run("UPDATE promotions SET status = 'done' WHERE id = ?", (promo["id"],))
+    except INTEGRITY_ERRORS:
+        pass
+
+
+def promo_price(kind, target, days):
+    return PROMO_TOP_DAY * days if kind == "top" else int(round(target * PROMO_CPM / 1000))
+
+
+@route("GET", r"/v1/promo/options")
+def promo_options(req, me):
+    req.send_json(200, {
+        "free": PROMO_FREE, "cpm": PROMO_CPM, "top_day": PROMO_TOP_DAY, "packs": PROMO_PACKS,
+        "countries": [{"code": c, "name": n} for c, (_, n) in PROMO_COUNTRIES.items()],
+        "interests": list(TOPICS.keys()),
+    })
+
+
+@route("POST", r"/v1/posts/([a-f0-9]+)/promote")
+def promote_post(req, me, pid):
+    uid = me["id"]
+    post = q1("SELECT * FROM posts WHERE id = ? AND reel = 1", (pid,))
+    if not post or not (post["author"] == uid or owns_bot(uid, post["author"])):
+        raise ApiError(404, "not_found")
+    rate_limit("promo:" + uid, 20, 3600)
+    d = req.body_json()
+    kind = d.get("kind") if d.get("kind") in ("views", "budget", "top") else "views"
+    goal = d.get("goal") if d.get("goal") in ("views", "followers", "profile") else "views"
+    try:
+        days = max(1, min(int(d.get("days") or 1), 30))
+        daily = max(0, min(int(d.get("daily") or 0), 100000))
+        views = int(d.get("views") or 0)
+    except (TypeError, ValueError):
+        raise ApiError(400, "bad_value")
+    if kind == "views":
+        if views not in PROMO_PACKS:
+            raise ApiError(400, "bad_value")
+        target, daily_cap = views, 0
+        days = max(days, 3)
+    elif kind == "budget":
+        if daily < 100:
+            raise ApiError(400, "bad_value")
+        daily_cap = int(daily * 1000 / PROMO_CPM)
+        target = daily_cap * days
+    else:
+        if days not in (1, 3, 7):
+            raise ApiError(400, "bad_value")
+        target, daily_cap = 1000000, 0
+    # проверка: 18+, жалобы и запрещённые слова не продвигаем
+    text = dec(post["author"], "posts", COL["post_text"], pid, post["text_enc"]) or ""
+    reports = q1("SELECT COUNT(*) c FROM post_reports WHERE post_id = ?", (pid,))["c"]
+    status = "active"
+    reason = None
+    if post["sensitive"] or reports >= 3 or moderation.query_blocked(text):
+        status, reason = "rejected", "rules"
+    now = time.time()
+    price = promo_price(kind, target, days) if kind != "budget" else daily * days
+    prid = uuid.uuid4().hex
+    run("INSERT INTO promotions(id, post_id, owner, kind, goal, target, daily, days, targeting, price, status, created_at, starts_at, ends_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (prid, pid, post["author"], kind, goal, target, daily_cap, days, json.dumps(clean_targeting(d.get("targeting")), ensure_ascii=False),
+         price, status, now, now, now + days * 86400))
+    req.send_json(201, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,))), "reason": reason})
+
+
+def promo_json(p):
+    shown = q("SELECT user_id, at FROM promo_shows WHERE promo_id = ?", (p["id"],))
+    viewers = [r["user_id"] for r in shown]
+    views = likes = follows = 0
+    if viewers:
+        marks = _in(viewers)
+        views = q1("SELECT COUNT(*) c FROM post_viewers WHERE post_id = ? AND user_id IN (%s)" % marks, [p["post_id"]] + viewers)["c"]
+        likes = q1("SELECT COUNT(*) c FROM likes WHERE post_id = ? AND user_id IN (%s)" % marks, [p["post_id"]] + viewers)["c"]
+        follows = q1("SELECT COUNT(*) c FROM follows WHERE followee = ? AND created_at >= ? AND follower IN (%s)" % marks,
+                     [p["owner"], p["created_at"]] + viewers)["c"]
+    today = int(time.time() // 86400)
+    days = {}
+    for r in shown:
+        k = int(r["at"] // 86400)
+        days[k] = days.get(k, 0) + 1
+    status = p["status"]
+    if status == "active" and p["ends_at"] <= time.time():
+        status = "done"
+    spent = 0 if PROMO_FREE else (min(p["price"], int(round(p["impressions"] * PROMO_CPM / 1000))) if p["kind"] != "top" else p["price"])
+    return {"id": p["id"], "post_id": p["post_id"], "kind": p["kind"], "goal": p["goal"], "status": status,
+            "target": p["target"] if p["kind"] != "top" else None, "days": p["days"], "daily": p["daily"],
+            "targeting": json.loads(p["targeting"] or "{}"), "price": p["price"], "spent": spent, "free": PROMO_FREE,
+            "created_at": p["created_at"], "ends_at": p["ends_at"],
+            "impressions": p["impressions"], "views": views, "likes": likes, "follows": follows,
+            "daily_shows": [days.get(today - i, 0) for i in range(6, -1, -1)]}
+
+
+@route("GET", r"/v1/posts/([a-f0-9]+)/promotions")
+def post_promotions(req, me, pid):
+    post = q1("SELECT * FROM posts WHERE id = ?", (pid,))
+    if not post or not (post["author"] == me["id"] or owns_bot(me["id"], post["author"])):
+        raise ApiError(404, "not_found")
+    rows = q("SELECT * FROM promotions WHERE post_id = ? ORDER BY created_at DESC", (pid,))
+    req.send_json(200, {"promotions": [promo_json(r) for r in rows]})
+
+
+@route("POST", r"/v1/promotions/([a-f0-9]+)/(pause|resume|stop)")
+def promotion_action(req, me, prid, action):
+    p = q1("SELECT * FROM promotions WHERE id = ?", (prid,))
+    if not p or not (p["owner"] == me["id"] or owns_bot(me["id"], p["owner"])):
+        raise ApiError(404, "not_found")
+    if p["status"] in ("done", "rejected", "stopped"):
+        raise ApiError(409, "finished")
+    new = {"pause": "paused", "resume": "active", "stop": "stopped"}[action]
+    run("UPDATE promotions SET status = ? WHERE id = ?", (new, prid))
+    req.send_json(200, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,)))})
 
 
 # ---------- поиск в мессенджере: частые собеседники, боты и всё присланное во всех чатах ----------
