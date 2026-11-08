@@ -414,6 +414,35 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_comments_author ON comments(author)")
 ensure_column("posts", "comments_off", "comments_off INTEGER NOT NULL DEFAULT 0")   # автор выключил комментарии
 ensure_column("posts", "no_repost", "no_repost INTEGER NOT NULL DEFAULT 0")          # автор запретил репосты
 ensure_column("posts", "sensitive", "sensitive INTEGER NOT NULL DEFAULT 0")          # 18+/чувствительный контент — показывается с размытием
+ensure_column("posts", "labels_enc", "labels_enc BLOB")                               # пометки шортса: «Создано ИИ», место, реклама…
+LABEL_KINDS = ("ai", "place", "ad", "custom")
+
+
+def clean_labels(raw):
+    """Пометки над ником (как в TikTok): до 3 штук, у места и своей — короткий текст"""
+    out = []
+    for item in (raw or [])[:10] if isinstance(raw, list) else []:
+        if len(out) >= 3:
+            break
+        if not isinstance(item, dict) or item.get("kind") not in LABEL_KINDS:
+            continue
+        kind = item["kind"]
+        text = clean_line(item.get("text"), 60 if kind == "place" else 30) if kind in ("place", "custom") else ""
+        if kind in ("place", "custom") and not text:
+            continue
+        if any(o["kind"] == kind and kind != "custom" for o in out):
+            continue
+        out.append({"kind": kind, **({"text": text} if text else {})})
+    return out
+
+
+def labels_of(p):
+    if "labels_enc" not in p.keys() or not p["labels_enc"]:
+        return []
+    try:
+        return json.loads(dec(p["author"], "posts", COL["post_text"], p["id"] + "#labels", p["labels_enc"]) or "[]")
+    except ValueError:
+        return []
 ensure_column("media", "nsfw", "nsfw INTEGER NOT NULL DEFAULT 0")                     # авто-модерация: 18+ по модели — пост публикуется, но с размытием (для всех)
 ensure_column("messages", "purged", "purged INTEGER NOT NULL DEFAULT 0")              # комплаенс-ретеншн: удалено пользователем, но сохранено для выгрузки
 ensure_column("group_messages", "purged", "purged INTEGER NOT NULL DEFAULT 0")
@@ -1040,7 +1069,7 @@ def post_json(p, me_id):
         "views": (q1("SELECT views FROM post_stats WHERE post_id = ?", (pid,)) or {"views": 0})["views"],
         "comments": comments, "mine": author == me_id or (me_id and owns_bot(me_id, author)), "edited_at": p["edited_at"],
         "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
-        "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
+        "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]), "labels": labels_of(p),
     }
 
 
@@ -1098,7 +1127,7 @@ def posts_json(rows, me_id):
             "likes": p["likes_seed"] + likes.get(pid, 0), "liked_by_me": pid in liked, "views": views.get(pid, 0),
             "comments": comments.get(pid, 0), "mine": author == me_id or author in my_bots, "edited_at": p["edited_at"],
             "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
-            "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]),
+            "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]), "labels": labels_of(p),
         })
     return out
 
@@ -3711,6 +3740,10 @@ def make_post(req, me, author):
                  music_enc, music_media, mkey, 1 if body.get("comments_off") else 0, 1 if (reel and body.get("no_repost")) else 0,
                  1 if (not reel and body.get("wall_only")) else 0, sensitive))
             write_post_media(pid, items)
+            labels = clean_labels(body.get("labels")) if reel else []
+            if labels:
+                run("UPDATE posts SET labels_enc = ? WHERE id = ?",
+                    (enc(author, "posts", COL["post_text"], pid + "#labels", json.dumps(labels, ensure_ascii=False)), pid))
             if duet_of:
                 run("UPDATE posts SET duet_of = ? WHERE id = ?", (duet_of, pid))
             run("COMMIT")

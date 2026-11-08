@@ -341,3 +341,8 @@ while True:
 - `POST /v1/reels/search/track {"q", "events": [{"post_id", "kind": "shown"|"autoplay"|"open"}]}` — для статистики автора:
   в `GET /v1/posts/<id>/stats` поле `search` (увидели, проигрывалось само, открыли, доля открытий, запросы).
   Проверка: `python3 tests/test_reel_search_tabs.py`.
+
+## Пометки шортса
+
+`POST /v1/posts` с `"reel": true` принимает `"labels": [{"kind": "ai"|"place"|"ad"|"custom", "text"?}]` — до трёх
+(«Создано ИИ», место, «Реклама», своя). В ответе поста — поле `labels`. Показываются над ником автора.

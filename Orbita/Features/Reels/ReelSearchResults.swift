@@ -242,6 +242,8 @@ struct ReelSearchResults: View {
     let suspended: Bool
     var onOpen: ([Reel], String) -> Void
     var onSearch: (String) -> Void
+    /// «Фото»: пост открывается страницей (медиа, полное описание, комментарии), а не лентой
+    var onOpenDetail: (Reel) -> Void = { _ in }
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.lang) private var lang
@@ -329,7 +331,7 @@ struct ReelSearchResults: View {
                          onOpen: { items, id in
                              track(id, "open")
                              autoplay.suspended = true
-                             onOpen(items, id)
+                             if t == .photo, let r = items.first(where: { $0.id == id }) { onOpenDetail(r) } else { onOpen(items, id) }
                          },
                          onShown: { id in track(id, "shown") })
         case .people: PeoplePage(query: query)

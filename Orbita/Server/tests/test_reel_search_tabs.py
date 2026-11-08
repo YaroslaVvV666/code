@@ -36,5 +36,11 @@ req("POST", "/v1/reels/search/track", tb, {"q": "зимний вайб", "events
 st = (jbody(req("GET", "/v1/posts/%s/stats" % pid, ta)[1]) or {}).get("search", {})
 check("статистика автора: показ, автопроигрывание, открытие, запрос", st.get("shown") == 1 and st.get("autoplay") == 1 and st.get("opened") == 1
       and st.get("queries", [{}])[0].get("q") == "зимний вайб", st)
+# пометки шортса: «Создано ИИ» и место — сохраняются, мусор отбрасывается, больше трёх нельзя
+s, body, _ = req("POST", "/v1/posts", ta, {"text": "с пометками", "media": [{"id": img, "width": 600, "height": 800}], "reel": True,
+                                          "labels": [{"kind": "ai"}, {"kind": "place", "text": "Улица Пушкина"}, {"kind": "hack"},
+                                                     {"kind": "ai"}, {"kind": "custom", "text": "Мой влог"}, {"kind": "ad"}]})
+labels = (jbody(body) or {}).get("labels")
+check("пометки сохранены", labels == [{"kind": "ai"}, {"kind": "place", "text": "Улица Пушкина"}, {"kind": "custom", "text": "Мой влог"}], labels)
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)

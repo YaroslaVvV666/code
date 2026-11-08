@@ -209,6 +209,7 @@ struct ReelsView: View {
     @State private var duetFor: Post?                   // снять дуэт с этим шортсом
     @State private var showComposer = false
     @State private var showSearch = false          // поиск по шортсам: текущее видео стоит
+    @State private var detailFor: Reel?            // «ещё» в подписи: страница поста целиком
     @State private var searchQuery = ""            // предзаполненный запрос (нажали на #хэштег)
     @State private var musicFor: PostMusic?
     @State private var soundTrackID = ""
@@ -436,7 +437,8 @@ struct ReelsView: View {
                                     ReelPage(reel: reel,
                                              active: reel.id == current,
                                              near: abs(index - currentIndex) <= 1,
-                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active,       // пока открыто «выложить видео», текущий ролик стоит
+                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active
+                                                 || detailFor != nil,       // пока открыто «выложить видео» или страница поста, текущий ролик стоит
                                              topInset: topInset,
                                              bottomClear: bottomClear,
                                              onLike: { model.toggleLike(reel.id, session: session) },
@@ -452,7 +454,8 @@ struct ReelsView: View {
                                              onFollow: { follow(reel) },
                                              onUnfollow: { unfollow(reel) },
                                              showCheck: model.checkAuthors.contains(reel.post.author.id),
-                                             onHide: { hide(reel) })
+                                             onHide: { hide(reel) },
+                                             onOpenDetail: { detailFor = reel })
                                         .containerRelativeFrame([.horizontal, .vertical])      // страница ровно по окну ленты: соседний ролик не заезжает и страница не сдвигается
                                         .clipped()                                             // и ничего не рисуется за пределами своей страницы
                                         .id(reel.id)
@@ -608,6 +611,13 @@ struct ReelsView: View {
         .fullScreenCover(item: $duetFor) { post in
             DuetRecorderView(original: post) { await model.showMine(session: session); current = model.reels.first?.id }
                 .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+        .fullScreenCover(item: $detailFor) { reel in
+            ReelDetailPage(reel: reel, onClose: { detailFor = nil },
+                           onOpenTag: { tag in detailFor = nil
+                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { searchQuery = "#" + tag; showSearch = true } })
+                .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
         .fullScreenCover(isPresented: $showSearch) {
@@ -852,6 +862,7 @@ struct ReelPage: View {
     var onUnfollow: () -> Void = {}
     var showCheck: Bool = false
     var onHide: () -> Void = {}
+    var onOpenDetail: () -> Void = {}             // «ещё»: длинная подпись — страница поста целиком
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.lang) private var lang
@@ -1559,8 +1570,10 @@ struct ReelPage: View {
 
     private var captionAttributed: Text {
         let full = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cut = !expanded && full.count > collapsedLimit
-        let shown = cut ? String(full.prefix(collapsedLimit)).trimmingCharacters(in: .whitespaces) + "… " : full
+        let multiline = full.contains("\n")
+        let cut = !expanded && (full.count > collapsedLimit || multiline)
+        let firstLine = multiline ? String(full.prefix { $0 != "\n" }) : full
+        let shown = cut ? String(firstLine.prefix(collapsedLimit)).trimmingCharacters(in: .whitespaces) + "… " : full
         var result = AttributedString()
         for (i, word) in shown.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
             var piece = AttributedString((i == 0 ? "" : " ") + String(word))
@@ -1690,15 +1703,29 @@ struct ReelPage: View {
                 }
                 .buttonStyle(.plain)
             }
-            Button(action: onAuthor) {
-                // как в TikTok: имя человека; нет имени — @username
-                Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
-                     ? (post.author.username.map { "@" + $0 } ?? "")
-                     : post.author.name)
-                    .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
-                    .lineLimit(1)
+            // пометки автора — над ником (ниже строки о репостах), как в TikTok
+            if !post.labels.isEmpty { PostLabelsRow(labels: post.labels) }
+            HStack(spacing: 8) {
+                Button(action: onAuthor) {
+                    // как в TikTok: имя человека; нет имени — @username
+                    Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? (post.author.username.map { "@" + $0 } ?? "")
+                         : post.author.name)
+                        .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                if collage {
+                    // фото-пост: пометка «Фото» рядом с ником
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.on.square.fill").font(.system(size: 10, weight: .bold))
+                        Text(s.t("Фото", "Photo")).font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7).frame(height: 22)
+                    .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
             }
-            .buttonStyle(.plain)
             if let music = post.music {
                 Button(action: onMusic) {
                     HStack(spacing: 5) {
@@ -1727,7 +1754,16 @@ struct ReelPage: View {
                         return .handled
                     })
                     .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() } }
+                    .onTapGesture {
+                        // длинная подпись (или много строк) — «ещё» открывает страницу поста целиком; короткая — просто разворачивается
+                        let full = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if full.count > collapsedLimit || full.contains("\n") {
+                            Haptics.impact(.light)
+                            onOpenDetail()
+                        } else {
+                            withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
+                        }
+                    }
             }
         }
         .shadow(color: .black.opacity(0.55), radius: 4, y: 1)

@@ -71,6 +71,7 @@ struct ReelComposerView: View {
                         if prepared != nil { feedPreview }
                         PostOptionsCard(options: $options, showsRepost: true,
                                         hashtags: PostOptionsCard.hashtags(in: caption), detail: videoDetail)
+                        ReelLabelsCard(labels: $options.labels)          // «Создано ИИ», место, «Реклама»…
                         hints
                         if let errorText {
                             Text(errorText).font(.system(size: 14)).foregroundStyle(theme.danger)

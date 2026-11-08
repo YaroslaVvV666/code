@@ -57,6 +57,7 @@ struct ReelSearchView: View {
     @State private var results: [Reel] = []
     @State private var best: [SearchReel] = []        // первая страница «Лучшего» (с пометкой «Топовое в поиске»)
     @State private var openedList: [Reel] = []        // откуда открыли ролик: листается эта вкладка
+    @State private var detail: Reel?                  // фото-пост: страница целиком
     @State private var more = false
     @State private var loadingMore = false
     @State private var popular: [String] = []
@@ -82,6 +83,12 @@ struct ReelSearchView: View {
             popular = await session.extras.reelPopular()
             try? await Task.sleep(nanoseconds: 250_000_000)
             if phase == .idle { focused = true }
+        }
+        .fullScreenCover(item: $detail) { r in
+            ReelDetailPage(reel: r, onClose: { detail = nil },
+                           onOpenTag: { tag in detail = nil; text = "#" + tag; search("#" + tag) })
+                .environmentObject(session).environmentObject(flow)
+                .environment(\.theme, theme).environment(\.lang, lang)
         }
         .fullScreenCover(item: $opened) { reel in
             MusicShortsCover(reels: openedList.isEmpty ? results : openedList, startID: reel.id, onClose: { opened = nil })
@@ -136,13 +143,14 @@ struct ReelSearchView: View {
         case .idle: suggestions
         case .loading: VStack { ProgressView().tint(.white).padding(.top, 60); Spacer() }
         case .results:
-            ReelSearchResults(query: submitted, initialBest: best, initialMore: more, suspended: opened != nil,
+            ReelSearchResults(query: submitted, initialBest: best, initialMore: more, suspended: opened != nil || detail != nil,
                               onOpen: { list, id in
                                   focused = false
                                   openedList = list
                                   opened = list.first { $0.id == id }
                               },
-                              onSearch: { q in text = q; search(q) })
+                              onSearch: { q in text = q; search(q) },
+                              onOpenDetail: { r in focused = false; detail = r })
                 .id(submitted)
         case .empty:
             message(icon: "magnifyingglass", title: s.t("Ничего не найдено", "Nothing found"),

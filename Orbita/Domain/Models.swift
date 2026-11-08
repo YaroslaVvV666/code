@@ -146,8 +146,39 @@ struct Post: Identifiable, Equatable {
     var repostFriends: [Author] = [] // кто из друзей сделал репост (до 8)
     var duet: DuetRef? = nil          // дуэт: снято рядом с этим шортсом
     var origin: Author? = nil        // у репост-копии — автор оригинала
+    var labels: [PostLabel] = []     // пометки над ником: «Создано ИИ», место, «Реклама»…
     /// Создатель ролика: у репоста — автор оригинала, иначе автор
     var creator: Author { origin ?? author }
+}
+
+/// Пометка шортса (как в TikTok): видна над ником автора
+struct PostLabel: Equatable, Hashable, Codable {
+    enum Kind: String, Codable { case ai, place, ad, custom }
+    var kind: Kind
+    var text: String? = nil
+
+    var icon: String {
+        switch kind {
+        case .ai: return "sparkles"
+        case .place: return "mappin.and.ellipse"
+        case .ad: return "megaphone.fill"
+        case .custom: return "tag.fill"
+        }
+    }
+
+    func title(_ s: Strings) -> String {
+        switch kind {
+        case .ai: return s.t("Создано ИИ", "AI-generated")
+        case .ad: return s.t("Реклама", "Ad")
+        case .place, .custom: return text ?? ""
+        }
+    }
+
+    var json: [String: Any] {
+        var d: [String: Any] = ["kind": kind.rawValue]
+        if let text, !text.isEmpty { d["text"] = text }
+        return d
+    }
 }
 
 /// Параметры публикации, которые выбирает автор
@@ -156,6 +187,7 @@ struct PostOptions: Equatable {
     var noRepost = false             // запретить репосты (для шортсов)
     var wallOnly = false             // запись на своей стене: видна в профиле, в ленту публикаций не попадает
     var sensitive = false            // 18+/чувствительный контент — показывается с размытием
+    var labels: [PostLabel] = []     // шортс: пометки над ником
 }
 
 /// С чьим шортсом снят дуэт
