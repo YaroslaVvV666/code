@@ -367,18 +367,22 @@ struct ReelsView: View {
     private var pullIndicator: some View {
         let k = min(1, pullDist / ReelPullToRefresh.threshold)
         return ZStack {
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 3)
             if model.refreshing {
                 ProgressView().tint(.white)
             } else {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
-                    .rotationEffect(.degrees(Double(k) * 270))
+                // кольцо заполняется, пока тянешь; заполнилось — отпускай
+                Circle().trim(from: 0, to: k)
+                    .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: k >= 1 ? "arrow.clockwise" : "arrow.down")
+                    .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
             }
         }
-        .frame(width: 40, height: 40)
-        .background(Color.black.opacity(0.45), in: Circle())
-        .scaleEffect(model.refreshing ? 1 : 0.6 + 0.4 * k)
-        .opacity(model.refreshing ? 1 : Double(k))
+        .frame(width: 34, height: 34)
+        .opacity(model.refreshing ? 1 : Double(min(1, k * 1.6)))
+        .offset(y: model.refreshing ? 0 : min(pullDist, ReelPullToRefresh.threshold) * 0.35)
         .allowsHitTesting(false)
         .animation(.easeOut(duration: 0.2), value: model.refreshing)
     }
@@ -2281,7 +2285,7 @@ struct LiveLoopView: View {
 
 /// Следит за оттяжкой ленты выше первого ролика (iOS 18+): дотянул до порога и отпустил — обновление
 struct ReelPullToRefresh: ViewModifier {
-    static let threshold: CGFloat = 90
+    static let threshold: CGFloat = 110
     let enabled: Bool
     @Binding var pull: CGFloat
     let onRefresh: () -> Void
@@ -2290,18 +2294,23 @@ struct ReelPullToRefresh: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
             content
-                .onScrollGeometryChange(for: CGFloat.self) { g in -(g.contentOffset.y + g.contentInsets.top) } action: { _, over in
-                    let p = enabled ? max(0, over) : 0
-                    if abs(p - pull) > 0.5 || p == 0 { pull = p }
-                    let now = enabled && p >= Self.threshold
-                    if now != armed { armed = now; if now { Haptics.select() } }     // дотянул — лёгкий щелчок; вернул назад — отмена
+                // только оттяжка над первым роликом, шагами по 4 pt: при обычном листании значение всё время 0 —
+                // экран не пересчитывается на каждом кадре прокрутки (иначе лента начинает «залипать»)
+                .onScrollGeometryChange(for: Int.self) { g in
+                    guard enabled else { return 0 }
+                    let over = -(g.contentOffset.y + g.contentInsets.top)
+                    return over > 2 ? Int(over / 4) : 0
+                } action: { _, step in
+                    let p = CGFloat(step) * 4
+                    if p != pull { pull = p }
+                    let now = p >= Self.threshold
+                    if now != armed { armed = now; if now { Haptics.select() } }     // дотянул — щелчок; вернул назад — отмена
                 }
                 .onScrollPhaseChange { old, new in
-                    // палец отпустили: если дотянули — обновляем
-                    if old == .interacting, new != .interacting {
-                        if armed, enabled { onRefresh() }
-                        armed = false
-                    }
+                    // отпустили палец: дотянули до конца — обновляем ленту
+                    guard old == .interacting, new != .interacting else { return }
+                    if armed, enabled { onRefresh() }
+                    armed = false
                 }
         } else {
             content
