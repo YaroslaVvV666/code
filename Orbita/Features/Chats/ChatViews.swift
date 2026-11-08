@@ -54,6 +54,8 @@ struct ChatsListView: View {
     @State private var query = ""
     @State private var folder: ChatFolder = ChatFolder(rawValue: UserDefaults.standard.string(forKey: "chats.folder") ?? "") ?? .all
     /// Фильтры над поиском: показываются, если потянуть список вниз (и всегда, пока выбран не «Все»)
+    @State private var filterRest: CGFloat?           // положение верха списка в покое
+    @State private var filtersShownAt = Date.distantPast
     @State private var filtersShown = (UserDefaults.standard.string(forKey: "chats.folder") ?? "all") != "all"
     @ObservedObject private var prefs = ChatListPrefs.shared
     @ObservedObject private var drafts = ChatDraftSignal.shared          // «Черновик: …» в строках — сразу
@@ -377,12 +379,19 @@ struct ChatsListView: View {
                         Color.clear.frame(height: 0).id("chatsTop")
                             // потянули список вниз (выше поиска) — сверху выезжают фильтры; пролистали вниз — прячутся
                             .background(GeometryReader { g in
-                                Color.clear.onChange(of: g.frame(in: .named("chatsScroll")).minY) { _, y in
+                                Color.clear
+                                    .onAppear { if filterRest == nil { filterRest = g.frame(in: .named("chatsScroll")).minY } }
+                                    .onChange(of: g.frame(in: .named("chatsScroll")).minY) { _, raw in
+                                    // «верх списка» — где он стоит в покое (с отступами системы он не обязательно 0)
+                                    if filterRest == nil { filterRest = raw }
+                                    let y = raw - (filterRest ?? 0)
                                     if y > 44, !filtersShown {
                                         Haptics.impact(.soft)
+                                        filtersShownAt = Date()
                                         withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { filtersShown = true }
-                                    } else if y < -6, filtersShown, folder == .all {
-                                        // чуть пролистали вниз — фильтры сразу и мягко уходят
+                                    } else if y < -24, filtersShown, folder == .all,
+                                              Date().timeIntervalSince(filtersShownAt) > 0.6 {
+                                        // пролистали вниз — фильтры мягко уходят (не сразу после появления: список ещё «пружинит»)
                                         withAnimation(.easeInOut(duration: 0.28)) { filtersShown = false }
                                     }
                                 }
