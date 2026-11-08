@@ -446,7 +446,7 @@ private struct ViewerVideo: View {
                         LongPressGesture(minimumDuration: 0.35)
                             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
                             .onChanged { value in
-                                guard let player, playing else { return }
+                                guard playing else { return }
                                 switch value {
                                 case .second(true, let drag):
                                     if holdRate == nil {
