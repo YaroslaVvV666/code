@@ -174,6 +174,7 @@ struct FeedView: View {
             }
         }
         .sheet(isPresented: $showActivity, onDismiss: {
+            activity.markSeen()                    // посмотрел — колокольчик прячется до следующего нового
             if let a = pendingAuthor { pendingAuthor = nil; onOpenAuthor?(a) }
         }) {
             ActivityView(store: activity) { pendingAuthor = $0 }
