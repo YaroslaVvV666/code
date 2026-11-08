@@ -260,6 +260,10 @@ final class LocationFetcher: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     var denied: Bool { status == .denied || status == .restricted }
+    /// В Info.plist приложения нет текста разрешения — iOS тогда молча не даёт геопозицию (кнопки стоят серыми)
+    static var missingUsageKey: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "NSLocationWhenInUseUsageDescription") == nil
+    }
 
     func start() {
         if manager.authorizationStatus == .notDetermined { manager.requestWhenInUseAuthorization() }
@@ -329,7 +333,9 @@ struct LocationShareSheet: View {
                             .allowsHitTesting(false)
                             .transition(.scale.combined(with: .opacity))
                     }
-                    if fetcher.denied {
+                    if LocationFetcher.missingUsageKey {
+                        missingKeyCard
+                    } else if fetcher.denied {
                         deniedCard
                     }
                 }
@@ -355,7 +361,9 @@ struct LocationShareSheet: View {
                     .disabled(fetcher.location == nil)
                     row(icon: "dot.radiowaves.left.and.right", tint: Color(red: 0.22, green: 0.66, blue: 0.45),
                         title: s.t("Транслировать геопозицию", "Share live location"),
-                        subtitle: s.t("Собеседник видит, где вы, в реальном времени", "Updates in real time while you move")) {
+                        subtitle: fetcher.location == nil
+                            ? (fetcher.denied || LocationFetcher.missingUsageKey ? s.t("Нет доступа к геопозиции", "No location access") : s.t("Определяем, где вы…", "Locating…"))
+                            : s.t("Собеседник видит, где вы, в реальном времени", "Updates in real time while you move")) {
                         askLive = true
                     }
                     .disabled(fetcher.location == nil)
@@ -411,6 +419,21 @@ struct LocationShareSheet: View {
         if let name = p.name, !name.isEmpty { return name }
         let parts = [p.thoroughfare, p.subThoroughfare, p.locality].compactMap { $0 }.filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// Сборка без ключа геопозиции в Info.plist — объясняем, что добавить (иначе непонятно, почему всё серое)
+    private var missingKeyCard: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 26)).foregroundStyle(.orange)
+            Text(s.t("Геопозиция не настроена в сборке", "Location isn't set up in this build"))
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).multilineTextAlignment(.center)
+            Text(s.t("В Xcode: таргет → Info → добавьте «Privacy - Location When In Use Usage Description» с любым текстом. Для трансляции в фоне: Signing & Capabilities → Background Modes → Location updates.",
+                     "In Xcode: target → Info → add “Privacy - Location When In Use Usage Description”. For background sharing: Signing & Capabilities → Background Modes → Location updates."))
+                .font(.system(size: 13)).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center)
+        }
+        .padding(18)
+        .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(24)
     }
 
     private var deniedCard: some View {

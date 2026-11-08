@@ -39,13 +39,15 @@ targets:
         CFBundleDisplayName: Orbita
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, location]
         NSMicrophoneUsageDescription: Микрофон нужен для голосовых сообщений и видео-кружков.
         NSSpeechRecognitionUsageDescription: Нужно, чтобы расшифровывать голосовые сообщения в текст.
         NSCameraUsageDescription: Камера нужна для фото, видео-кружков и сканирования QR-кодов.
         NSContactsUsageDescription: Контакты нужны, чтобы найти друзей, которые уже в Orbita.
         NSPhotoLibraryUsageDescription: Доступ к фото нужен, чтобы отправлять их в чаты и публикации.
         NSPhotoLibraryAddUsageDescription: Нужно, чтобы сохранять фото и видео из чатов в галерею.
+        NSLocationWhenInUseUsageDescription: Геопозиция нужна, чтобы отправлять своё местоположение и транслировать его в чат.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Чтобы трансляция геопозиции продолжалась, когда приложение свёрнуто.
         NSLocalNetworkUsageDescription: Нужно для подключения к вашему серверу Orbita в локальной сети.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
