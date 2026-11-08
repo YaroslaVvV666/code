@@ -147,8 +147,16 @@ struct Post: Identifiable, Equatable {
     var duet: DuetRef? = nil          // дуэт: снято рядом с этим шортсом
     var origin: Author? = nil        // у репост-копии — автор оригинала
     var labels: [PostLabel] = []     // пометки над ником: «Создано ИИ», место, «Реклама»…
+    var ad: PostAd? = nil            // модератор признал продвижение рекламой: пометка и данные рекламодателя
     /// Создатель ролика: у репоста — автор оригинала, иначе автор
     var creator: Author { origin ?? author }
+}
+
+/// Реклама по закону: пометка «Реклама», рекламодатель, ИНН и токен erid
+struct PostAd: Equatable, Hashable, Codable {
+    let name: String
+    let inn: String
+    let erid: String?
 }
 
 /// Пометка шортса (как в TikTok): видна над ником автора

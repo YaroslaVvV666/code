@@ -78,6 +78,7 @@ struct PostDTO: Decodable {
     let music: MusicDTO?
     let duet: DuetDTO?
     let labels: [PostLabel]?
+    let ad: PostAd?
 
     struct MusicDTO: Decodable { let title: String; let artist: String; let media: String }
     struct DuetDTO: Decodable { let id: String; let author: AuthorDTO }
@@ -94,7 +95,7 @@ struct PostDTO: Decodable {
              isRepost: isRepost ?? false, allowRepost: allowRepost ?? true,
              sensitive: sensitive ?? false,
              repostFriends: (repostFriends ?? []).map(\.model), duet: duet.map { DuetRef(postID: $0.id, author: $0.author.model) },
-             origin: origin?.model, labels: labels ?? [])
+             origin: origin?.model, labels: labels ?? [], ad: ad)
     }
 }
 

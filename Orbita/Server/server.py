@@ -1074,6 +1074,7 @@ def post_json(p, me_id):
         "comments": comments, "mine": author == me_id or (me_id and owns_bot(me_id, author)), "edited_at": p["edited_at"],
         "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
         "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]), "labels": labels_of(p),
+        **({"ad": ad} if p["reel"] and (ad := ad_info(pid)) else {}),
     }
 
 
@@ -1132,6 +1133,7 @@ def posts_json(rows, me_id):
             "comments": comments.get(pid, 0), "mine": author == me_id or author in my_bots, "edited_at": p["edited_at"],
             "comments_enabled": (not p["comments_off"]) and ((author == me_id or policy_allows(owner, me_id, owner["comments_policy"])) if owner else True),
             "allow_repost": not p["no_repost"], "sensitive": bool(p["sensitive"]), "labels": labels_of(p),
+            **({"ad": ad} if p["reel"] and (ad := ad_info(pid)) else {}),
         })
     return out
 
@@ -7603,7 +7605,36 @@ DB.execute("CREATE TABLE IF NOT EXISTS promotions(id TEXT PRIMARY KEY, post_id T
            "starts_at REAL NOT NULL, ends_at REAL NOT NULL, impressions INTEGER NOT NULL DEFAULT 0)")
 DB.execute("CREATE TABLE IF NOT EXISTS promo_shows(promo_id TEXT NOT NULL, user_id TEXT NOT NULL, at REAL NOT NULL, "
            "PRIMARY KEY(promo_id, user_id))")
+# модерация: каждое продвижение проверяет админ — «обычное видео» (без пометок) или «реклама» (пометка, рекламодатель, erid)
+ensure_column("promotions", "ad_kind", "ad_kind TEXT")              # personal | ad
+ensure_column("promotions", "advertiser", "advertiser TEXT")        # {"type": "ooo"|"ip"|"self", "name", "inn"}
+ensure_column("promotions", "erid", "erid TEXT")
+ensure_column("promotions", "note", "note TEXT")                    # причина отказа / комментарий модератора
+ensure_column("promotions", "decided_at", "decided_at REAL")
 PROMO_FREE = os.environ.get("ORBITA_PROMO_FREE", "1") == "1"
+
+
+def clean_advertiser(a):
+    """Рекламодатель: ООО / ИП / самозанятый, название или ФИО, ИНН (10 цифр у организации, 12 у ИП и самозанятого)"""
+    if not isinstance(a, dict):
+        return None
+    t = a.get("type") if a.get("type") in ("ooo", "ip", "self") else None
+    name = clean_line(a.get("name"), 120)
+    inn = re.sub(r"\D", "", str(a.get("inn") or ""))
+    if not t or not name or len(inn) not in ((10,) if t == "ooo" else (12,)):
+        return None
+    return {"type": t, "name": name, "inn": inn}
+
+
+def ad_info(pid):
+    """Пометка «Реклама» для зрителей: если модератор признал продвижение рекламой"""
+    r = q1("SELECT advertiser, erid FROM promotions WHERE post_id = ? AND ad_kind = 'ad' AND status IN ('active','paused','done') "
+           "AND advertiser IS NOT NULL ORDER BY created_at DESC LIMIT 1", (pid,))
+    if not r:
+        return None
+    a = json.loads(r["advertiser"])
+    prefix = {"ooo": "", "ip": "ИП ", "self": ""}.get(a["type"], "")
+    return {"name": prefix + a["name"], "inn": a["inn"], "erid": r["erid"]}
 PROMO_CPM = 150                   # ₽ за 1000 показов
 PROMO_TOP_DAY = 199               # ₽ за сутки «в топе»
 PROMO_PACKS = [1000, 5000, 20000, 50000]
@@ -7782,17 +7813,20 @@ def promote_post(req, me, pid):
     # проверка: 18+, жалобы и запрещённые слова не продвигаем
     text = dec(post["author"], "posts", COL["post_text"], pid, post["text_enc"]) or ""
     reports = q1("SELECT COUNT(*) c FROM post_reports WHERE post_id = ?", (pid,))["c"]
-    status = "active"
+    status = "review"                                  # сначала — на проверку админу
     reason = None
     if post["sensitive"] or reports >= 3 or moderation.query_blocked(text):
         status, reason = "rejected", "rules"
+    advertiser = clean_advertiser(d.get("business")) if d.get("business") else None
+    if d.get("business") and not advertiser:
+        raise ApiError(400, "bad_advertiser")
     now = time.time()
     price = promo_price(kind, target, days) if kind != "budget" else daily * days
     prid = uuid.uuid4().hex
-    run("INSERT INTO promotions(id, post_id, owner, kind, goal, target, daily, days, targeting, price, status, created_at, starts_at, ends_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    run("INSERT INTO promotions(id, post_id, owner, kind, goal, target, daily, days, targeting, price, status, created_at, starts_at, ends_at, advertiser) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (prid, pid, post["author"], kind, goal, target, daily_cap, days, json.dumps(clean_targeting(d.get("targeting")), ensure_ascii=False),
-         price, status, now, now, now + days * 86400))
+         price, status, now, now, now + days * 86400, json.dumps(advertiser, ensure_ascii=False) if advertiser else None))
     req.send_json(201, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,))), "reason": reason})
 
 
@@ -7820,7 +7854,9 @@ def promo_json(p):
             "targeting": json.loads(p["targeting"] or "{}"), "price": p["price"], "spent": spent, "free": PROMO_FREE,
             "created_at": p["created_at"], "ends_at": p["ends_at"],
             "impressions": p["impressions"], "views": views, "likes": likes, "follows": follows,
-            "daily_shows": [days.get(today - i, 0) for i in range(6, -1, -1)]}
+            "daily_shows": [days.get(today - i, 0) for i in range(6, -1, -1)],
+            "ad_kind": p["ad_kind"], "note": p["note"], "erid": p["erid"],
+            "advertiser": json.loads(p["advertiser"]) if p["advertiser"] else None}
 
 
 @route("GET", r"/v1/posts/([a-f0-9]+)/promotions")
@@ -7839,9 +7875,132 @@ def promotion_action(req, me, prid, action):
         raise ApiError(404, "not_found")
     if p["status"] in ("done", "rejected", "stopped"):
         raise ApiError(409, "finished")
+    if action != "stop" and p["status"] in ("review", "needs_info"):
+        raise ApiError(409, "not_approved")              # пока не проверено — только отменить
     new = {"pause": "paused", "resume": "active", "stop": "stopped"}[action]
     run("UPDATE promotions SET status = ? WHERE id = ?", (new, prid))
     req.send_json(200, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,)))})
+
+
+def promo_start(prid):
+    """Одобрено — отсчёт дней с этого момента"""
+    p = q1("SELECT * FROM promotions WHERE id = ?", (prid,))
+    now = time.time()
+    run("UPDATE promotions SET status = 'active', starts_at = ?, ends_at = ?, decided_at = ? WHERE id = ?",
+        (now, now + p["days"] * 86400, now, prid))
+
+
+@route("POST", r"/v1/promotions/([a-f0-9]+)/advertiser")
+def promotion_advertiser(req, me, prid):
+    """Модератор признал ролик рекламой — автор указывает рекламодателя, и продвижение запускается"""
+    p = q1("SELECT * FROM promotions WHERE id = ?", (prid,))
+    if not p or not (p["owner"] == me["id"] or owns_bot(me["id"], p["owner"])):
+        raise ApiError(404, "not_found")
+    a = clean_advertiser(req.body_json())
+    if not a:
+        raise ApiError(400, "bad_advertiser")
+    run("UPDATE promotions SET advertiser = ? WHERE id = ?", (json.dumps(a, ensure_ascii=False), prid))
+    if p["status"] == "needs_info":
+        promo_start(prid)
+    req.send_json(200, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,)))})
+
+
+@route("GET", r"/v1/admin/promotions", auth=False)
+def admin_promotions(req, me):
+    require_admin(req)
+    status = req.query().get("status") or "review"
+    rows = q("SELECT * FROM promotions WHERE status = ? ORDER BY created_at ASC LIMIT 100", (status,))
+    out = []
+    for p in rows:
+        post = q1("SELECT * FROM posts WHERE id = ?", (p["post_id"],))
+        if not post:
+            continue
+        media = [{"id": m["media_id"], "kind": m["kind"], "thumb": m["thumb"] if "thumb" in m.keys() else None}
+                 for m in q("SELECT * FROM post_media WHERE post_id = ? ORDER BY position", (post["id"],))]
+        b = user_brief(post["author"])
+        out.append({**promo_json(p), "text": dec(post["author"], "posts", COL["post_text"], post["id"], post["text_enc"]) or "",
+                    "labels": labels_of(post), "media": media, "author": {"id": post["author"], "name": b["name"], "username": b.get("username")}})
+    admin_audit(req, "promo_list", status)
+    req.send_json(200, {"promotions": out})
+
+
+@route("POST", r"/v1/admin/promotions/([a-f0-9]+)/decide", auth=False)
+def admin_promotion_decide(req, me, prid):
+    """personal — обычное видео, без пометок; ad — реклама (пометка, рекламодатель, erid); reject — отказ с причиной"""
+    require_admin(req)
+    p = q1("SELECT * FROM promotions WHERE id = ?", (prid,))
+    if not p:
+        raise ApiError(404, "not_found")
+    d = req.body_json()
+    decision = d.get("decision")
+    note = clean_line(d.get("note"), 300)
+    erid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("erid") or ""))[:64] or None
+    if decision == "personal":
+        run("UPDATE promotions SET ad_kind = 'personal', note = ? WHERE id = ?", (note, prid))
+        promo_start(prid)
+        push_notice(p["owner"], "Продвижение одобрено", "Ваш ролик уже показывается большему числу людей", {"promo": prid})
+    elif decision == "ad":
+        run("UPDATE promotions SET ad_kind = 'ad', note = ?, erid = ? WHERE id = ?", (note, erid, prid))
+        if p["advertiser"]:
+            promo_start(prid)
+            push_notice(p["owner"], "Продвижение одобрено как реклама", "Ролик показывается с пометкой «Реклама»", {"promo": prid})
+        else:
+            run("UPDATE promotions SET status = 'needs_info', decided_at = ? WHERE id = ?", (time.time(), prid))
+            push_notice(p["owner"], "Нужны данные рекламодателя", "Ролик продвигает товары или услуги — укажите рекламодателя", {"promo": prid})
+    elif decision == "reject":
+        run("UPDATE promotions SET status = 'rejected', note = ?, decided_at = ? WHERE id = ?", (note or "Не соответствует правилам", time.time(), prid))
+        push_notice(p["owner"], "Продвижение отклонено", note or "Ролик не соответствует правилам продвижения", {"promo": prid})
+    else:
+        raise ApiError(400, "bad_value")
+    admin_audit(req, "promo_" + decision, prid)
+    req.send_json(200, {"promotion": promo_json(q1("SELECT * FROM promotions WHERE id = ?", (prid,)))})
+
+
+ADMIN_PROMO_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orbita — модерация продвижений</title><style>
+body{font-family:-apple-system,system-ui,sans-serif;background:#0d0f14;color:#eef;margin:0;padding:16px}
+h1{font-size:20px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}input,select,textarea{background:#1a1d26;color:#eef;border:1px solid #2b3040;border-radius:10px;padding:9px}
+button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}.ok{background:#2fbf71;color:#fff}.ad{background:#ff8a3d;color:#fff}.no{background:#ff4d5e;color:#fff}.gh{background:#262b38;color:#eef}
+.card{background:#151821;border:1px solid #232838;border-radius:16px;padding:14px;margin-bottom:14px;display:grid;grid-template-columns:220px 1fr;gap:14px}
+.media{display:flex;gap:6px;overflow:auto}.media video,.media img{width:200px;height:300px;object-fit:cover;border-radius:10px;background:#000}
+.muted{color:#8a90a6;font-size:13px}.chip{display:inline-block;background:#262b38;border-radius:6px;padding:2px 8px;margin:2px;font-size:12px}
+@media(max-width:640px){.card{grid-template-columns:1fr}}</style></head><body>
+<h1>Модерация продвижений</h1>
+<div class="bar"><input id="tok" type="password" placeholder="Токен администратора" size="28">
+<select id="st"><option value="review">На проверке</option><option value="needs_info">Ждут рекламодателя</option><option value="active">Идут</option><option value="rejected">Отклонены</option></select>
+<button class="gh" onclick="load()">Обновить</button></div>
+<p class="muted">Обычное видео (природа, жизнь, хобби) — «Обычное», без пометок. Продаёт товары/услуги, магазин, бренд, курс — «Реклама»: у зрителей будет пометка и данные рекламодателя.</p>
+<div id="list"></div>
+<script>
+const H=()=>({"X-Admin-Token":document.getElementById("tok").value,"X-Admin-Label":"web"});
+document.getElementById("tok").value=localStorage.getItem("orbitaAdmin")||"";
+async function media(id,kind,el){const r=await fetch("/v1/admin/media/"+id,{headers:H()});if(!r.ok)return;const u=URL.createObjectURL(await r.blob());
+const x=document.createElement(kind==="video"?"video":"img");x.src=u;if(kind==="video"){x.controls=true;x.muted=true;x.loop=true}el.appendChild(x)}
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+async function load(){localStorage.setItem("orbitaAdmin",document.getElementById("tok").value);
+const r=await fetch("/v1/admin/promotions?status="+document.getElementById("st").value,{headers:H()});const L=document.getElementById("list");
+if(!r.ok){L.innerHTML="<p>Нет доступа ("+r.status+")</p>";return}const d=await r.json();L.innerHTML=d.promotions.length?"":"<p class=muted>Пусто</p>";
+for(const p of d.promotions){const c=document.createElement("div");c.className="card";const adv=p.advertiser?("<div>Рекламодатель: <b>"+esc(p.advertiser.name)+"</b>, ИНН "+esc(p.advertiser.inn)+"</div>"):"<div class=muted>Рекламодатель не указан</div>";
+c.innerHTML="<div class=media></div><div><div><b>"+esc(p.author.name)+"</b> <span class=muted>@"+esc(p.author.username||"")+"</span></div>"+
+"<p>"+esc(p.text)+"</p><div>"+(p.labels||[]).map(l=>"<span class=chip>"+esc(l.text||l.kind)+"</span>").join("")+"</div>"+
+"<div class=muted>"+p.kind+" · цель "+p.goal+" · "+p.days+" дн. · "+p.price+" ₽ · аудитория "+esc(JSON.stringify(p.targeting))+"</div>"+adv+
+"<div class=bar style='margin-top:10px'><input class=note placeholder='Комментарий / причина' size=30><input class=erid placeholder='erid (если есть)' size=14></div>"+
+"<div class=bar><button class=ok>Обычное видео</button><button class=ad>Реклама</button><button class=no>Отклонить</button></div></div>";
+const m=c.querySelector(".media");for(const x of p.media.slice(0,3))media(x.kind==="video"?x.id:x.id,x.kind,m);
+const go=async dec=>{const b={decision:dec,note:c.querySelector(".note").value,erid:c.querySelector(".erid").value};
+const rr=await fetch("/v1/admin/promotions/"+p.id+"/decide",{method:"POST",headers:{...H(),"Content-Type":"application/json"},body:JSON.stringify(b)});
+if(rr.ok)c.remove();else alert("Ошибка "+rr.status)};
+c.querySelector(".ok").onclick=()=>go("personal");c.querySelector(".ad").onclick=()=>go("ad");c.querySelector(".no").onclick=()=>go("reject");L.appendChild(c)}}
+if(document.getElementById("tok").value)load();
+</script></body></html>"""
+
+
+@route("GET", r"/admin/promotions", auth=False)
+def admin_promo_page(req, me):
+    """Страница модерации продвижений: токен вводится на странице, все действия — через /v1/admin/... с токеном"""
+    if not ADMIN_TOKEN:
+        raise ApiError(404, "not_found")
+    send_html(req, ADMIN_PROMO_PAGE)
 
 
 # ---------- поиск в мессенджере: частые собеседники, боты и всё присланное во всех чатах ----------

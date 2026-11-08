@@ -1719,7 +1719,7 @@ struct ReelPage: View {
                 .buttonStyle(.plain)
             }
             // пометки автора — над ником (ниже строки о репостах), как в TikTok
-            if !post.labels.isEmpty { PostLabelsRow(labels: post.labels) }
+            if !post.labels.isEmpty || post.ad != nil { PostLabelsRow(labels: post.labels, ad: post.ad) }
             HStack(spacing: 8) {
                 Button(action: onAuthor) {
                     // как в TikTok: имя человека; нет имени — @username

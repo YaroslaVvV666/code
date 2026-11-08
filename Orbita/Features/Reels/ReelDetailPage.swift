@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AVFoundation
+import UIKit
 
 // MARK: - Пометки шортса и страница поста целиком
 // Пометки («Создано ИИ», место, «Реклама»…) — над ником автора. Длинная подпись сворачивается с «ещё»;
@@ -9,14 +10,29 @@ import AVFoundation
 /// Пометки строкой: значок + текст на тёмной подложке
 struct PostLabelsRow: View {
     let labels: [PostLabel]
+    var ad: PostAd? = nil
     var onDark = true
     @Environment(\.lang) private var lang
     @Environment(\.theme) private var theme
+    @State private var showAd = false
 
     var body: some View {
         let s = Strings(lang: lang)
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
+                if ad != nil {
+                    // реклама по закону: «Реклама» + нажатие — данные рекламодателя (как «О рекламодателе» в VK)
+                    Button { showAd = true } label: {
+                        HStack(spacing: 4) {
+                            Text(s.t("Реклама", "Ad")).font(.system(size: 13, weight: .semibold))
+                            Image(systemName: "info.circle").font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(onDark ? Color.white : theme.text)
+                        .padding(.horizontal, 8).frame(height: 24)
+                        .background(onDark ? Color.black.opacity(0.4) : theme.text.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
                 ForEach(labels, id: \.self) { l in
                     HStack(spacing: 4) {
                         Image(systemName: l.icon).font(.system(size: 11, weight: .bold))
@@ -28,7 +44,57 @@ struct PostLabelsRow: View {
                 }
             }
         }
-        .scrollDisabled(labels.count < 3)
+        .scrollDisabled(labels.count + (ad == nil ? 0 : 1) < 3)
+        .sheet(isPresented: $showAd) {
+            if let ad { AdvertiserSheet(ad: ad).presentationDetents([.height(300)]) }
+        }
+    }
+}
+
+/// «О рекламодателе»: кто рекламирует, ИНН и токен erid
+struct AdvertiserSheet: View {
+    let ad: PostAd
+    @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(s.t("О рекламодателе", "About the advertiser")).font(.system(size: 20, weight: .bold)).foregroundStyle(theme.text)
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 14, weight: .bold)).foregroundStyle(theme.textSecondary)
+                        .frame(width: 32, height: 32).background(theme.surface, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            row(s.t("Рекламодатель", "Advertiser"), ad.name)
+            row(s.t("ИНН", "Tax ID"), ad.inn)
+            if let erid = ad.erid, !erid.isEmpty {
+                Button {
+                    UIPasteboard.general.string = erid
+                    Haptics.notify(.success)
+                    copied = true
+                } label: {
+                    row("erid", erid + (copied ? "  ✓" : ""))
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .background(theme.sheet.ignoresSafeArea())
+    }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            Text(value).font(.system(size: 17, weight: .medium)).foregroundStyle(theme.text).textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -290,7 +356,7 @@ struct ReelDetailPage: View {
     private var details: some View {
         let (title, body) = titleAndBody
         return VStack(alignment: .leading, spacing: 12) {
-            if !post.labels.isEmpty { PostLabelsRow(labels: post.labels) }
+            if !post.labels.isEmpty || post.ad != nil { PostLabelsRow(labels: post.labels, ad: post.ad) }
             if let title {
                 Text(title).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
             }

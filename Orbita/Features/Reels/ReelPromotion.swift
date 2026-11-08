@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UIKit
 
 // MARK: - Продвижение шортса (как в Instagram / VK / Avito)
 // Три способа: пакет просмотров, бюджет по дням, «в топ» на 1/3/7 дней. Цель и аудитория — по желанию.
@@ -56,6 +57,12 @@ struct Promotion: Decodable, Identifiable, Equatable {
     let likes: Int
     let follows: Int
     let dailyShows: [Int]
+    let adKind: String?             // personal — обычное видео; ad — реклама (решает модератор)
+    let note: String?               // комментарий модератора / причина отказа
+    let erid: String?
+    let advertiser: Advertiser?
+
+    struct Advertiser: Codable, Equatable { let type: String; let name: String; let inn: String }
 }
 
 extension ExtrasAPI {
@@ -74,6 +81,13 @@ extension ExtrasAPI {
         struct Box: Decodable { let promotions: [Promotion] }
         guard let d = try? await api.request("GET", "/v1/posts/\(postID)/promotions") else { return [] }
         return (try? decodeAPI(Box.self, from: d))?.promotions ?? []
+    }
+
+    func setAdvertiser(promotionID: String, type: String, name: String, inn: String) async throws -> Promotion {
+        struct Box: Decodable { let promotion: Promotion }
+        let d = try await api.request("POST", "/v1/promotions/\(promotionID)/advertiser",
+                                      body: ServerAPI.json(["type": type, "name": name, "inn": inn]))
+        return try decodeAPI(Box.self, from: d).promotion
     }
 
     func promotionAction(_ id: String, _ action: String) async -> Promotion? {
@@ -142,6 +156,10 @@ struct PromoteSheet: View {
     @State private var launching = false
     @State private var errorText: String?
     @State private var launched: Promotion?
+    @State private var business = false                // ролик продаёт товары/услуги — будет пометка «Реклама»
+    @State private var bizType = "ooo"
+    @State private var bizName = ""
+    @State private var bizINN = ""
 
     private var s: Strings { Strings(lang: lang) }
     private var cpm: Int { options?.cpm ?? 150 }
@@ -207,6 +225,7 @@ struct PromoteSheet: View {
                     modeBody.padding(.top, 6)
                 }
                 audience
+                businessBlock
                 summary
                 if let errorText {
                     Text(errorText).font(.system(size: 14)).foregroundStyle(theme.danger)
@@ -452,6 +471,28 @@ struct PromoteSheet: View {
         .animation(.easeOut(duration: 0.2), value: price)
     }
 
+    /// «Это реклама?» — магазин, услуги, бренд. Модератор всё равно проверит каждый ролик
+    private var businessBlock: some View {
+        section(s.t("РЕКЛАМА", "ADVERTISING")) {
+            Toggle(isOn: $business.animation(.spring(response: 0.35, dampingFraction: 0.85))) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(s.t("Ролик продаёт товары или услуги", "The video sells goods or services")).font(.system(size: 15)).foregroundStyle(theme.text)
+                    Text(s.t("Магазин, бренд, курс, услуги. Будет пометка «Реклама» и данные рекламодателя — так требует закон.",
+                             "Shop, brand, course, services. It gets an “Ad” label with advertiser details, as the law requires."))
+                        .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+                }
+            }
+            .tint(theme.accentColor)
+            if business {
+                AdvertiserFields(type: $bizType, name: $bizName, inn: $bizINN)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            Text(s.t("Каждый ролик проверяет модератор: обычные видео продвигаются без пометок, реклама — с пометкой.",
+                     "A moderator reviews every video: regular videos are promoted without labels, ads are labeled."))
+                .font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+        }
+    }
+
     private var launchButton: some View {
         Button { launch() } label: {
             HStack(spacing: 8) {
@@ -473,6 +514,15 @@ struct PromoteSheet: View {
         case .views: body["views"] = pack
         case .budget: body["daily"] = Int(daily); body["days"] = Int(days)
         case .top: body["days"] = topDays
+        }
+        if business {
+            guard AdvertiserFields.valid(type: bizType, name: bizName, inn: bizINN) else {
+                errorText = s.t("Проверьте рекламодателя: название и ИНН (10 цифр у ООО, 12 у ИП и самозанятых).",
+                                "Check the advertiser: name and tax ID.")
+                return
+            }
+            body["business"] = ["type": bizType, "name": bizName.trimmingCharacters(in: .whitespaces),
+                                "inn": bizINN.filter(\.isNumber)]
         }
         if customAudience {
             let t = PromoTargeting(ageMin: ageMin, ageMax: ageMax, gender: gender.isEmpty ? nil : gender,
@@ -509,9 +559,9 @@ struct PromoteSheet: View {
                                            startPoint: .topLeading, endPoint: .bottomTrailing), in: Circle())
                 .shadow(color: Color(red: 1, green: 0.25, blue: 0.4).opacity(0.45), radius: 20, y: 8)
                 .symbolEffect(.bounce, value: launched != nil)
-            Text(s.t("Продвижение запущено", "Promotion started")).font(.system(size: 22, weight: .bold)).foregroundStyle(theme.text)
-            Text(s.t("Результаты — в статистике ролика: показы, просмотры, лайки и новые подписчики.",
-                     "Results are in the video's statistics: impressions, views, likes and new followers."))
+            Text(s.t("Отправлено на проверку", "Sent for review")).font(.system(size: 22, weight: .bold)).foregroundStyle(theme.text)
+            Text(s.t("Модератор проверит ролик, обычно в течение суток, и продвижение запустится само. Мы пришлём уведомление. Результаты — в статистике ролика.",
+                     "A moderator will review the video, usually within a day, and the promotion starts automatically. We'll notify you. Results are in the video's statistics."))
                 .font(.system(size: 15)).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center).padding(.horizontal, 30)
             Spacer()
             Button { dismiss() } label: {
@@ -609,6 +659,8 @@ struct PromotionsBlock: View {
 
     private func statusInfo(_ st: String) -> (String, Color) {
         switch st {
+        case "review": return (s.t("На проверке", "In review"), Color(red: 0.35, green: 0.55, blue: 1))
+        case "needs_info": return (s.t("Нужны данные", "Needs info"), .orange)
         case "active": return (s.t("Идёт", "Running"), Color(red: 0.2, green: 0.75, blue: 0.45))
         case "paused": return (s.t("Пауза", "Paused"), .orange)
         case "rejected": return (s.t("Отклонено", "Rejected"), theme.danger)
@@ -629,7 +681,19 @@ struct PromotionsBlock: View {
                 Spacer()
                 Text(p.free ? s.t("бесплатно", "free") : "\(p.spent) / \(p.price) ₽").font(.system(size: 12)).foregroundStyle(theme.textSecondary)
             }
-            if let progress {
+            if p.adKind == "ad" {
+                Label(s.t("Реклама — у зрителей пометка и данные рекламодателя", "Ad — viewers see the label and advertiser details"),
+                      systemImage: "megaphone.fill").font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+            }
+            if p.status == "review" {
+                Label(s.t("Модератор проверяет ролик, обычно до суток", "A moderator is reviewing the video, usually within a day"),
+                      systemImage: "hourglass").font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            }
+            if let note = p.note, !note.isEmpty, p.status == "rejected" || p.status == "needs_info" {
+                Text(note).font(.system(size: 13)).foregroundStyle(p.status == "rejected" ? theme.danger : theme.text)
+            }
+            if p.status == "needs_info" { AdvertiserForm(promotion: p) { updated in replace(updated) } }
+            if let progress, p.status != "review", p.status != "needs_info" {
                 VStack(alignment: .leading, spacing: 4) {
                     GeometryReader { g in
                         ZStack(alignment: .leading) {
@@ -650,6 +714,9 @@ struct PromotionsBlock: View {
                 metric("+" + PromoText.num(p.follows), s.t("подписчики", "followers"))
             }
             miniChart(p.dailyShows)
+            if p.status == "review" || p.status == "needs_info" {
+                actionButton(s.t("Отменить", "Cancel"), "xmark", danger: true) { await act(p, "stop") }
+            }
             if p.status == "active" || p.status == "paused" {
                 HStack(spacing: 8) {
                     actionButton(p.status == "active" ? s.t("Пауза", "Pause") : s.t("Продолжить", "Resume"),
@@ -703,9 +770,103 @@ struct PromotionsBlock: View {
         .buttonStyle(PressStyle())
     }
 
+    private func replace(_ updated: Promotion) {
+        if let i = list.firstIndex(where: { $0.id == updated.id }) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { list[i] = updated }
+        }
+    }
+
     private func act(_ p: Promotion, _ action: String) async {
         if let updated = await session.extras.promotionAction(p.id, action), let i = list.firstIndex(where: { $0.id == p.id }) {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { list[i] = updated }
+        }
+    }
+}
+
+
+/// Поля рекламодателя: ООО / ИП / самозанятый, название или ФИО, ИНН
+struct AdvertiserFields: View {
+    @Binding var type: String
+    @Binding var name: String
+    @Binding var inn: String
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    static func valid(type: String, name: String, inn: String) -> Bool {
+        let digits = inn.filter(\.isNumber)
+        return !name.trimmingCharacters(in: .whitespaces).isEmpty && digits.count == (type == "ooo" ? 10 : 12)
+    }
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $type) {
+                Text(s.t("ООО", "Company")).tag("ooo")
+                Text(s.t("ИП", "Sole prop.")).tag("ip")
+                Text(s.t("Самозанятый", "Self-employed")).tag("self")
+            }
+            .pickerStyle(.segmented)
+            field(type == "ooo" ? s.t("Название, например ООО «Ромашка»", "Company name") : s.t("ФИО", "Full name"), $name)
+            field(s.t("ИНН", "Tax ID") + (type == "ooo" ? " (10 цифр)" : " (12 цифр)"), $inn)
+                .keyboardType(.numberPad)
+        }
+    }
+
+    private func field(_ placeholder: String, _ text: Binding<String>) -> some View {
+        TextField(placeholder, text: text)
+            .font(.system(size: 15))
+            .padding(.horizontal, 12).frame(height: 42)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// Модератор отметил ролик как рекламу — автор указывает рекламодателя прямо в карточке продвижения
+struct AdvertiserForm: View {
+    let promotion: Promotion
+    var onDone: (Promotion) -> Void
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var type = "ooo"
+    @State private var name = ""
+    @State private var inn = ""
+    @State private var saving = false
+    @State private var failed = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(s.t("Ролик продвигает товары или услуги. Укажите рекламодателя — после этого продвижение запустится с пометкой «Реклама».",
+                     "The video promotes goods or services. Add the advertiser and the promotion starts with an “Ad” label."))
+                .font(.system(size: 13)).foregroundStyle(theme.text)
+            AdvertiserFields(type: $type, name: $name, inn: $inn)
+            if failed {
+                Text(s.t("Проверьте название и ИНН", "Check the name and tax ID")).font(.system(size: 12)).foregroundStyle(theme.danger)
+            }
+            Button {
+                guard AdvertiserFields.valid(type: type, name: name, inn: inn) else { failed = true; return }
+                saving = true
+                failed = false
+                Task {
+                    defer { saving = false }
+                    if let p = try? await session.extras.setAdvertiser(promotionID: promotion.id, type: type,
+                                                                       name: name.trimmingCharacters(in: .whitespaces),
+                                                                       inn: inn.filter(\.isNumber)) {
+                        Haptics.notify(.success)
+                        onDone(p)
+                    } else { failed = true }
+                }
+            } label: {
+                HStack {
+                    if saving { ProgressView().tint(.white) }
+                    Text(s.t("Сохранить и запустить", "Save and start")).font(.system(size: 15, weight: .semibold))
+                }
+                .foregroundStyle(.white).frame(maxWidth: .infinity).frame(height: 44)
+                .background(theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(PressStyle())
+            .disabled(saving)
         }
     }
 }
