@@ -36,7 +36,7 @@ struct Theme {
 
     // поверхности
     // светлая тема: поля и чипы — светло-серые, а не белые на белом
-    var surface: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.925, green: 0.935, blue: 0.955) }
+    var surface: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.88, green: 0.89, blue: 0.915) }
     var stroke: Color {
         dark ? Color.white.opacity(0.09) : Color(red: 0.12, green: 0.15, blue: 0.25).opacity(0.13)
     }
@@ -44,10 +44,10 @@ struct Theme {
         dark ? Color.clear : Color(red: 0.15, green: 0.20, blue: 0.40).opacity(0.11)
     }
     var bar: Color {
-        dark ? Color(red: 0.05, green: 0.06, blue: 0.095).opacity(0.97) : Color.white.opacity(0.97)
+        dark ? Color(red: 0.05, green: 0.06, blue: 0.095).opacity(0.97) : Color(red: 0.94, green: 0.947, blue: 0.965).opacity(0.97)
     }
     var sheet: Color {
-        dark ? Color(red: 0.07, green: 0.08, blue: 0.11) : Color(red: 0.97, green: 0.975, blue: 0.99)
+        dark ? Color(red: 0.07, green: 0.08, blue: 0.11) : Color(red: 0.925, green: 0.932, blue: 0.955)
     }
 
     // текст
@@ -70,6 +70,8 @@ struct Theme {
     var danger: Color { Color(red: 0.90, green: 0.36, blue: 0.38) }
     var like: Color { Color(red: 0.92, green: 0.30, blue: 0.40) }
     var glow: Double { dark ? 0.28 : 0.22 }
+    /// Карточки в светлой теме — не белые, а приглушённые (на белом глаза устают)
+    var cardFill: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.955, green: 0.96, blue: 0.975) }
 }
 
 /// Цвет в долях 0…1 (хранится в настройках чата)

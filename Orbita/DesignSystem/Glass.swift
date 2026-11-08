@@ -30,6 +30,7 @@ private struct GlassModifier<S: Shape>: ViewModifier {
     private var effect: Glass {
         var glass = Glass.regular
         if let tint { glass = glass.tint(tint) }
+        else if !theme.dark { glass = glass.tint(Color(red: 0.80, green: 0.82, blue: 0.87).opacity(0.3)) }     // светлая: не слепит
         if interactive { glass = glass.interactive() }
         return glass
     }
@@ -60,7 +61,9 @@ struct CardModifier: ViewModifier {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                // светлая тема: стекло чуть затемнено — не слепит белым
+                .glassEffect(theme.dark ? .regular : .regular.tint(Color(red: 0.80, green: 0.82, blue: 0.87).opacity(0.35)),
+                             in: RoundedRectangle(cornerRadius: radius, style: .continuous))
                 // в светлой теме стекло на белом почти не видно — тонкая граница
                 .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(theme.dark ? Color.clear : theme.stroke, lineWidth: 0.75))
@@ -75,9 +78,9 @@ struct CardModifier: ViewModifier {
 
     private func legacy(_ content: Content) -> some View {
         content
-            .background(theme.dark ? Color.white.opacity(0.07) : Color.white, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(theme.cardFill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .stroke(LinearGradient(colors: [Color.white.opacity(theme.dark ? 0.16 : 0.9), theme.stroke],
+                .stroke(LinearGradient(colors: [Color.white.opacity(theme.dark ? 0.16 : 0.6), theme.stroke],
                                        startPoint: .top, endPoint: .bottom), lineWidth: 1))
             .shadow(color: theme.shadow, radius: 12, y: 4)
     }

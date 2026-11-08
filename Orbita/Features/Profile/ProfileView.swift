@@ -141,6 +141,7 @@ struct ProfileView: View {
         let inset = TopInset.value
         let bar = inset + 58                                      // высота свёрнутой шапки
         return ZStack(alignment: .top) {
+            ProfilePageTint(color: store.profile?.styleColor)
             // цвет идёт от самого верха экрана (под статус-баром); при прокрутке сжимается в плашку
             ProfileBackdrop(color: store.profile?.styleColor, emoji: store.profile?.styleEmoji,
                             height: max(bar, 400 + inset - max(-scrollY, probeY)))

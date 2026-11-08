@@ -109,10 +109,28 @@ struct ProfileBackdrop: View {
             }
         }
         .frame(height: height)
-        // нижний край плавно растворяется в фоне — без обрыва
-        .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 1 - 0.38 * Double(fade)),
+        // нижний край плавно растворяется в фоне — без обрыва (в светлой теме — длиннее, чтобы цвет не обрывался о белое)
+        .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                     .init(color: .black, location: 1 - (theme.dark || pair == nil ? 0.38 : 0.6) * Double(fade)),
                                      .init(color: fade > 0.01 ? .clear : .black, location: 1)], startPoint: .top, endPoint: .bottom))
         .allowsHitTesting(false)
+    }
+}
+
+/// Цвет профиля на всю страницу (светлая тема): вместо белого — мягкий оттенок цвета профиля сверху вниз.
+/// Шапка переходит в этот оттенок, а не в белое — без резкой границы, карточки лежат на цветном фоне
+struct ProfilePageTint: View {
+    let color: Int?
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        if let pair = ProfilePalette.pair(color), !theme.dark {
+            LinearGradient(colors: [pair.1.opacity(0.42), pair.1.opacity(0.22), pair.0.opacity(0.12)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
     }
 }
 
