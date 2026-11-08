@@ -29,6 +29,7 @@ final class ReelsModel: ObservableObject {
         // запоминаем, что было во вкладке, которую покидаем
         if loaded { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         generation += 1
+        skipOnce = []
         loading = false                 // старый запрос больше не держит «занято» — новая вкладка грузится сразу
         kind = new
         failed = nil
@@ -60,7 +61,7 @@ final class ReelsModel: ObservableObject {
         defer { if gen == generation { loading = false } }
         do {
             let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
-            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
+            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id) + skipOnce)
             // пока ждали ответ, переключили вкладку — этот ответ уже не для неё
             guard gen == generation, want == kind else { return }
             // «Подписки» — строго авторы, на которых ты подписан (и твои собственные не подмешиваются)
@@ -79,9 +80,13 @@ final class ReelsModel: ObservableObject {
 
     @Published var refreshing = false
 
+    /// После обновления «Рекомендаций» — уже показанные не повторяем (лента правда новая)
+    private var skipOnce: [String] = []
+
     func refresh(session: AppSession) async {
         refreshing = true
         defer { refreshing = false }
+        skipOnce = kind == .forYou ? Array(reels.map(\.id).prefix(60)) : []
         generation += 1
         loading = false
         exhausted = false
@@ -90,6 +95,13 @@ final class ReelsModel: ObservableObject {
         resumeID = nil
         saved[kind] = nil
         await loadMore(session: session)
+        if reels.isEmpty, !skipOnce.isEmpty {
+            // новых роликов нет — показываем снова лучшие, но с начала
+            skipOnce = []
+            exhausted = false
+            await loadMore(session: session)
+        }
+        skipOnce = []
     }
 
     func toggleLike(_ id: String, session: AppSession) {
@@ -349,6 +361,37 @@ struct ReelsView: View {
     @State private var backX: CGFloat = 0
     private var screenW: CGFloat { UIScreen.main.bounds.width }
 
+    @State private var pullDist: CGFloat = 0
+
+    /// Кружок «обновить» сверху: тянешь — проявляется и крутится, отпустил после порога — лента обновляется
+    private var pullIndicator: some View {
+        let k = min(1, pullDist / ReelPullToRefresh.threshold)
+        return ZStack {
+            if model.refreshing {
+                ProgressView().tint(.white)
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+                    .rotationEffect(.degrees(Double(k) * 270))
+            }
+        }
+        .frame(width: 40, height: 40)
+        .background(Color.black.opacity(0.45), in: Circle())
+        .scaleEffect(model.refreshing ? 1 : 0.6 + 0.4 * k)
+        .opacity(model.refreshing ? 1 : Double(k))
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.2), value: model.refreshing)
+    }
+
+    private func refreshFromPull() {
+        guard !model.refreshing else { return }
+        Haptics.impact(.medium)
+        Task {
+            await model.refresh(session: session)
+            current = model.reels.first?.id
+        }
+    }
+
     private func edgeChanged(_ v: DragGesture.Value) {
         if swipeKind == .vertical { return }
         if swipeKind == .none {
@@ -497,6 +540,9 @@ struct ReelsView: View {
                             .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
                         .offset(x: slideX)
                         .scrollPosition(id: $current)
+                        // на самом первом ролике потянул вниз и отпустил — лента обновляется
+                        .modifier(ReelPullToRefresh(enabled: fixed == nil && pinned == nil && currentIndex == 0 && !model.refreshing,
+                                                    pull: $pullDist) { refreshFromPull() })
                         .ignoresSafeArea()
                         // повторное нажатие «Шортс»: к первому ролику, а если уже на нём — свежая подборка
                         .onReceive(TabReselect.shared.publisher(.reels)) { _ in
@@ -512,6 +558,9 @@ struct ReelsView: View {
                         }
                     }
                     if !rotatedNow { topBar }
+                    if !rotatedNow, fixed == nil, pullDist > 4 || model.refreshing {
+                        pullIndicator.frame(maxHeight: .infinity, alignment: .top).padding(.top, topInset + 58)
+                    }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)      // что бы ни случилось внутри, лента не шире экрана и не съезжает
             }
@@ -2224,6 +2273,38 @@ struct LiveLoopView: View {
             if let loop { NotificationCenter.default.removeObserver(loop) }
             loop = nil
             player = nil
+        }
+    }
+}
+
+// MARK: - Потянуть вниз на первом ролике — обновить ленту
+
+/// Следит за оттяжкой ленты выше первого ролика (iOS 18+): дотянул до порога и отпустил — обновление
+struct ReelPullToRefresh: ViewModifier {
+    static let threshold: CGFloat = 90
+    let enabled: Bool
+    @Binding var pull: CGFloat
+    let onRefresh: () -> Void
+    @State private var armed = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { g in -(g.contentOffset.y + g.contentInsets.top) } action: { _, over in
+                    let p = enabled ? max(0, over) : 0
+                    if abs(p - pull) > 0.5 || p == 0 { pull = p }
+                    let now = enabled && p >= Self.threshold
+                    if now != armed { armed = now; if now { Haptics.select() } }     // дотянул — лёгкий щелчок; вернул назад — отмена
+                }
+                .onScrollPhaseChange { old, new in
+                    // палец отпустили: если дотянули — обновляем
+                    if old == .interacting, new != .interacting {
+                        if armed, enabled { onRefresh() }
+                        armed = false
+                    }
+                }
+        } else {
+            content
         }
     }
 }
