@@ -226,12 +226,15 @@ struct EmojiStickerPanel: View {
     var onCreateStickers: (() -> Void)? = nil
     /// Свои эмодзи из эмодзи-паков: вставляются прямо в текст
     var onCustomEmoji: ((CustomEmojiRef) -> Void)? = nil
+    /// Набор, который только что сделали или пополнили: панель открывается сразу на нём
+    var focusPackID: String? = nil
 
     private enum Tab: Hashable { case emoji, stickers }
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var tab: Tab = .emoji
+    @State private var focusApplied = false
     @State private var category = "smileys"
     @State private var packID: String?
     @State private var recent = EmojiData.recent
@@ -248,6 +251,8 @@ struct EmojiStickerPanel: View {
             Group {
                 if tab == .emoji { emojiTab } else { stickerTab }
             }
+            .onAppear { if focusPackID != nil, !focusApplied { focusApplied = true; tab = .stickers } }
+            .onChange(of: focusPackID) { _, f in if f != nil { tab = .stickers } }
             .frame(maxHeight: .infinity)
 
             bottomBar
@@ -513,8 +518,19 @@ struct EmojiStickerPanel: View {
                     .padding(.bottom, 8)
                 }
             }
+        .onAppear {
+            recents = RecentStickers.all; favs = FavoriteStickers.all
+            if let f = focusPackID, list.contains(where: { $0.id == f }) {
+                packID = f
+                DispatchQueue.main.async { proxy.scrollTo(f, anchor: .top) }
+            }
         }
-        .onAppear { recents = RecentStickers.all; favs = FavoriteStickers.all }
+        .onChange(of: focusPackID) { _, f in
+            guard let f, sections.contains(where: { $0.id == f }) else { return }
+            packID = f
+            withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(f, anchor: .top) }
+        }
+        }
     }
 
     // MARK: Нижняя панель

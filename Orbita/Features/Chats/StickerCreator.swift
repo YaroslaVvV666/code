@@ -5,6 +5,8 @@ import Combine
 /// Создание своих стикеров прямо в приложении: набор + картинки/короткие видео (анимированные), без бота.
 struct StickerCreatorSheet: View {
     var onChanged: () -> Void = {}
+    /// В какой набор только что добавили стикер (или какой набор создали) — панель сразу откроется на нём
+    var onPackTouched: (String) -> Void = { _ in }
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
@@ -151,7 +153,7 @@ struct StickerCreatorSheet: View {
         let title = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
         Task {
-            do { _ = try await repo.createStickerPack(title: title); await load(); onChanged() }
+            do { let made = try await repo.createStickerPack(title: title); await load(); onChanged(); onPackTouched(made.id) }
             catch { errorText = s.t("Не удалось создать набор", "Couldn't create pack") }
         }
     }
@@ -176,7 +178,7 @@ struct StickerCreatorSheet: View {
 
     private func addSticker(_ p: PendingSticker, emoji: String) async {
         guard !p.mediaID.isEmpty else { return }
-        do { try await repo.addSticker(packID: p.packID, mediaID: p.mediaID, emoji: emoji); await load(); onChanged() }
+        do { try await repo.addSticker(packID: p.packID, mediaID: p.mediaID, emoji: emoji); await load(); onChanged(); onPackTouched(p.packID) }
         catch { errorText = s.t("Не удалось добавить стикер", "Couldn't add sticker") }
     }
 

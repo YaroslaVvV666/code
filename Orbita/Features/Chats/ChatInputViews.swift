@@ -56,6 +56,7 @@ struct ChatInputBar: View {
     @State private var audioOnlyImport = false           // файл-пикер только для музыки
     @State private var showSecretPlace = false           // секрет: где откроется
     @State private var showStickerCreator = false
+    @State private var stickerFocus: String?          // набор, который только что сделали — панель откроется на нём
     @State private var kbVisible = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
     @State private var showArticle = false              // редактор статьи (сообщение из блоков)
@@ -225,8 +226,13 @@ struct ChatInputBar: View {
                 .sheetStyle(theme)
                 .presentationDetents([.medium])
         }
-        .sheet(isPresented: $showStickerCreator) {
-            StickerCreatorSheet(onChanged: { Task { await model.loadStickers() } })
+        .sheet(isPresented: $showStickerCreator, onDismiss: {
+            // сделали стикер прямо из клавиатуры — панель стикеров сразу открыта на этом наборе, без перезахода
+            guard stickerFocus != nil else { return }
+            if emojiOpen { showPanel() } else { toggleEmoji() }
+        }) {
+            StickerCreatorSheet(onChanged: { Task { await model.reloadStickers() } },
+                                onPackTouched: { stickerFocus = $0 })
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .sheetStyle(theme)
@@ -1157,6 +1163,7 @@ struct ChatInputBar: View {
     private func toggleEmoji() {
         if emojiOpen {
             emojiOpen = false
+            stickerFocus = nil
             controller.resetInputPanel()
         } else {
             emojiOpen = true
@@ -1176,7 +1183,8 @@ struct ChatInputBar: View {
                 onSent()
             },
             onCreateStickers: { showStickerCreator = true },
-            onCustomEmoji: { controller.insertCustomEmoji($0) })
+            onCustomEmoji: { controller.insertCustomEmoji($0) },
+            focusPackID: stickerFocus)
             .environment(\.theme, theme)
             .environment(\.lang, lang)
         controller.setInputPanel(panel)
