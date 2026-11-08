@@ -878,6 +878,8 @@ struct ReelPage: View {
     @State private var playing = false
     @State private var userPaused = false
     @State private var fast = false
+    @State private var fastRate: Float = 2            // зажали: ×2, ведёшь пальцем — от 1× до 3×
+    @State private var fastOrigin: CGFloat?
     @State private var ready = false
     @State private var burst = 0
     @State private var hearts: [FloatingHeart] = []
@@ -971,12 +973,28 @@ struct ReelPage: View {
                     .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 4000, perform: {
                         guard active, !userPaused else { return }
                         fast = true
+                        fastRate = 2
+                        fastOrigin = nil
                         player?.rate = 2
                         Haptics.impact(.light)
                     }, onPressingChanged: { pressing in
                         if !pressing, fast {
                             fast = false
+                            fastOrigin = nil
+                            fastRate = 2
                             if !userPaused { player?.rate = rateNow }
+                        }
+                    })
+                    // пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×)
+                    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { v in
+                        guard fast else { return }
+                        let x = forceFill ? v.location.y : v.location.x          // в повёрнутом режиме «вправо» — вниз по экрану
+                        if fastOrigin == nil { fastOrigin = x }
+                        let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
+                        if r != fastRate {
+                            fastRate = r
+                            player?.rate = r
+                            Haptics.select()
                         }
                     })
                 ForEach(hearts) { h in
@@ -1019,10 +1037,7 @@ struct ReelPage: View {
                 .onChange(of: fast) { _, v in onHold(v) }
                 .onDisappear { if fast { fast = false; onHold(false) } }
             if fast {
-                let badge = Text("2×  ▸▸")
-                    .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                    .padding(.horizontal, 14).frame(height: 32)
-                    .background(.ultraThinMaterial, in: Capsule())
+                let badge = HoldSpeedBadge(rate: fastRate)
                 if forceFill {
                     // повёрнутый режим: надпись сверху по центру повёрнутого видео
                     GeometryReader { geo in

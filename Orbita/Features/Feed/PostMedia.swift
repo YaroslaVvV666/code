@@ -395,6 +395,8 @@ private struct ViewerVideo: View {
     @State private var total: Double = 0
     @State private var scrubbing = false
     @State private var rate: Float = 1
+    @State private var holdRate: Float?                   // зажали видео: временная скорость (×2, ведёшь пальцем — 1…3)
+    @State private var holdOrigin: CGFloat?
     @State private var observer: Any?
     @State private var endObserver: NSObjectProtocol?
     @State private var statusObserver: NSKeyValueObservation?
@@ -436,6 +438,38 @@ private struct ViewerVideo: View {
                 // целиком по центру, чёрные поля вокруг — как фото
                 PlayerLayerView(player: player, gravity: .resizeAspect)
                     .allowsHitTesting(false)
+                // слой под кнопками: зажатие на видео (кнопки и полоса перемотки — выше и нажимаются как обычно)
+                Color.clear
+                    .contentShape(Rectangle())
+                    // зажал — ×2, как в шортсах; ведёшь влево — медленнее (1,9 … 1), вправо — быстрее (2,1 … 3); отпустил — прежняя скорость
+                    .highPriorityGesture(
+                        LongPressGesture(minimumDuration: 0.35)
+                            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+                            .onChanged { value in
+                                guard let player, playing else { return }
+                                switch value {
+                                case .second(true, let drag):
+                                    if holdRate == nil {
+                                        holdOrigin = drag?.location.x
+                                        Haptics.impact(.light)
+                                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { holdRate = 2 }
+                                        HoldSpeedState.shared.active = true          // пока держишь — соседние видео не листаются
+                                        player.rate = 2
+                                    }
+                                    if let drag {
+                                        if holdOrigin == nil { holdOrigin = drag.location.x }
+                                        let r = HoldSpeed.rate(dx: drag.location.x - (holdOrigin ?? drag.location.x))
+                                        if r != holdRate {
+                                            holdRate = r
+                                            player.rate = r
+                                            Haptics.select()
+                                        }
+                                    }
+                                default: break
+                                }
+                            }
+                            .onEnded { _ in endHold() }
+                    )
                 if chrome {
                     HStack(spacing: 40) {
                         skip("gobackward.15", -15)
@@ -487,16 +521,32 @@ private struct ViewerVideo: View {
                 }
             }
         }
+        .overlay(alignment: .top) {
+            if let holdRate {
+                HoldSpeedBadge(rate: holdRate)
+                    .padding(.top, TopInset.value + 64)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
         .contentShape(Rectangle())
         .animation(.easeOut(duration: 0.22), value: chrome)
+        .animation(.easeOut(duration: 0.2), value: holdRate == nil)
         .onAppear(perform: start)
-        .onDisappear(perform: stop)
+        .onDisappear { endHold(); stop() }
         .onChange(of: isCurrent) { _, now in
             if now, let player {
                 NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
                 player.play(); player.rate = rate; playing = true
             } else { player?.pause() }
         }
+    }
+
+    private func endHold() {
+        guard holdRate != nil else { return }
+        holdRate = nil
+        holdOrigin = nil
+        HoldSpeedState.shared.active = false
+        if playing { player?.rate = rate }
     }
 
     private func setRate(_ r: Float) {
@@ -633,6 +683,7 @@ struct MediaViewer: View {
     @State private var tick = 0
     @State private var videoPlaying = true
     @State private var lastID: String?
+    @ObservedObject private var holdSpeed = HoldSpeedState.shared
     /// Режим «герой»: фон рисует хозяин, шапка и низ вылетают отдельно, закрытие делает хозяин
     var embedded = false
     var pagesVisible = true
@@ -670,6 +721,7 @@ struct MediaViewer: View {
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
+            .scrollDisabled(holdSpeed.active)
             .id(media.count)            // список дополнился — страницы собираются заново, иначе листание зависает
             .ignoresSafeArea()
             .opacity(pagesVisible ? 1 : 0)
@@ -849,5 +901,60 @@ struct ZoomableViewerImage: View {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
             scale = 1; base = 1; offset = .zero; dragBase = .zero
         }
+    }
+}
+
+// MARK: - Удержание: ускорение ×2, ведёшь пальцем — скорость от 1× до 3× шагом 0,1
+
+/// Идёт удержание скорости — просмотрщик не листает страницы, чтобы палец менял скорость, а не видео
+@MainActor
+final class HoldSpeedState: ObservableObject {
+    static let shared = HoldSpeedState()
+    @Published var active = false
+}
+
+enum HoldSpeed {
+    /// Сдвиг пальца по горизонтали → скорость: влево медленнее (до 1×), вправо быстрее (до 3×)
+    static func rate(dx: CGFloat) -> Float {
+        let steps = Int((dx / 16).rounded())                 // 16 точек на шаг 0,1
+        return min(3, max(1, (20 + Float(steps)) / 10))
+    }
+
+    static func text(_ r: Float) -> String {
+        let v = (r * 10).rounded() / 10
+        let s = v == v.rounded() ? String(format: "%.0f", v) : String(format: "%.1f", v)
+        return s.replacingOccurrences(of: ".", with: ",") + "×"
+    }
+}
+
+/// Плашка скорости при удержании: «2,3×  ▸▸» и подсказка, что можно вести пальцем
+struct HoldSpeedBadge: View {
+    let rate: Float
+    var hint = true
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text(HoldSpeed.text(rate)).font(.system(size: 15, weight: .bold).monospacedDigit())
+                    .contentTransition(.numericText(value: Double(rate)))
+                Text("▸▸").font(.system(size: 13, weight: .bold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).frame(height: 34)
+            .background(.ultraThinMaterial, in: Capsule())
+            .animation(.snappy(duration: 0.15), value: rate)
+            if hint {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.left")
+                    Text(Strings(lang: lang).t("медленнее · быстрее", "slower · faster"))
+                    Image(systemName: "chevron.right")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
+                .shadow(color: .black.opacity(0.5), radius: 3)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
