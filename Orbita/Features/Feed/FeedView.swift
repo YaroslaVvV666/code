@@ -80,16 +80,19 @@ struct FeedView: View {
 
             ScrollViewReader { proxy in
             ScrollView {
+                VStack(spacing: 0) {
+                // якорь «в начало» — вне ленивого списка: он есть всегда, даже когда пролистали далеко вниз
+                Color.clear.frame(height: 0)
+                    .id(Self.topID)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: FeedPullKey.self, value: g.frame(in: .named("feedScroll")).minY)
+                    })
                 LazyVStack(spacing: 0) {
-                    Color.clear.frame(height: 0)
-                        .id(Self.topID)
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: FeedPullKey.self, value: g.frame(in: .named("feedScroll")).minY)
-                        })
                     if !searching {
+                        // сначала — новый пост («Что у вас нового?»), под ним истории друзей
+                        if vm.authorFilter == nil { composeCard }
                         // истории: только друзья и те, кто добавил вас в контакты; нет историй — нет и кружков
                         StoryTray(store: stories, pull: pull)
-                        if vm.authorFilter == nil { composeCard }       // «Что у вас нового?» — пост, как в ВК
                         feedModeSwitch
                         Divider().overlay(theme.stroke)
                     }
@@ -115,6 +118,7 @@ struct FeedView: View {
                         }
                     }
                 }
+                }
                 // надёжный замер сдвига (фон тянется на всю высоту ленты и не выгружается, как ленивые ячейки)
                 .background(GeometryReader { g in
                     Color.clear.preference(key: FeedScrollKey.self, value: g.frame(in: .named("feedScroll")).minY)
@@ -133,7 +137,7 @@ struct FeedView: View {
             }
             .onReceive(TabReselect.shared.publisher(.home)) { _ in
                 // повторно нажали «Главная»: пролистали — в начало; уже в начале — обновить
-                if scrollTrack.last < -8 { scrollToTop(proxy) } else { reload() }
+                if scrollTrack.last < -8 || composeFloating { scrollToTop(proxy) } else { reload() }
             }
             .onChange(of: topRequest) { _, _ in scrollToTop(proxy) }
             }
@@ -239,7 +243,11 @@ struct FeedView: View {
 
     private func scrollToTop(_ proxy: ScrollViewProxy) {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo(Self.topID, anchor: .top) }
+        // из самой глубины ленты ленивый список иногда не доезжает с первого раза — догоняем без анимации
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { proxy.scrollTo(Self.topID, anchor: .top) }
         session.tabBarHidden = false
+        composeFloating = false
+        scrollTrack.last = 0
     }
 
     /// В начало ленты и обновить её вместе с историями
@@ -358,7 +366,7 @@ struct FeedView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: searching ? 12 : 4) {
             if searching {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(theme.textSecondary)
@@ -404,6 +412,21 @@ struct FeedView: View {
                 .accessibilityLabel(s.t("Обновить ленту", "Refresh feed"))
 
                 Spacer()
+
+                // новый пост — всегда под рукой, сколько бы ни пролистал
+                Button {
+                    Haptics.impact(.medium)
+                    onCompose()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(theme.accent, in: Circle())
+                        .frame(width: 40, height: 40)
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(s.t("Новый пост", "New post"))
 
                 if !stories.hasTray {
                     StoryAddPicker(store: stories) {
