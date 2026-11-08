@@ -395,7 +395,6 @@ struct ArticleComposer: View {
         }
     }
 
-    @ViewBuilder
     /// Поле, которое по ширине «обнимает» свой текст: невидимая надпись задаёт размер, поле лежит поверх.
     /// Короткий текст — узко, длинный — переносится и занимает всю доступную ширину
     private func hugging<F: View>(_ text: String, placeholder: String, font: Font, @ViewBuilder field: () -> F) -> some View {
@@ -408,6 +407,7 @@ struct ArticleComposer: View {
             .overlay { field() }
     }
 
+    @ViewBuilder
     private func editor(_ block: Binding<ArticleBlock>) -> some View {
         let b = block.wrappedValue
         switch b.kind {
