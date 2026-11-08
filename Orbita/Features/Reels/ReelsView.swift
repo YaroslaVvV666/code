@@ -1745,7 +1745,7 @@ struct ReelPage: View {
                 StoryHeart(liked: post.likedByMe, burst: burst, size: 26, solidWhenIdle: true)
             }
             railButton(count: short(post.comments), action: onComments) {
-                ReelCommentIcon().frame(width: 19, height: 18)
+                ReelCommentIcon().frame(width: 23, height: 22)
             }
             .opacity(post.commentsEnabled ? 1 : 0.4)
             .disabled(!post.commentsEnabled)
@@ -1756,7 +1756,7 @@ struct ReelPage: View {
                     .fill(saved ? Color(red: 1, green: 0.8, blue: 0.2) : Color(white: 0.93))
                     .overlay(ReelBookmarkShape().stroke(saved ? Color(red: 1, green: 0.8, blue: 0.2) : Color(white: 0.93),
                                                         style: StrokeStyle(lineWidth: 2, lineJoin: .round)))
-                    .frame(width: 14, height: 18)
+                    .frame(width: 17, height: 22)
                     .scaleEffect(saved ? 1.08 : 1)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: saved)
             }
@@ -1766,7 +1766,7 @@ struct ReelPage: View {
                     if post.repostedByMe { Haptics.impact(.light) } else { repostSpin += 1; Haptics.impact(.medium) }
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) { onRepost() }
                 }) {
-                    Image(systemName: "arrow.2.squarepath").font(.system(size: 17, weight: .bold))
+                    Image(systemName: "arrow.2.squarepath").font(.system(size: 21, weight: .bold))
                         .opacity(post.allowRepost || post.isMine ? 1 : 0.35)
                         .foregroundStyle(post.repostedByMe ? Color(red: 0.25, green: 0.88, blue: 0.62) : Color(white: 0.93))
                         .scaleEffect(post.repostedByMe ? 1.08 : 1)
@@ -1779,7 +1779,7 @@ struct ReelPage: View {
             railButton(count: s.t("Отправить", "Share"), action: onShare) {
                 ReelShareShape().fill(Color(white: 0.93))
                     .overlay(ReelShareShape().stroke(Color(white: 0.93), style: StrokeStyle(lineWidth: 2, lineJoin: .round)))
-                    .frame(width: 20, height: 17)
+                    .frame(width: 24, height: 21)
             }
             if !post.isMine {
                 Menu {
@@ -1797,7 +1797,7 @@ struct ReelPage: View {
         }
         .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
         .padding(.bottom, 2)
-        .scaleEffect(1.36, anchor: .bottomTrailing)      // колонка крупнее обычной в 1,36 раза (1,5 / 1,1)
+        .scaleEffect(1.18, anchor: .bottomTrailing)      // значки сами стали крупнее (одна сетка 30×30) — общий масштаб меньше
     }
 
     /// Вращающийся диск в углу: обложка/значок музыки, если она есть, иначе аватарка автора
