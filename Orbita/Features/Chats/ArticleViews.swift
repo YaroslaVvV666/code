@@ -421,8 +421,7 @@ struct ArticleBody: View {
         switch a.kind {
         case .photo, .video:
             // фото и видео — во всю ширину статьи, как в Telegram
-            MediaBlock(items: [a], pending: pending) { _ in if !blocked { onOpenMedia(a) } }
-                .frame(maxWidth: .infinity)
+            MediaBlock(items: [a], pending: pending, fullWidth: Self.width) { _ in if !blocked { onOpenMedia(a) } }
         case .voice:
             VoiceBlock(attachment: a, mine: mine, pending: pending).padding(.horizontal, 10)
         case .audio:

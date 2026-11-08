@@ -894,10 +894,12 @@ struct ReplyQuote: View {
 struct MediaBlock: View {
     let items: [ChatAttachment]
     var pending = false
+    /// Своя ширина (статья: фото на всю ширину сообщения, от края до края); nil — обычная ширина альбома
+    var fullWidth: CGFloat? = nil
     let onOpen: (Int) -> Void
 
     /// Ширина альбома — как у Telegram, около трёх четвертей экрана
-    private var width: CGFloat { min(300, UIScreen.main.bounds.width * 0.76) }
+    private var width: CGFloat { fullWidth ?? min(300, UIScreen.main.bounds.width * 0.76) }
     private let gap: CGFloat = 2
     @AppStorage("autoplay") private var autoplay = true
     @State private var frames = FrameBoxes()
