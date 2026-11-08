@@ -929,7 +929,13 @@ struct ReelPage: View {
                 // раздвигать страницу. Иначе пока обложка не сменилась кадром, колонка кнопок стояла за правым краем и потом «телепортировалась»
                 Color.black.overlay { videoLayer }.clipped()
             }
-            LinearGradient(colors: [.clear, .black.opacity(0.46)], startPoint: .init(x: 0.5, y: 0.62), endPoint: .bottom)
+            // мягкая тень снизу: подпись и автор читаются на любом кадре (в три ступени — без видимой границы)
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black.opacity(0.18), location: 0.35),
+                                   .init(color: .black.opacity(0.62), location: 1)],
+                           startPoint: .init(x: 0.5, y: 0.55), endPoint: .bottom)
+                .allowsHitTesting(false)
+            // и справа — под колонкой кнопок
+            LinearGradient(colors: [.clear, .black.opacity(0.18)], startPoint: .init(x: 0.7, y: 0.5), endPoint: .trailing)
                 .allowsHitTesting(false)
             LinearGradient(colors: [.black.opacity(0.22), .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.12))
                 .allowsHitTesting(false)
@@ -1851,10 +1857,11 @@ struct ReelPage: View {
 
     private func railButton<Icon: View>(count: String, tint: Color = .white, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) -> some View {
         Button(action: action) {
-            VStack(spacing: 1) {
-                icon().frame(height: 21)
-                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
-                Text(count).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(tint)
+            // все кнопки одного размера: значок в квадрате 30×30, число — одним шрифтом под ним
+            VStack(spacing: 3) {
+                icon().frame(width: 30, height: 30)
+                    .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                Text(count).font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(tint)
                     .contentTransition(.numericText())
                     .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
                     .lineLimit(1).minimumScaleFactor(0.8)
@@ -1932,16 +1939,31 @@ struct TapHeart: View {
     var size: CGFloat = 86
     @State private var go = false
 
+    private static let sparks: [(dx: CGFloat, dy: CGFloat, s: CGFloat)] = [
+        (-0.9, -0.5, 0.22), (0.95, -0.4, 0.2), (-0.6, -1.0, 0.16), (0.55, -1.05, 0.18), (0, -1.25, 0.14), (-1.05, 0.1, 0.15), (1.0, 0.15, 0.16)
+    ]
+
     var body: some View {
-        Image(systemName: "heart.fill")
-            .font(.system(size: size))
-            .foregroundStyle(LinearGradient(colors: [Color(red: 1, green: 0.4, blue: 0.55), Color(red: 1, green: 0.1, blue: 0.3)],
-                                            startPoint: .top, endPoint: .bottom))
-            .shadow(color: .red.opacity(0.5), radius: 14)
-            .rotationEffect(.degrees(tilt))
-            .scaleEffect(go ? 1.0 : 0.3)
-            .offset(y: go ? -size * 0.58 : 0)
-            .opacity(go ? 0 : 1)
+        ZStack {
+            // маленькие сердечки разлетаются из места нажатия
+            ForEach(Array(Self.sparks.enumerated()), id: \.offset) { _, sp in
+                Image(systemName: "heart.fill")
+                    .font(.system(size: size * sp.s))
+                    .foregroundStyle(Color(red: 1, green: 0.3, blue: 0.45))
+                    .offset(x: go ? sp.dx * size * 0.9 : 0, y: go ? sp.dy * size * 0.9 : 0)
+                    .scaleEffect(go ? 1 : 0.2)
+                    .opacity(go ? 0 : 0.95)
+            }
+            Image(systemName: "heart.fill")
+                .font(.system(size: size))
+                .foregroundStyle(LinearGradient(colors: [Color(red: 1, green: 0.4, blue: 0.55), Color(red: 1, green: 0.1, blue: 0.3)],
+                                                startPoint: .top, endPoint: .bottom))
+                .shadow(color: .red.opacity(0.5), radius: 14)
+                .rotationEffect(.degrees(tilt))
+                .scaleEffect(go ? 1.0 : 0.3)
+                .offset(y: go ? -size * 0.58 : 0)
+                .opacity(go ? 0 : 1)
+        }
             .onAppear {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) { go = false }
                 withAnimation(.easeOut(duration: 0.8).delay(0.12)) { go = true }

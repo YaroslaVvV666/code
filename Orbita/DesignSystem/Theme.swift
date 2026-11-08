@@ -35,12 +35,13 @@ struct Theme {
     }
 
     // поверхности
-    var surface: Color { dark ? Color.white.opacity(0.07) : Color.white }
+    // светлая тема: поля и чипы — светло-серые, а не белые на белом
+    var surface: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.925, green: 0.935, blue: 0.955) }
     var stroke: Color {
-        dark ? Color.white.opacity(0.09) : Color(red: 0.12, green: 0.15, blue: 0.25).opacity(0.08)
+        dark ? Color.white.opacity(0.09) : Color(red: 0.12, green: 0.15, blue: 0.25).opacity(0.13)
     }
     var shadow: Color {
-        dark ? Color.clear : Color(red: 0.15, green: 0.20, blue: 0.40).opacity(0.08)
+        dark ? Color.clear : Color(red: 0.15, green: 0.20, blue: 0.40).opacity(0.11)
     }
     var bar: Color {
         dark ? Color(red: 0.05, green: 0.06, blue: 0.095).opacity(0.97) : Color.white.opacity(0.97)
@@ -57,7 +58,7 @@ struct Theme {
         dark ? Color.white.opacity(0.58) : Color(red: 0.38, green: 0.42, blue: 0.52)
     }
     var textTertiary: Color {
-        dark ? Color.white.opacity(0.36) : Color(red: 0.60, green: 0.64, blue: 0.72)
+        dark ? Color.white.opacity(0.36) : Color(red: 0.52, green: 0.56, blue: 0.64)
     }
 
     // акценты

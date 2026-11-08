@@ -16,6 +16,7 @@ private struct GlassModifier<S: Shape>: ViewModifier {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content.glassEffect(effect, in: shape)
+                .overlay(shape.stroke(theme.dark ? Color.clear : theme.stroke.opacity(0.7), lineWidth: 0.5))   // светлая тема: видно край
         } else {
             fallback(content)
         }
@@ -44,7 +45,8 @@ private struct GlassModifier<S: Shape>: ViewModifier {
                                             startPoint: .topLeading, endPoint: .bottomTrailing),
                              lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(theme.dark ? 0.28 : 0.08), radius: 14, y: 5)
+            .overlay(shape.stroke(theme.dark ? Color.clear : theme.stroke.opacity(0.6), lineWidth: 0.5))
+            .shadow(color: Color.black.opacity(theme.dark ? 0.28 : 0.11), radius: 14, y: 5)
     }
 }
 
@@ -59,6 +61,9 @@ struct CardModifier: ViewModifier {
         if #available(iOS 26.0, *) {
             content
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                // в светлой теме стекло на белом почти не видно — тонкая граница
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(theme.dark ? Color.clear : theme.stroke, lineWidth: 0.75))
                 .shadow(color: theme.shadow, radius: 10, y: 3)
         } else {
             legacy(content)

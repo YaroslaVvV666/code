@@ -789,9 +789,9 @@ struct MessageRow: View {
         .frame(minWidth: 56, alignment: .leading)
         .background(mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(colors.incoming), in: shape)
         .clipShape(shape)
-        .overlay(shape.stroke(mine ? Color.clear : (theme.dark ? Color.white.opacity(0.04) : Color.black.opacity(0.06)), lineWidth: 1))
-        .shadow(color: mine ? theme.accentColor.opacity(theme.dark ? 0.25 : 0.22) : Color.black.opacity(theme.dark ? 0 : 0.06),
-                radius: mine ? 6 : 2, y: mine ? 2 : 1)
+        .overlay(shape.stroke(mine ? Color.clear : (theme.dark ? Color.white.opacity(0.04) : Color.black.opacity(0.08)), lineWidth: 0.75))
+        .shadow(color: mine ? theme.accentColor.opacity(theme.dark ? 0.25 : 0.18) : Color.black.opacity(theme.dark ? 0 : 0.08),
+                radius: mine ? 6 : 3, y: mine ? 2 : 1)
     }
 
     /// Низ поста канала, как в Telegram: аватарки последних комментаторов, «9 комментариев» и стрелка
