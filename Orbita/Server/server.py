@@ -8155,7 +8155,7 @@ def shared_match(kind, a):
     if kind == "media":
         return t in ("photo", "video") and bool(a.get("media_id"))
     if kind == "voice":
-        return t == "voice" and bool(a.get("media_id"))
+        return t in ("voice", "circle") and bool(a.get("media_id"))          # голосовые и кружки вместе
     is_music = t == "audio" or (t == "file" and (str(a.get("mime", "")).startswith("audio") or str(a.get("name", "")).lower().endswith(MUSIC_EXT)))
     if kind == "music":
         return is_music and bool(a.get("media_id"))

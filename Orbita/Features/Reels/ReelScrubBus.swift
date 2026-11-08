@@ -38,7 +38,7 @@ final class ReelResume {
 
     /// Сохранить позицию ролика (кроме самого начала и конца — там продолжать нечего)
     func save(_ id: String, seconds: Double, duration: Double) {
-        if seconds > 1, !(duration > 0 && seconds > duration - 0.6) {
+        if seconds > 0.3, !(duration > 0 && seconds > duration - 0.6) {
             times[id] = seconds
         } else {
             times[id] = nil

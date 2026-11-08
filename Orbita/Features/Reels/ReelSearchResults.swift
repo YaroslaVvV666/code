@@ -231,6 +231,15 @@ final class SearchAutoplay: ObservableObject {
 
     /// Нажали на карточку, которая сейчас не играет — она и начинает (без открытия)
     func play(_ post: Post) { start(post) }
+
+    /// Открывают ролик, который сейчас играет в результатах: полноэкранный просмотр продолжит с этой же секунды, а не с начала
+    func handOff(_ id: String) {
+        guard currentID == id, let p = player else { return }
+        let t = p.currentTime().seconds
+        let d = p.currentItem?.duration.seconds ?? 0
+        guard t.isFinite else { return }
+        ReelResume.shared.save(id, seconds: t, duration: d.isFinite ? d : 0)
+    }
 }
 
 // MARK: - Экран результатов
@@ -439,7 +448,7 @@ private struct ReelGridPage: View {
                 LazyVStack(spacing: 6) {
                     ForEach(cols[c]) { item in
                         SearchCard(item: item, autoplay: autoplay, active: active)
-                            .onTapGesture { onOpen(items.map(\.reel), item.id) }
+                            .onTapGesture { autoplay.handOff(item.id); onOpen(items.map(\.reel), item.id) }
                             .onAppear {
                                 onShown(item.id)
                                 if item.id == items.last?.id { Task { await load(reset: false) } }

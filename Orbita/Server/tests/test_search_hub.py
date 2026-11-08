@@ -22,6 +22,16 @@ urls = [x["url"] for x in links]
 check("ссылки из всех чатов", "https://example.com/page" in urls and "https://www.orbita.app" in urls, urls)
 voice = (jbody(req("GET", "/v1/me/shared?kind=voice", ta)[1]) or {}).get("items", [])
 check("голосовые из всех чатов", voice and voice[0]["chat"]["id"] == b and voice[0]["attachment"]["media_id"] == mid, voice[:1])
+import os, subprocess, tempfile
+clip_path = os.path.join(tempfile.gettempdir(), "orbita_circle_test.mp4")
+if not os.path.exists(clip_path):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=240x240:d=2",
+                    "-pix_fmt", "yuv420p", clip_path], check=True)
+s, body, _ = req("POST", "/v1/media?kind=video&w=240&h=240&dur=2", tb, raw=open(clip_path, "rb").read(), ctype="video/mp4")
+cid = (jbody(body) or {}).get("id")
+req("POST", "/v1/chats/%s/messages" % a, tb, {"text": "", "attachments": [{"type": "circle", "media_id": cid, "duration": 4}]})
+voice = (jbody(req("GET", "/v1/me/shared?kind=voice", ta)[1]) or {}).get("items", [])
+check("кружки — вместе с голосовыми", cid and any(x["attachment"].get("media_id") == cid and x["attachment"].get("type") == "circle" for x in voice), voice[:2])
 check("неверный вид — отказ", req("GET", "/v1/me/shared?kind=hack", ta)[0] == 400)
 import urllib.parse
 qq = urllib.parse.quote("привет")

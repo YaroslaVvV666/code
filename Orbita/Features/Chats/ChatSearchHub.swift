@@ -389,6 +389,7 @@ private struct SharedPage: View {
         }
         .scrollDismissesKeyboard(.immediately)
         .task { if !loaded { await load(reset: true) } }
+        .onAppear { if kind == .voice { installNext() } }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(media: v.media, start: v.start, meta: v.meta, onClose: { viewer = nil })
         }
@@ -609,33 +610,160 @@ private struct SharedPage: View {
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private func voiceRow(_ item: SharedEntry) -> some View {
-        let a = item.attachment
-        let id = a?.mediaID ?? item.id
-        let playing = voice.isCurrent(id) && voice.isPlaying
-        return Button {
-            guard let mid = a?.mediaID else { return }
-            Haptics.impact(.light)
-            voice.toggle(id: mid, mediaID: mid, duration: a?.duration ?? 0)
-        } label: {
-            HStack(spacing: 12) {
+        if let a = item.attachment, let mid = a.mediaID {
+            if a.kind == .circle {
+                HubCircleRow(item: item, attachment: a, playback: CircleFocus.shared.playback(for: mid), source: AnyView(source(item)))
+            } else {
+                HubVoiceRow(item: item, attachment: a, mediaID: mid, clock: voice.isCurrent(mid) ? voice.clock : PlaybackClock.idle,
+                            source: AnyView(source(item)))
+            }
+        }
+    }
+
+    /// Дослушали голосовое или досмотрели кружок в поиске — сразу следующее из этого же списка (как в чате)
+    private func installNext() {
+        VoicePlayer.shared.nextProvider = { id in
+            let list: [ChatMediaNext] = items.compactMap { e in
+                guard let a = e.attachment, let m = a.mediaID, a.kind == .voice || a.kind == .circle else { return nil }
+                return ChatMediaNext(id: m, mediaID: m, duration: a.duration, circle: a.kind == .circle, messageID: e.messageID)
+            }
+            guard let i = list.firstIndex(where: { $0.id == id }), i + 1 < list.count else { return nil }
+            return list[i + 1]
+        }
+        VoicePlayer.shared.onAdvance = nil
+    }
+}
+
+// MARK: - Голосовое в поиске: живая волна, перемотка пальцем по волне, скорость, время
+
+private struct HubVoiceRow: View {
+    let item: SharedEntry
+    let attachment: ChatAttachment
+    let mediaID: String
+    @ObservedObject var clock: PlaybackClock
+    let source: AnyView
+
+    @ObservedObject private var voice = VoicePlayer.shared
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var scrub: Double?
+
+    private var current: Bool { voice.isCurrent(mediaID) }
+    private var playing: Bool { current && voice.isPlaying }
+    private var progress: Double { scrub ?? (current ? clock.value : 0) }
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let total = max(attachment.duration, 0)
+        HStack(spacing: 12) {
+            Button {
+                Haptics.impact(.light)
+                voice.toggle(id: mediaID, mediaID: mediaID, duration: total)
+            } label: {
                 Image(systemName: playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 48, height: 48)
-                    .background(theme.accent, in: Circle())
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.mine ? s.t("Вы", "You") : item.sender).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
-                    Waveform(samples: a?.waveform ?? [], progress: voice.isCurrent(id) ? voice.progress : 0,
-                             active: theme.accentColor, inactive: theme.textTertiary.opacity(0.5))
-                        .frame(height: 16).frame(maxWidth: 180, alignment: .leading)
-                    source(item)
-                }
-                Spacer(minLength: 0)
-                Text(mmss(Int(safe: a?.duration ?? 0))).font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textTertiary)
+                    .background(theme.accentColor, in: Circle())
+                    .contentTransition(.symbolEffect(.replace))
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .contentShape(Rectangle())
+            .buttonStyle(PressStyle())
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.mine ? s.t("Вы", "You") : item.sender)
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                GeometryReader { g in
+                    Waveform(samples: attachment.waveform, progress: progress,
+                             active: theme.accentColor, inactive: theme.textTertiary.opacity(0.5))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { v in scrub = max(0, min(1, v.location.x / max(g.size.width, 1))) }
+                                .onEnded { v in
+                                    let f = max(0, min(1, v.location.x / max(g.size.width, 1)))
+                                    if !current { voice.toggle(id: mediaID, mediaID: mediaID, duration: total) }
+                                    voice.seek(toFraction: f)
+                                    if !voice.isPlaying { voice.resume() }
+                                    Haptics.select()
+                                    scrub = nil
+                                }
+                        )
+                }
+                .frame(height: 20).frame(maxWidth: 200)
+                source
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(mmss(Int(safe: current || scrub != nil ? total * progress : total)))
+                    .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textTertiary)
+                if current {
+                    Button { voice.cycleRate(); Haptics.select() } label: {
+                        Text(voice.rate == 1 ? "1×" : (voice.rate == 1.5 ? "1,5×" : "2×"))
+                            .font(.system(size: 12, weight: .bold)).foregroundStyle(theme.accentColor)
+                            .padding(.horizontal, 7).frame(height: 22)
+                            .background(theme.accentColor.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .scale))
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .animation(.easeOut(duration: 0.18), value: current)
+    }
+}
+
+// MARK: - Кружок в поиске: играет прямо в строке, кольцо прогресса
+
+private struct HubCircleRow: View {
+    let item: SharedEntry
+    let attachment: ChatAttachment
+    @ObservedObject var playback: CirclePlayback
+    let source: AnyView
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let size: CGFloat = playback.started ? 120 : 64
+        HStack(spacing: 12) {
+            Button {
+                guard let mid = attachment.mediaID else { return }
+                Haptics.impact(.light)
+                playback.toggle(mediaID: mid, duration: attachment.duration)
+            } label: {
+                ZStack {
+                    if let id = attachment.thumbID { RemoteImage(id: id) } else { theme.surface }
+                    if playback.started, let player = playback.player { PlayerLayerView(player: player) }
+                    if !playback.isPlaying {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: playback.started ? 20 : 15, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: playback.started ? 44 : 30, height: playback.started ? 44 : 30)
+                            .background(Color.black.opacity(0.4), in: Circle())
+                    }
+                }
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+                .overlay(Circle().trim(from: 0, to: playback.progress)
+                    .stroke(theme.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90)).padding(1.5))
+            }
+            .buttonStyle(.plain)
+            .onAppear { if let id = attachment.mediaID { MediaFileCache.shared.prefetch(id) } }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.mine ? s.t("Вы", "You") : item.sender)
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                Label(s.t("Видеосообщение", "Video message"), systemImage: "video.circle")
+                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                source
+            }
+            Spacer(minLength: 0)
+            Text(mmss(Int(safe: playback.started ? attachment.duration * playback.progress : attachment.duration)))
+                .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textTertiary)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .animation(.spring(response: 0.36, dampingFraction: 0.82), value: playback.started)
     }
 }
