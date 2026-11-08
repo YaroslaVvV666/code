@@ -680,15 +680,19 @@ struct MessageRow: View {
 
             if message.isArticle {
                 // статья: блоки по порядку — заголовки, текст, цитаты, медиа там, где их поставили
+                let mediaEnd = ArticleBody.endsWithMedia(message.blocks)
                 ArticleBody(blocks: message.blocks, mine: mine, pending: message.isPending, textColor: textColor,
                             secondary: secondary, messageID: message.id, blocked: blocked,
                             onOpenMedia: { a in if let item = a.mediaItem { onOpenMedia([item], 0) } },
-                            onOpenFile: onOpenFile, onPlayAudio: onPlayAudio)
+                            onOpenFile: onOpenFile, onPlayAudio: onPlayAudio,
+                            mediaMeta: mediaEnd ? AnyView(MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media)) : nil)
                     .padding(.top, message.reply == nil ? 0 : 6)
-                    .padding(.bottom, 4)
-                HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
-                    .padding(.trailing, MetaInset.trailing)
-                    .padding(.bottom, MetaInset.bottom)
+                    .padding(.bottom, mediaEnd ? 0 : 4)
+                if !mediaEnd {
+                    HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
+                        .padding(.trailing, MetaInset.trailing)
+                        .padding(.bottom, MetaInset.bottom)
+                }
             }
 
             if let pid = message.forwarded?.postID, mediaItems.count == 1, mediaItems[0].kind == .video {

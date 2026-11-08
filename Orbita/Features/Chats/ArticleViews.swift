@@ -327,6 +327,14 @@ struct ArticleBody: View {
     var onOpenMedia: (ChatAttachment) -> Void = { _ in }
     var onOpenFile: (ChatAttachment) -> Void = { _ in }
     var onPlayAudio: (ChatAttachment) -> Void = { _ in }
+    /// Время и галочки поверх последнего фото / видео (статья кончается медиа — без полосы снизу, как у обычного фото)
+    var mediaMeta: AnyView? = nil
+
+    /// Статья заканчивается фото или видео без подписи — время ложится прямо на него
+    static func endsWithMedia(_ blocks: [ArticleBlock]) -> Bool {
+        guard let last = blocks.last, last.kind == .media, last.caption.isEmpty, let a = last.media else { return false }
+        return a.kind == .photo || a.kind == .video
+    }
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -405,6 +413,9 @@ struct ArticleBody: View {
             if let a = b.media {
                 VStack(spacing: 6) {
                     mediaView(a)
+                        .overlay(alignment: .bottomTrailing) {
+                            if index == blocks.count - 1, b.caption.isEmpty, a.kind == .photo || a.kind == .video, let mediaMeta { mediaMeta }
+                        }
                     if !b.caption.isEmpty {
                         Text(b.caption).font(.system(size: 14)).foregroundStyle(secondary)
                             .multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.horizontal, 12)
