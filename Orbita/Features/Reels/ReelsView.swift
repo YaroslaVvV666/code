@@ -20,31 +20,58 @@ final class ReelsModel: ObservableObject {
     /// Какой ролик смотрели последним: вернулись во вкладку — продолжаем с него
     var resumeID: String?
 
+    /// Каждая вкладка помнит свою ленту: быстро переключаешься туда-обратно — ролики не смешиваются и не повторяются
+    private struct Saved { var reels: [Reel]; var exhausted: Bool; var resume: String? }
+    private var saved: [Kind: Saved] = [:]
+
     func switchTo(_ new: Kind, session: AppSession) {
         guard new != kind else { return }
-        kind = new
-        reels = []
-        loaded = false
-        exhausted = false
+        // запоминаем, что было во вкладке, которую покидаем
+        if loaded { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         generation += 1
-        Task { await loadMore(session: session) }
+        loading = false                 // старый запрос больше не держит «занято» — новая вкладка грузится сразу
+        kind = new
+        failed = nil
+        if let back = saved[new], !back.reels.isEmpty {
+            reels = back.reels
+            exhausted = back.exhausted
+            resumeID = back.resume
+            loaded = true
+        } else {
+            reels = []
+            loaded = false
+            exhausted = false
+            resumeID = nil
+            Task { await loadMore(session: session) }
+        }
+    }
+
+    /// Ролик, с которого продолжать во вкладке (после переключения)
+    var resumeInCurrent: String? {
+        if let id = resumeID, reels.contains(where: { $0.id == id }) { return id }
+        return reels.first?.id
     }
 
     func loadMore(session: AppSession) async {
         guard !loading, !exhausted else { return }
         loading = true
         let gen = generation
+        let want = kind
         defer { if gen == generation { loading = false } }
         do {
-            let feed: String? = kind == .friends ? "friends" : (kind == .following ? "following" : nil)
-            let batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
-            guard gen == generation else { return }
+            let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
+            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
+            // пока ждали ответ, переключили вкладку — этот ответ уже не для неё
+            guard gen == generation, want == kind, !Task.isCancelled else { return }
+            // «Подписки» — строго авторы, на которых ты подписан (и твои собственные не подмешиваются)
+            if want == .following { batch = batch.filter { $0.state == "following" } }
             let known = Set(reels.map(\.id))
-            let fresh = batch.filter { !known.contains($0.id) }
+            var seen = Set<String>()
+            let fresh = batch.filter { !known.contains($0.id) && seen.insert($0.id).inserted }
             if fresh.isEmpty { exhausted = true } else { reels += fresh }
             failed = nil
         } catch {
-            guard gen == generation else { return }
+            guard gen == generation, want == kind else { return }
             failed = Strings(lang: .ru).api((error as? APIError) ?? .offline)
         }
         loaded = true
@@ -60,6 +87,8 @@ final class ReelsModel: ObservableObject {
         exhausted = false
         reels = []
         loaded = false
+        resumeID = nil
+        saved[kind] = nil
         await loadMore(session: session)
     }
 
@@ -135,6 +164,7 @@ final class ReelsModel: ObservableObject {
 
     /// Новый шортс только что опубликован — показываем его первым во вкладке «Друзья» (там видны и свои)
     func showMine(session: AppSession) async {
+        if loaded, kind != .friends { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         kind = .friends
         await refresh(session: session)
     }
@@ -467,6 +497,7 @@ struct ReelsView: View {
                             .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
                         .offset(x: slideX)
                         .scrollPosition(id: $current)
+                        .id(model.kind)                 // своя лента на каждую вкладку: прокрутка и плееры не переезжают из соседней
                         .ignoresSafeArea()
                         // повторное нажатие «Шортс»: к первому ролику, а если уже на нём — свежая подборка
                         .onReceive(TabReselect.shared.publisher(.reels)) { _ in
@@ -768,9 +799,18 @@ struct ReelsView: View {
             }
             current = nil
             model.switchTo(kind, session: session)
-            Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                if current == nil { current = model.reels.first?.id }
+            if model.loaded {
+                current = model.resumeInCurrent          // вкладка уже была открыта — продолжаем с того же ролика
+            } else {
+                Task {
+                    // ждём ленту именно этой вкладки; если успели переключить дальше — ничего не трогаем
+                    for _ in 0..<40 {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        guard model.kind == kind else { return }
+                        if model.loaded { break }
+                    }
+                    if current == nil, model.kind == kind { current = model.reels.first?.id }
+                }
             }
         } label: {
             VStack(spacing: 5) {
