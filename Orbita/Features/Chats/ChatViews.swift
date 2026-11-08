@@ -69,6 +69,9 @@ struct ChatsListView: View {
     @State private var messageHits: [MessageHit] = []
     @AppStorage("contacts.prompted") private var promptedImport = false
     @State private var birthdayProfile: String?           // именинник из строки «Сегодня день рождения»
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// iPad (широкий экран): список чатов слева, переписка справа — как в Telegram для iPad
+    private var split: Bool { sizeClass == .regular }
 
     private var s: Strings { Strings(lang: lang) }
 
@@ -96,17 +99,29 @@ struct ChatsListView: View {
 
     var body: some View {
         NavigationStack {
-            listContent
+            Group {
+                if split {
+                    HStack(spacing: 0) {
+                        listContent
+                            .frame(width: 390)
+                        Rectangle().fill(theme.stroke).frame(width: 0.5).ignoresSafeArea()
+                        splitDetail
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    listContent
+                }
+            }
                 .toolbar(.hidden, for: .navigationBar)
-                .navigationDestination(item: $openChat) { route in
+                .navigationDestination(item: Binding(get: { split ? nil : openChat }, set: { openChat = $0 })) { route in
                     ChatScreen(route: route, session: session)
                         .environmentObject(session)
                         .environmentObject(flow)
                 }
         }
         // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
-        // посреди открытия, список пересчитывался и на пару кадров пустел
-        .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(id) }
+        // посреди открытия, список пересчитывался и на пару кадров пустел. На iPad переписка рядом со списком — панель остаётся
+        .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(split ? nil : id) }
         .profileSheet(id: $birthdayProfile)
         .environmentObject(session)
         .task { await model.refresh() }                   // дальше список обновляет общий опрос в MainTabView
@@ -186,6 +201,24 @@ struct ChatsListView: View {
             for f in ChatFolder.allCases where f != .all && f != .unread && f.contains(chat) { out[f, default: 0] += 1 }
         }
         return out
+    }
+
+    /// Правая колонка на iPad: открытая переписка или подсказка «Выберите чат»
+    @ViewBuilder
+    private var splitDetail: some View {
+        if let route = openChat {
+            ChatScreen(route: route, session: session)
+                .environmentObject(session)
+                .environmentObject(flow)
+                .environment(\.closeChat, { withAnimation(.easeOut(duration: 0.2)) { openChat = nil } })
+                .id(route.id)                                   // другой чат — новый экран, а не перерисовка старого
+                .transition(.opacity)
+        } else {
+            EmptyStateView(icon: "bubble.left.and.bubble.right",
+                           title: s.t("Выберите чат", "Select a chat"),
+                           subtitle: s.t("Переписка откроется здесь, список останется слева.",
+                                         "The conversation opens here; the list stays on the left."))
+        }
     }
 
     private func isMuted(_ chat: ChatSummary) -> Bool {
@@ -504,7 +537,8 @@ struct ChatsListView: View {
         ]) {
             rowBody(chat)
                 // закреплённые — на чуть более светлом фоне, как в Telegram
-                .background(prefs.isPinned(chat.id) ? pinnedFill : Color.clear)
+                .background(split && openChat?.peer.id == chat.peer.id ? theme.accentColor.opacity(0.16)       // iPad: открытый чат подсвечен
+                            : (prefs.isPinned(chat.id) ? pinnedFill : Color.clear))
         }
         .onAppear { ThreadPrefetcher.shared.visible(chat, repo: session.messengerRepo) }
     }
@@ -807,6 +841,9 @@ struct ChatScreen: View {
     @StateObject private var model: ChatModel
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeChat) private var closeChat
+    /// Назад: на iPad (две колонки) — закрыть переписку справа, на телефоне — обычный возврат к списку
+    private func leave() { if let closeChat { closeChat() } else { dismiss() } }
     @Environment(\.theme) private var baseTheme
     @ObservedObject private var appearance = ChatAppearanceStore.shared
     /// Тема этого чата: свой цвет моих сообщений, если выбран в «Обоях и цвете»
@@ -903,7 +940,7 @@ struct ChatScreen: View {
                         session.player.start(track, queue: queue)
                     }, onLeftGroup: {
                         showInfo = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { dismiss() }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { leave() }
                     })
                     .environmentObject(session)
                     .environmentObject(flow)
@@ -1141,14 +1178,14 @@ struct ChatScreen: View {
     private func chatLifecycle<C: View>(_ content: C) -> some View {
         content
         .swipeBackEnabled(fullScreen: false)
-        .edgeSwipeBack(enabled: true, fullWidth: true, skipEdge: !standalone) { dismiss() }
+        .edgeSwipeBack(enabled: true, fullWidth: true, skipEdge: !standalone) { leave() }
         .fullScreenCover(isPresented: $showInfo) {
             ChatInfoView(model: model, onPlayMusic: { track, queue in
                 session.player.start(track, queue: queue)
                 showPlayer = true
             }, onLeftGroup: {
                 showInfo = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { dismiss() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { leave() }
             })
             .environmentObject(session)
             .environmentObject(flow)
@@ -1481,7 +1518,7 @@ struct ChatScreen: View {
         // кнопки по краям, ник и статус — по центру экрана; ширина островка — по длине надписи («был(а) 59 минут назад»
         // всегда влезает целиком). Если островок шире места в центре, он сдвигается, но не налезает на кнопки
         ChatHeaderLayout {
-            Button { dismiss() } label: {
+            Button { leave() } label: {
                 BackWithUnread(model: session.chats, excluding: route.peer.id)
             }
             .buttonStyle(.plain)
@@ -2757,6 +2794,16 @@ struct ChatHeaderLayout: Layout {
         let x = min(max(bounds.midX - width / 2, minX), maxX - width)       // по центру экрана, пока хватает места
         subviews[1].place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
                           proposal: ProposedViewSize(width: width, height: ideal.height))
+    }
+}
+
+private struct CloseChatKey: EnvironmentKey { static let defaultValue: (() -> Void)? = nil }
+
+extension EnvironmentValues {
+    /// Как закрыть переписку, если она открыта не переходом, а в правой колонке (iPad)
+    var closeChat: (() -> Void)? {
+        get { self[CloseChatKey.self] }
+        set { self[CloseChatKey.self] = newValue }
     }
 }
 
