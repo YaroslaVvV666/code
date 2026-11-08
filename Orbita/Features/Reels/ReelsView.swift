@@ -62,7 +62,7 @@ final class ReelsModel: ObservableObject {
             let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
             var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
             // пока ждали ответ, переключили вкладку — этот ответ уже не для неё
-            guard gen == generation, want == kind, !Task.isCancelled else { return }
+            guard gen == generation, want == kind else { return }
             // «Подписки» — строго авторы, на которых ты подписан (и твои собственные не подмешиваются)
             if want == .following { batch = batch.filter { $0.state == "following" } }
             let known = Set(reels.map(\.id))
@@ -497,7 +497,6 @@ struct ReelsView: View {
                             .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
                         .offset(x: slideX)
                         .scrollPosition(id: $current)
-                        .id(model.kind)                 // своя лента на каждую вкладку: прокрутка и плееры не переезжают из соседней
                         .ignoresSafeArea()
                         // повторное нажатие «Шортс»: к первому ролику, а если уже на нём — свежая подборка
                         .onReceive(TabReselect.shared.publisher(.reels)) { _ in
