@@ -29,7 +29,6 @@ final class ReelsModel: ObservableObject {
         // запоминаем, что было во вкладке, которую покидаем
         if loaded { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         generation += 1
-        skipOnce = []
         loading = false                 // старый запрос больше не держит «занято» — новая вкладка грузится сразу
         kind = new
         failed = nil
@@ -61,7 +60,7 @@ final class ReelsModel: ObservableObject {
         defer { if gen == generation { loading = false } }
         do {
             let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
-            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id) + skipOnce)
+            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
             // пока ждали ответ, переключили вкладку — этот ответ уже не для неё
             guard gen == generation, want == kind else { return }
             // «Подписки» — строго авторы, на которых ты подписан (и твои собственные не подмешиваются)
@@ -80,28 +79,29 @@ final class ReelsModel: ObservableObject {
 
     @Published var refreshing = false
 
-    /// После обновления «Рекомендаций» — уже показанные не повторяем (лента правда новая)
-    private var skipOnce: [String] = []
 
     func refresh(session: AppSession) async {
         refreshing = true
         defer { refreshing = false }
-        skipOnce = kind == .forYou ? Array(reels.map(\.id).prefix(60)) : []
         generation += 1
+        let gen = generation, want = kind
+        let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
+        // «Рекомендации»: уже показанные не повторяем — подборка правда новая; новых нет — лучшие заново
+        let skip = want == .forYou ? Array(reels.map(\.id).prefix(60)) : []
+        var batch = try? await session.extras.reels(feed: feed, exclude: skip)
+        if let b = batch, b.isEmpty, !skip.isEmpty { batch = try? await session.extras.reels(feed: feed, exclude: []) }
+        // старые ролики остаются на экране, пока не пришли новые (без пустого чёрного экрана); нет сети — остаются как были
+        guard gen == generation, want == kind, var fresh = batch else { if gen == generation { loading = false }; return }
+        if want == .following { fresh = fresh.filter { $0.state == "following" } }
+        var seen = Set<String>()
+        fresh = fresh.filter { seen.insert($0.id).inserted }
+        reels = fresh
+        exhausted = fresh.isEmpty
         loading = false
-        exhausted = false
-        reels = []
-        loaded = false
+        loaded = true
+        failed = nil
         resumeID = nil
         saved[kind] = nil
-        await loadMore(session: session)
-        if reels.isEmpty, !skipOnce.isEmpty {
-            // новых роликов нет — показываем снова лучшие, но с начала
-            skipOnce = []
-            exhausted = false
-            await loadMore(session: session)
-        }
-        skipOnce = []
     }
 
     func toggleLike(_ id: String, session: AppSession) {
@@ -362,37 +362,47 @@ struct ReelsView: View {
     private var screenW: CGFloat { UIScreen.main.bounds.width }
 
     @State private var pullDist: CGFloat = 0
+    @State private var pullRefreshing = false        // обновление запущено оттяжкой — вместо вкладок «Обновляем…»
 
     /// Кружок «обновить» сверху: тянешь — проявляется и крутится, отпустил после порога — лента обновляется
     private var pullIndicator: some View {
         let k = min(1, pullDist / ReelPullToRefresh.threshold)
-        return ZStack {
-            Circle().stroke(Color.white.opacity(0.25), lineWidth: 3)
-            if model.refreshing {
-                ProgressView().tint(.white)
+        let ready = k >= 1
+        return HStack(spacing: 8) {
+            if pullRefreshing {
+                ProgressView().tint(.white).controlSize(.small)
+                Text(s.t("Обновляем…", "Refreshing…"))
             } else {
-                // кольцо заполняется, пока тянешь; заполнилось — отпускай
-                Circle().trim(from: 0, to: k)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Image(systemName: k >= 1 ? "arrow.clockwise" : "arrow.down")
-                    .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace))
+                // кольцо заполняется, пока тянешь; заполнилось — можно отпускать
+                ZStack {
+                    Circle().stroke(Color.white.opacity(0.3), lineWidth: 2.5)
+                    Circle().trim(from: 0, to: k)
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 18, height: 18)
+                Text(ready ? s.t("Отпустите, чтобы обновить", "Release to refresh")
+                           : s.t("Потяните вниз, чтобы обновить", "Pull down to refresh"))
+                    .contentTransition(.opacity)
             }
         }
-        .frame(width: 34, height: 34)
-        .opacity(model.refreshing ? 1 : Double(min(1, k * 1.6)))
-        .offset(y: model.refreshing ? 0 : min(pullDist, ReelPullToRefresh.threshold) * 0.35)
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.5), radius: 3)
+        .frame(height: 40)
+        .opacity(pullRefreshing ? 1 : Double(min(1, k * 2)))
         .allowsHitTesting(false)
-        .animation(.easeOut(duration: 0.2), value: model.refreshing)
+        .animation(.easeOut(duration: 0.18), value: ready)
     }
 
     private func refreshFromPull() {
         guard !model.refreshing else { return }
         Haptics.impact(.medium)
+        withAnimation(.easeOut(duration: 0.2)) { pullRefreshing = true }
         Task {
             await model.refresh(session: session)
             current = model.reels.first?.id
+            withAnimation(.easeOut(duration: 0.25)) { pullRefreshing = false }
         }
     }
 
@@ -561,9 +571,10 @@ struct ReelsView: View {
                             }
                         }
                     }
-                    if !rotatedNow { topBar }
-                    if !rotatedNow, fixed == nil, pullDist > 4 || model.refreshing {
-                        pullIndicator.frame(maxHeight: .infinity, alignment: .top).padding(.top, topInset + 58)
+                    // тянешь первый ролик вниз — вкладки растворяются, на их месте «Потяните вниз, чтобы обновить» (как в TikTok)
+                    if !rotatedNow { topBar.opacity(fixed == nil ? (pullRefreshing ? 0 : max(0, 1 - Double(pullDist) / 36)) : 1) }
+                    if !rotatedNow, fixed == nil, pullDist > 4 || pullRefreshing {
+                        pullIndicator.frame(maxHeight: .infinity, alignment: .top).padding(.top, topInset + 8)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)      // что бы ни случилось внутри, лента не шире экрана и не съезжает
@@ -1061,34 +1072,40 @@ struct ReelPage: View {
                         }
                     }
                     .onTapGesture { if forceFill { toggleControls() } else { togglePause() } }
-                    // удержание — ускорение ×2, отпустили — обычная скорость
-                    .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 4000, perform: {
-                        guard active, !userPaused else { return }
-                        fast = true
-                        fastRate = 2
-                        fastOrigin = nil
-                        player?.rate = 2
-                        Haptics.impact(.light)
-                    }, onPressingChanged: { pressing in
-                        if !pressing, fast {
-                            fast = false
-                            fastOrigin = nil
-                            fastRate = 2
-                            if !userPaused { player?.rate = rateNow }
-                        }
-                    })
-                    // пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×)
-                    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { v in
-                        guard fast else { return }
-                        let x = forceFill ? v.location.y : v.location.x          // в повёрнутом режиме «вправо» — вниз по экрану
-                        if fastOrigin == nil { fastOrigin = x }
-                        let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
-                        if r != fastRate {
-                            fastRate = r
-                            player?.rate = r
-                            Haptics.select()
-                        }
-                    })
+                    // удержание — ×2; пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×); отпустил — обычная скорость.
+                    // Сначала долгое нажатие, и только потом — ведение пальцем: быстрый свайп достаётся ленте (раньше
+                    // «прилипший» жест с нулевым порогом перехватывал касание, и шортсы не листались)
+                    .gesture(
+                        LongPressGesture(minimumDuration: 0.35)
+                            .sequenced(before: DragGesture(minimumDistance: 0))
+                            .onChanged { value in
+                                guard active, !userPaused else { return }
+                                switch value {
+                                case .first:
+                                    break
+                                case .second(true, let drag):
+                                    if !fast {
+                                        fast = true
+                                        fastRate = 2
+                                        fastOrigin = nil
+                                        player?.rate = 2
+                                        Haptics.impact(.light)
+                                    }
+                                    guard let drag else { return }
+                                    let x = forceFill ? drag.location.y : drag.location.x      // в повёрнутом режиме «вправо» — вниз
+                                    if fastOrigin == nil { fastOrigin = x }
+                                    let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
+                                    if r != fastRate {
+                                        fastRate = r
+                                        player?.rate = r
+                                        Haptics.select()
+                                    }
+                                default:
+                                    break
+                                }
+                            }
+                            .onEnded { _ in endFast() }
+                    )
                 ForEach(hearts) { h in
                     TapHeart(tilt: h.tilt, size: forceFill ? 150 : 86).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
                 }
@@ -1127,7 +1144,7 @@ struct ReelPage: View {
 
             Color.clear.frame(width: 0, height: 0)
                 .onChange(of: fast) { _, v in onHold(v) }
-                .onDisappear { if fast { fast = false; onHold(false) } }
+                .onDisappear { if fast { endFast() } }
             if fast {
                 let badge = HoldSpeedBadge(rate: fastRate)
                 if forceFill {
@@ -1643,6 +1660,15 @@ struct ReelPage: View {
             .frame(minHeight: 40).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Отпустили палец после ускорения — обычная скорость, лента снова листается
+    private func endFast() {
+        guard fast else { return }
+        fast = false
+        fastOrigin = nil
+        fastRate = 2
+        if !userPaused { player?.rate = rateNow }
     }
 
     private func togglePause() {
@@ -2285,7 +2311,7 @@ struct LiveLoopView: View {
 
 /// Следит за оттяжкой ленты выше первого ролика (iOS 18+): дотянул до порога и отпустил — обновление
 struct ReelPullToRefresh: ViewModifier {
-    static let threshold: CGFloat = 110
+    static let threshold: CGFloat = 90
     let enabled: Bool
     @Binding var pull: CGFloat
     let onRefresh: () -> Void
