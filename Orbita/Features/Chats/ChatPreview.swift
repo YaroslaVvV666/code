@@ -108,6 +108,8 @@ struct ChatPeekOverlay: View {
     let onMark: () -> Void
     let onDelete: () -> Void
     let onClose: () -> Void
+    /// Открыто из «Недавних» в поиске — первой строкой «Убрать из недавних»
+    var onRemoveRecent: (() -> Void)? = nil
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -192,6 +194,10 @@ struct ChatPeekOverlay: View {
 
     private var actions: some View {
         VStack(spacing: 0) {
+            if let onRemoveRecent {
+                row("xmark.circle", s.t("Убрать из недавних", "Remove from recents"), destructive: true) { dismiss(onRemoveRecent) }
+                sep
+            }
             row("arrow.up.right.square", s.t("Открыть", "Open")) { dismiss(onOpen) }
             sep
             if chat.unread == 0 {

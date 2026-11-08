@@ -153,8 +153,11 @@ final class ChatsModel: ObservableObject {
                 let old = Dictionary(chats.map { ($0.id, $0.unread) }, uniquingKeysWith: { a, _ in a })
                 let oldTags = Dictionary(chats.map { ($0.id, $0.mentions) }, uniquingKeysWith: { a, _ in a })
                 // если тегнули — баннер показывается, даже когда чат отключён
-                if let c = result.chats.first(where: { $0.id != openPeerID && (($0.unread > (old[$0.id] ?? 0) && !$0.muted && !UserDefaults.standard.bool(forKey: "dm_muted_" + $0.id))
-                                                                              || $0.mentions > (oldTags[$0.id] ?? 0)) }) {
+                // выбран фильтр в списке чатов — всплывают только сообщения из подходящих чатов
+                let focus = ChatFolder(rawValue: UserDefaults.standard.string(forKey: "chats.folder") ?? "") ?? .all
+                if let c = result.chats.first(where: { $0.id != openPeerID && (focus == .all || focus == .unread || focus.contains($0))
+                                                       && (($0.unread > (old[$0.id] ?? 0) && !$0.muted && !UserDefaults.standard.bool(forKey: "dm_muted_" + $0.id))
+                                                           || $0.mentions > (oldTags[$0.id] ?? 0)) }) {
                     banner = ChatBanner(peer: c.peer, text: (c.mentions > (oldTags[c.id] ?? 0) ? "@ " : "") + c.lastText)
                     Haptics.impact(.medium)
                 }

@@ -7563,6 +7563,113 @@ def playlist_track_copy(req, me, tid):
                         "name": j["title"], "duration": j["duration"]})
 
 
+# ---------- поиск в мессенджере: частые собеседники, боты и всё присланное во всех чатах ----------
+
+@route("GET", r"/v1/me/search-hub")
+def search_hub(req, me):
+    """Сверху поиска: 20 человек, с кем больше всего переписывался за месяц; и боты, с которыми общался"""
+    uid = me["id"]
+    since = time.time() - 30 * 86400
+    rows = q("SELECT CASE WHEN sender = ? THEN recipient ELSE sender END AS peer, COUNT(*) n FROM messages "
+             "WHERE (sender = ? OR recipient = ?) AND created_at > ? GROUP BY peer ORDER BY n DESC LIMIT 60",
+             (uid, uid, uid, since))
+    top, bots = [], []
+    for r in rows:
+        p = r["peer"]
+        if p == uid or either_blocked(uid, p):
+            continue
+        if is_bot_user(p):
+            continue
+        top.append({**user_brief(p, uid), "count": r["n"]})
+        if len(top) >= 20:
+            break
+    seen = set()
+    for r in q("SELECT CASE WHEN sender = ? THEN recipient ELSE sender END AS peer, MAX(created_at) t FROM messages "
+               "WHERE sender = ? OR recipient = ? GROUP BY peer ORDER BY t DESC LIMIT 300", (uid, uid, uid)):
+        p = r["peer"]
+        if p in seen or p == uid or not is_bot_user(p):
+            continue
+        seen.add(p)
+        users = q1("SELECT COUNT(DISTINCT CASE WHEN sender = ? THEN recipient ELSE sender END) c FROM messages "
+                   "WHERE (sender = ? OR recipient = ?) AND created_at > ?", (p, p, p, since))["c"]
+        bots.append({**user_brief(p, uid), "monthly": users, "at": r["t"]})
+        if len(bots) >= 40:
+            break
+    req.send_json(200, {"top": top, "bots": bots})
+
+
+SHARED_KINDS = ("media", "files", "links", "music", "voice")
+URL_RE = re.compile(r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+)", re.I)
+MUSIC_EXT = (".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg")
+
+
+def shared_match(kind, a):
+    t = a.get("type")
+    if a.get("once"):
+        return False                                   # сгорающее — нигде не показываем
+    if kind == "media":
+        return t in ("photo", "video") and bool(a.get("media_id"))
+    if kind == "voice":
+        return t == "voice" and bool(a.get("media_id"))
+    is_music = t == "audio" or (t == "file" and (str(a.get("mime", "")).startswith("audio") or str(a.get("name", "")).lower().endswith(MUSIC_EXT)))
+    if kind == "music":
+        return is_music and bool(a.get("media_id"))
+    if kind == "files":
+        return t == "file" and not is_music and bool(a.get("media_id"))
+    return False
+
+
+@route("GET", r"/v1/me/shared")
+def my_shared(req, me):
+    """Всё присланное во всех чатах одним списком: медиа, файлы, ссылки, музыка, голосовые (свежие сверху)"""
+    uid = me["id"]
+    params = req.query()
+    kind = params.get("kind", "media")
+    if kind not in SHARED_KINDS:
+        raise ApiError(400, "bad_value")
+    try:
+        before = float(params.get("before", time.time() + 1))
+    except ValueError:
+        raise ApiError(400, "bad_value")
+    need_text = kind == "links"
+    cond = "" if need_text else "AND attachments_enc IS NOT NULL "
+    dm = q("SELECT * FROM messages WHERE ((sender = ? AND del_sender = 0) OR (recipient = ? AND del_recipient = 0)) "
+           "AND created_at < ? " + cond + "ORDER BY created_at DESC LIMIT 500", (uid, uid, before))
+    gm = q("SELECT gm.* FROM group_messages gm JOIN group_members mb ON mb.group_id = gm.group_id AND mb.user_id = ? "
+           "WHERE gm.created_at < ? " + cond.replace("attachments_enc", "gm.attachments_enc") + "ORDER BY gm.created_at DESC LIMIT 500",
+           (uid, before))
+    rows = sorted(dm + gm, key=lambda r: -r["created_at"])
+    groups, out, last = {}, [], None
+    for m in rows:
+        if "locked" in m.keys() and m["locked"]:
+            continue                                   # капсулы и секреты — только в своей переписке
+        is_group = "group_id" in m.keys() and m["group_id"]
+        if is_group:
+            g = groups.get(m["group_id"]) or group_row(m["group_id"])
+            groups[m["group_id"]] = g
+            if not g:
+                continue
+            chat = {"id": g["id"], "name": group_title(g), "avatar": None, "group": True, "channel": g["type"] == "channel"}
+        else:
+            peer = m["recipient"] if m["sender"] == uid else m["sender"]
+            b = user_brief(peer, uid)
+            chat = {"id": peer, "name": b["name"], "avatar": b.get("avatar"), "group": False, "channel": False}
+        base = {"message_id": m["id"], "chat": chat, "at": m["created_at"], "mine": m["sender"] == uid,
+                "sender": user_brief(m["sender"], uid)["name"]}
+        if need_text:
+            text = dec(m["sender"], "messages", COL["msg_text"], m["id"], m["text_enc"]) or ""
+            for url in dict.fromkeys(URL_RE.findall(text)):
+                out.append({**base, "url": url if url.lower().startswith("http") else "https://" + url, "text": text[:200]})
+        else:
+            for a in attachments_of(m):
+                if shared_match(kind, a):
+                    out.append({**base, "attachment": a})
+        last = m["created_at"]
+        if len(out) >= 60:
+            break
+    req.send_json(200, {"items": out[:60], "before": last, "more": len(out) >= 60})
+
+
 # ---------- фото-цепочка ----------
 # В чате задают тему дня («мой завтрак», «вид из окна») — все по кругу добавляют фото. Владелец может включить проверку:
 # тогда новые фото видит только он, пока не одобрит. Не по теме — убирает. В конце цепочку можно выложить коллажем в шортсы.

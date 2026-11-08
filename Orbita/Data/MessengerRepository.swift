@@ -735,6 +735,10 @@ protocol MessengerRepository: Sendable {
 
     // контакты
     func contacts() async throws -> [Contact]
+    /// Поиск в мессенджере: частые собеседники за месяц и боты
+    func searchHub() async throws -> SearchHub
+    /// Всё присланное во всех чатах: media | files | links | music | voice
+    func shared(kind: String, before: Double?) async throws -> (items: [SharedEntry], before: Double?, more: Bool)
     /// Фильтр списка чатов («фокус»): пока выбран, сервер не шлёт уведомления из неподходящих чатов (nil — все)
     func setChatFocus(_ folder: String?) async
     /// У кого из контактов сегодня день рождения (today — «MM-dd» по часам телефона)
@@ -859,6 +863,53 @@ private struct ReplyDTO: Decodable {
     let fromMe: Bool
     let name: String
     let text: String
+}
+
+/// Поиск в мессенджере: с кем больше всего переписывался за месяц и с какими ботами общался
+struct SearchHub: Decodable, Equatable {
+    struct Person: Decodable, Equatable, Identifiable {
+        let id: String
+        let name: String
+        let username: String?
+        let avatar: String?
+        let count: Int?
+        let monthly: Int?
+        var peer: ChatPeer { ChatPeer(id: id, name: name, username: username, avatarID: avatar) }
+    }
+    let top: [Person]
+    let bots: [Person]
+}
+
+/// Одно присланное (медиа, файл, ссылка, трек, голосовое) с чатом, откуда оно
+struct SharedEntry: Identifiable, Equatable {
+    let messageID: String
+    let chat: ChatPeer
+    let at: Date
+    let mine: Bool
+    let sender: String
+    var attachment: ChatAttachment?
+    var url: String?
+    var text: String?
+    var id: String { messageID + ":" + (attachment?.mediaID ?? url ?? "") }
+}
+
+private struct SharedEntryDTO: Decodable {
+    struct Chat: Decodable { let id: String; let name: String; let avatar: String?; let group: Bool; let channel: Bool }
+    let messageId: String
+    let chat: Chat
+    let at: Double
+    let mine: Bool
+    let sender: String
+    let attachment: AttachmentDTO?
+    let url: String?
+    let text: String?
+    var model: SharedEntry {
+        SharedEntry(messageID: messageId,
+                    chat: ChatPeer(id: chat.id, name: chat.name, avatarID: chat.avatar, isGroup: chat.group,
+                                   type: chat.group ? (chat.channel ? "channel" : "group") : nil),
+                    at: Date(timeIntervalSince1970: at), mine: mine, sender: sender,
+                    attachment: attachment?.model, url: url, text: text)
+    }
 }
 
 private struct AttachmentDTO: Decodable {
@@ -1699,6 +1750,18 @@ struct RemoteMessengerRepository: MessengerRepository {
     func contacts() async throws -> [Contact] {
         let data = try await api.request("GET", "/v1/contacts")
         return try decodeAPI(ContactListDTO.self, from: data).contacts.map(\.model)
+    }
+
+    func searchHub() async throws -> SearchHub {
+        try decodeAPI(SearchHub.self, from: try await api.request("GET", "/v1/me/search-hub"))
+    }
+
+    func shared(kind: String, before: Double?) async throws -> (items: [SharedEntry], before: Double?, more: Bool) {
+        struct Page: Decodable { let items: [SharedEntryDTO]; let before: Double?; let more: Bool }
+        var query = ["kind": kind]
+        if let before { query["before"] = String(before) }
+        let page = try decodeAPI(Page.self, from: try await api.request("GET", "/v1/me/shared", query: query))
+        return (page.items.map(\.model), page.before, page.more)
     }
 
     func setChatFocus(_ folder: String?) async {

@@ -71,6 +71,9 @@ struct ChatsListView: View {
     @State private var messageHits: [MessageHit] = []
     @AppStorage("contacts.prompted") private var promptedImport = false
     @State private var birthdayProfile: String?           // именинник из строки «Сегодня день рождения»
+    @State private var hubOpen = false                     // нажали на поиск: частые собеседники, недавние, всё присланное
+    @FocusState private var searchFocused: Bool
+    private var hubShown: Bool { hubOpen && query.trimmingCharacters(in: .whitespaces).isEmpty }
     @Environment(\.horizontalSizeClass) private var sizeClass
     /// iPad (широкий экран): список чатов слева, переписка справа — как в Telegram для iPad
     private var split: Bool { sizeClass == .regular }
@@ -123,7 +126,11 @@ struct ChatsListView: View {
         }
         // Нижняя панель прячется в момент нажатия, а не когда переписка уже выехала: иначе область под сообщениями менялась
         // посреди открытия, список пересчитывался и на пару кадров пустел. На iPad переписка рядом со списком — панель остаётся
-        .onChange(of: openChat?.peer.id) { _, id in session.chats.setOpening(split ? nil : id) }
+        .onChange(of: openChat?.peer.id) { _, id in
+            // пока открыт поиск, нижняя панель вкладок спрятана (как в Telegram) — и после возврата из чата тоже
+            session.chats.setOpening(split ? nil : (id ?? (hubOpen ? "search" : nil)))
+            if let peer = openChat?.peer { RecentChatsStore.shared.record(peer) }      // «Недавние» в поиске
+        }
         // выбранный фильтр запоминается и уходит на сервер: уведомления из неподходящих чатов не приходят
         .onChange(of: folder) { _, f in
             UserDefaults.standard.set(f.rawValue, forKey: "chats.folder")
@@ -254,6 +261,7 @@ struct ChatsListView: View {
 
     private var listContent: some View {
         VStack(spacing: 0) {
+            if !hubOpen {
             HStack {
                 if net.offline {
                     // нет связи: как в Telegram — «Соединение…» и крутится значок
@@ -281,32 +289,64 @@ struct ChatsListView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
 
             if filtersShown || folder != .all {
                 FolderTiles(folder: $folder, counts: folderCounts)
                     .padding(.top, 8)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
+            }
 
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
-                TextField(s.chatsSearch, text: $query)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if !query.isEmpty {
-                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(theme.textTertiary) }
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(theme.textTertiary)
+                    TextField(s.chatsSearch, text: $query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($searchFocused)
+                    if !query.isEmpty {
+                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(theme.textTertiary) }
+                    }
+                }
+                .font(.system(size: 16))
+                .padding(.horizontal, 14)
+                .frame(height: hubOpen ? 46 : 40)
+                .card(theme, radius: hubOpen ? 23 : 14)
+                if hubOpen {
+                    // закрыть поиск: назад к списку чатов
+                    Button {
+                        Haptics.impact(.light)
+                        query = ""
+                        searchFocused = false
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { hubOpen = false }
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(width: 46, height: 46).glassCircle()
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.scale.combined(with: .opacity))
                 }
             }
-            .font(.system(size: 16))
-            .padding(.horizontal, 14)
-            .frame(height: 40)
-            .card(theme, radius: 14)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .onChange(of: searchFocused) { _, f in
+                if f && !hubOpen { withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { hubOpen = true } }
+            }
 
-            ChatsTopIsland(session: session) { id in birthdayProfile = id }
-
-            cards
+            if hubShown {
+                ChatSearchHub(session: session, chats: model.chats,
+                              onOpen: { peer in
+                                  searchFocused = false
+                                  if let c = model.chats.first(where: { $0.id == peer.id }) { open(c) } else { openChat = ChatRoute(peer: peer) }
+                              },
+                              onDelete: { chat in deleting = chat })
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            } else {
+            if !hubOpen {
+                ChatsTopIsland(session: session) { id in birthdayProfile = id }
+                cards
+            }
 
             if model.chats.isEmpty && model.loaded && query.trimmingCharacters(in: .whitespaces).isEmpty {
                 VStack(spacing: 12) {
@@ -370,6 +410,11 @@ struct ChatsListView: View {
                 }
                 }
             }
+            }   // поиск-хаб показан вместо списка
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.86), value: hubOpen)
+        .onChange(of: hubOpen) { _, open in
+            if openChat == nil { session.chats.setOpening(open && !split ? "search" : nil) }
         }
         .overlay(alignment: .top) {
             if let error = model.error {

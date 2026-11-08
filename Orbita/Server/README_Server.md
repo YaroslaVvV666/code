@@ -351,3 +351,9 @@ while True:
 
 `PUT /v1/me/chat-focus {"folder": "personal"|"groups"|"channels"|"mentions"|null}` — пока выбран фильтр, push-уведомления
 приходят только из подходящих чатов (в «Упоминаниях» — только когда вас отметили). `null` или «Новые» — все. Проверка: `python3 tests/test_chat_focus.py`.
+
+## Поиск в мессенджере
+
+- `GET /v1/me/search-hub` — `top`: 20 человек, с кем больше всего переписывался за 30 дней (`count`); `bots`: боты, с которыми общался (`monthly`).
+- `GET /v1/me/shared?kind=media|files|links|music|voice&before=<ts>` — всё присланное во всех чатах (личные и группы), свежие сверху,
+  по 60, с чатом-источником. Сгорающие голосовые, капсулы и секреты сюда не попадают. Проверка: `python3 tests/test_search_hub.py`.
