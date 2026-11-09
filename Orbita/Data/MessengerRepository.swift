@@ -664,7 +664,7 @@ protocol MessengerRepository: Sendable {
     /// topic — тема группы-форума ("general" — общая); nil — вся переписка
     func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread
     /// Прочитано до сообщения (включительно) или всё; ответ — сколько осталось непрочитанных
-    func markRead(peerID: String, upTo: String?) async -> Int?
+    func markRead(peerID: String, upTo: String?, topic: String?) async -> Int?
     /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
     func cachedChats() -> (chats: [ChatSummary], unread: Int)?
     func cachedThread(peerID: String) -> ChatThread?
@@ -1407,7 +1407,7 @@ struct RemoteMessengerRepository: MessengerRepository {
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
         // прочитанным сервер ничего не отмечает сам — телефон отмечает то, что человек увидел на экране (markRead)
-        if !peek && topic == nil { query["read"] = "manual" }
+        if !peek { query["read"] = "manual" }
         if ChannelViewSource.openedByLink.contains(peerID) { query["src"] = "link" }      // статистика: «URL»
         if let topic {
             query["topic"] = topic
@@ -1420,9 +1420,10 @@ struct RemoteMessengerRepository: MessengerRepository {
         return try decodeThread(data)
     }
 
-    func markRead(peerID: String, upTo: String?) async -> Int? {
+    func markRead(peerID: String, upTo: String?, topic: String?) async -> Int? {
         struct Left: Decodable { let unread: Int }
-        let body: [String: Any] = upTo.map { ["up_to": $0] } ?? ["all": true]
+        var body: [String: Any] = upTo.map { ["up_to": $0] } ?? ["all": true]
+        if let topic { body["topic"] = topic }
         guard let data = try? await api.request("POST", "/v1/chats/\(peerID)/read", body: ServerAPI.json(body)) else { return nil }
         return (try? decodeAPI(Left.self, from: data))?.unread
     }

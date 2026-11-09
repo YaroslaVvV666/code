@@ -29,5 +29,29 @@ r = jbody(req("POST", "/v1/chats/%s/read" % g, ta, {"up_to": gids[2]})[1]) or {}
 check("группа: прочитал 3 — осталось 2", r.get("unread") == 2, r)
 r = jbody(req("POST", "/v1/chats/%s/read" % g, ta, {"all": True})[1]) or {}
 check("всё прочитано", r.get("unread") == 0, r)
+# много непрочитанных (больше 300): чат загружается целиком от первого непрочитанного
+senders = [session("Болтун %d" % k) for k in range(4)]
+bg = jbody(req("POST", "/v1/groups", senders[0][1], {"title": "Болталка", "type": "group",
+                                                    "members": [a] + [x[0] for x in senders[1:]]})[1])["id"]
+many = []
+for i in range(350):          # четверо пишут по очереди — 350 сообщений, не упираясь в лимит частоты одного человека
+    many.append(jbody(req("POST", "/v1/chats/%s/messages" % bg, senders[i % 4][1], {"text": "м%d" % i})[1])["id"])
+d = jbody(req("GET", "/v1/chats/%s/messages?read=manual&limit=380" % bg, ta)[1]) or {}
+check("350 непрочитанных: первое есть в загруженном", d.get("unread") == 350 and many[0] in [m["id"] for m in d.get("messages", [])],
+      (d.get("unread"), len(d.get("messages", []))))
+# тема форума: свои непрочитанные и отметка «прочитано до»
+fg = jbody(req("POST", "/v1/groups", tb, {"title": "Форум", "type": "group", "members": [a]})[1])["id"]
+req("PUT", "/v1/groups/%s/forum" % fg, tb, {"on": True})
+tid = jbody(req("POST", "/v1/groups/%s/topics" % fg, tb, {"title": "Новости"})[1])["id"]
+tids = [jbody(req("POST", "/v1/chats/%s/messages" % fg, tb, {"text": "т%d" % i, "topic_id": tid})[1])["id"] for i in range(4)]
+d = jbody(req("GET", "/v1/chats/%s/messages?read=manual&topic=%s" % (fg, tid), ta)[1]) or {}
+check("тема: 4 непрочитанных, с первого", d.get("unread") == 4 and d.get("first_unread") == tids[0], (d.get("unread"), d.get("first_unread")))
+d = jbody(req("GET", "/v1/chats/%s/messages?read=manual&topic=%s" % (fg, tid), ta)[1]) or {}
+check("тема: вход не отметил прочитанным", d.get("unread") == 4, d.get("unread"))
+r = jbody(req("POST", "/v1/chats/%s/read" % fg, ta, {"up_to": tids[1], "topic": tid})[1]) or {}
+check("тема: прочитал 2 — осталось 2", r.get("unread") == 2, r)
+topics = (jbody(req("GET", "/v1/groups/%s/topics" % fg, ta)[1]) or {}).get("topics", [])
+tt = next((x for x in topics if x.get("id") == tid), {})
+check("в списке тем — 2", tt.get("unread") == 2, tt)
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)

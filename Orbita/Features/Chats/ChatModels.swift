@@ -418,8 +418,8 @@ final class ChatModel: ObservableObject {
                 unreadLeft = thread.unread
                 // непрочитанных больше, чем загружено (563 при 100 последних) — догружаем, чтобы начать с первого непрочитанного
                 if let n = thread.unread, let fu = thread.firstUnread, !thread.messages.contains(where: { $0.id == fu }),
-                   historyLimit < 300 {
-                    historyLimit = min(300, n + 30)
+                   historyLimit < n + 30 {
+                    historyLimit = min(5000, n + 30)
                     Task { await self.refresh() }
                 }
             }
@@ -447,7 +447,7 @@ final class ChatModel: ObservableObject {
         readTask = Task { [weak self, repo, peerID] in
             try? await Task.sleep(nanoseconds: 450_000_000)
             guard !Task.isCancelled, let self else { return }
-            if let left = await repo.markRead(peerID: peerID, upTo: id) { self.unreadLeft = left }
+            if let left = await repo.markRead(peerID: peerID, upTo: id, topic: self.topic?.id) { self.unreadLeft = left }
         }
     }
 
@@ -456,6 +456,8 @@ final class ChatModel: ObservableObject {
         guard !isPreview, let last = items.last(where: { !$0.isPending }) else { return }
         markSeen(last.id)
         if unreadLeft != 0 && (items.last?.createdAt ?? .distantPast) <= readUpTo { unreadLeft = 0 }
+        // всё прочитано — огромную историю, загруженную ради непрочитанных, дальше не тянем при каждом обновлении
+        if historyLimit > 300 { historyLimit = 300 }
     }
 
     /// Пришло только событие «печатает» — обновляем лишь его, не загружая заново всю переписку

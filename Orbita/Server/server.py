@@ -8953,7 +8953,9 @@ def chat_messages(req, me, peer):
     if not pr:
         raise ApiError(404, "not_found")
     try:
-        limit = max(1, min(300, int(req.query().get("limit", "120"))))
+        # read=manual: телефон открывает чат на первом непрочитанном — даёт загрузить столько, сколько непрочитанных
+        cap = 5000 if req.query().get("read") == "manual" else 300
+        limit = max(1, min(cap, int(req.query().get("limit", "120"))))
     except ValueError:
         limit = 120
     now = time.time()
@@ -10802,7 +10804,8 @@ def group_messages(req, me, gid):
         else:
             raise ApiError(404, "not_found")
     try:
-        limit = max(1, min(300, int(req.query().get("limit", "120"))))
+        cap = 5000 if req.query().get("read") == "manual" else 300
+        limit = max(1, min(cap, int(req.query().get("limit", "120"))))
     except ValueError:
         limit = 120
     first_unread = None
@@ -10825,7 +10828,15 @@ def group_messages(req, me, gid):
         rows = q("SELECT * FROM group_messages WHERE group_id = ? AND %s AND created_at >= ? AND id NOT IN "
                  "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT ?" % cond,
                  (gid,) + args + (0 if preview else history_since(g, mem), uid, limit))
-        if not preview and req.query().get("peek") != "1":
+        if not preview:
+            # в теме — свои непрочитанные (а не общие по группе)
+            lr = max(topic_last_read(gid, topic, uid, mem), history_since(g, mem))
+            fu = q1("SELECT id FROM group_messages WHERE group_id = ? AND %s AND created_at > ? AND sender != ? AND kind IS NULL "
+                    "ORDER BY created_at LIMIT 1" % cond, (gid,) + args + (lr, uid))
+            first_unread = fu["id"] if fu else None
+            g_unread = q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND %s AND created_at > ? AND sender != ? "
+                          "AND kind IS NULL" % cond, (gid,) + args + (lr, uid))["c"]
+        if not preview and req.query().get("peek") != "1" and req.query().get("read") != "manual":
             mark_topic_read(gid, topic, uid)
     else:
         rows = q("SELECT * FROM group_messages WHERE group_id = ? AND created_at >= ? AND id NOT IN "
@@ -10877,6 +10888,17 @@ def read_up_to(req, me, peer):
             if not m:
                 raise ApiError(404, "not_found")
             t = m["created_at"]
+        tid = str(d.get("topic") or "")
+        if tid and (tid == GENERAL_TOPIC or topic_row(peer, tid)):
+            # тема форума: своя отметка прочитанного
+            if t > topic_last_read(peer, tid, uid, mem):
+                run("DELETE FROM topic_reads WHERE group_id = ? AND topic_id = ? AND user_id = ?", (peer, tid, uid))
+                run("INSERT INTO topic_reads(group_id, topic_id, user_id, last_read) VALUES (?,?,?,?)", (peer, tid, uid, t))
+            cond, args = topic_filter(tid)
+            lr = max(topic_last_read(peer, tid, uid, mem), history_since(g, mem))
+            left = q1("SELECT COUNT(*) c FROM group_messages WHERE group_id = ? AND %s AND created_at > ? AND sender != ? "
+                      "AND kind IS NULL" % cond, (peer,) + args + (lr, uid))["c"]
+            return req.send_json(200, {"unread": left})
         if t > (mem["last_read"] or 0):
             run("UPDATE group_members SET last_read = ? WHERE group_id = ? AND user_id = ?", (t, peer, uid))
         mem = member_row(peer, uid)

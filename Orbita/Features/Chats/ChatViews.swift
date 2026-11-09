@@ -1644,7 +1644,7 @@ struct ChatScreen: View {
 
     private func startSearch() {
         Haptics.impact(.light)
-        model.historyLimit = 300
+        model.historyLimit = max(model.historyLimit, 300)      // уже загруженную длинную историю (непрочитанные) не урезаем
         Task { await model.refresh() }
         withAnimation(.easeOut(duration: 0.2)) { searching = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { searchFocused = true }
@@ -1659,7 +1659,6 @@ struct ChatScreen: View {
         searchPos = 0
         searchFilter = .all
         searchFrom = nil
-        model.historyLimit = 100
     }
 
     /// Выбран фильтр — ищем и без слова (например, просто все голосовые)
