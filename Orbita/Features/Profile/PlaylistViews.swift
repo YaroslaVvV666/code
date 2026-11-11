@@ -513,31 +513,20 @@ struct PlaylistSheet: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 10) {
-                glassButton("xmark") { dismiss() }
-                if isMine { Color.clear.frame(width: 48, height: 48) }      // чтобы заголовок оставался по центру
+            glassButton(reordering ? "checkmark" : "xmark") {
+                // в режиме перестановки крестик становится «Готово»
+                if reordering { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { reordering = false } } else { dismiss() }
             }
             Spacer()
-            VStack(spacing: 1) {
-                Text(isMine ? s.t("Ваш плейлист", "Your playlist") : s.playlistTitle)
-                    .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
-                    .lineLimit(1).minimumScaleFactor(0.6).fixedSize(horizontal: false, vertical: true)
-                Text("\(model.tracks.count) " + s.t("песен", "songs"))
-                    .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
-            }
+            Text(isMine ? s.t("Ваш плейлист", "Your playlist") : s.playlistTitle)
+                .font(.system(size: 18, weight: .bold)).foregroundStyle(theme.text)
+                .lineLimit(1).minimumScaleFactor(0.6)
             Spacer()
             if isMine {
-                HStack(spacing: 10) {
                 if model.uploadingTracks {
                     ProgressView().frame(width: 48, height: 48)
                 } else {
                     glassButton("plus") { importing = true }
-                }
-                glassButton(reordering ? "checkmark" : "arrow.up.arrow.down") {
-                    withAnimation { reordering.toggle() }
-                }
-                .disabled(model.tracks.count < 2)
-                .opacity(model.tracks.count < 2 ? 0.4 : 1)
                 }
             } else {
                 Color.clear.frame(width: 48, height: 48)
@@ -646,9 +635,19 @@ struct PlaylistSheet: View {
                     Text(track.title).font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(isCurrent ? theme.accentColor : theme.text).lineLimit(1)
                     Text((track.duration > 0 ? mmss(Int(safe: track.duration)) + " • " : "") + artist)
-                        .font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                        .font(.system(size: 14)).foregroundStyle(theme.textSecondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
+                if isMine && !reordering && model.tracks.count > 1 {
+                    // «ручка» как в Telegram: нажал — включается перестановка песен перетаскиванием
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 20, weight: .regular)).foregroundStyle(theme.textTertiary)
+                        .frame(width: 40, height: 44).contentShape(Rectangle())
+                        .onTapGesture {
+                            Haptics.select()
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { reordering = true }
+                        }
+                }
             }
             .padding(.vertical, 10)
             .contentShape(Rectangle())
@@ -663,7 +662,7 @@ struct PlaylistSheet: View {
         let progress = scrubbing ? scrub : player.progress
         return VStack(spacing: 14) {
             HStack(spacing: 14) {
-                cover(track, size: 56)
+                cover(track, size: 58)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(track?.title ?? "").font(.system(size: 19, weight: .bold)).foregroundStyle(theme.text).lineLimit(1)
                     Text(track?.artist.isEmpty == false ? track!.artist : s.t("Неизвестный исполнитель", "Unknown artist"))
@@ -682,9 +681,14 @@ struct PlaylistSheet: View {
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
                         Capsule().fill(theme.textTertiary.opacity(0.35))
-                        Capsule().fill(theme.text).frame(width: max(8, g.size.width * progress))
+                        Capsule().fill(theme.text.opacity(0.9)).frame(width: max(4, g.size.width * progress))
+                        // бегунок, как в Telegram: растёт, пока тянешь
+                        Circle().fill(theme.text)
+                            .frame(width: scrubbing ? 16 : 10, height: scrubbing ? 16 : 10)
+                            .offset(x: max(0, min(g.size.width, g.size.width * progress)) - (scrubbing ? 8 : 5))
+                            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: scrubbing)
                     }
-                    .frame(height: 6)
+                    .frame(height: scrubbing ? 6 : 4)
                     .frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0)
@@ -698,21 +702,22 @@ struct PlaylistSheet: View {
                 HStack {
                     Text(mmss(Int(safe: (scrubbing ? scrub : player.progress) * player.total)))
                     Spacer()
-                    Text("-" + mmss(max(0, Int(safe: player.total - (scrubbing ? scrub : player.progress) * player.total))))
+                    Text(mmss(Int(safe: player.total)))
                 }
                 .font(.system(size: 13).monospacedDigit()).foregroundStyle(theme.textSecondary)
             }
 
             HStack {
-                modeButton("shuffle", on: player.shuffle) { player.shuffle.toggle() }
+                modeButton("arrow.up.arrow.down", on: player.shuffle) { player.shuffle.toggle() }
                 Spacer()
-                Button { player.previous() } label: { Image(systemName: "backward.fill").font(.system(size: 30)) }
+                Button { Haptics.impact(.light); player.previous() } label: { Image(systemName: "backward.fill").font(.system(size: 32)) }
                 Spacer()
                 Button { player.isPlaying ? player.pause() : player.resume() } label: {
-                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").font(.system(size: 44)).frame(width: 60)
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").font(.system(size: 48)).frame(width: 64, height: 64)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 Spacer()
-                Button { player.next() } label: { Image(systemName: "forward.fill").font(.system(size: 30)) }
+                Button { Haptics.impact(.light); player.next() } label: { Image(systemName: "forward.fill").font(.system(size: 32)) }
                 Spacer()
                 modeButton("repeat", on: player.repeatAll) { player.repeatAll.toggle() }
             }
@@ -735,7 +740,7 @@ struct PlaylistSheet: View {
     private func modeButton(_ icon: String, on: Bool, _ action: @escaping () -> Void) -> some View {
         Button { Haptics.impact(.light); action() } label: {
             Image(systemName: icon).font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(on ? theme.accentColor : theme.textSecondary)
+                .foregroundStyle(on ? theme.accentColor : theme.text.opacity(0.9))
                 .frame(width: 44, height: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
