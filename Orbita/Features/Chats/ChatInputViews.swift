@@ -94,9 +94,12 @@ struct ChatInputBar: View {
                 joinBar
             } else if model.canWrite && model.needsStart {
                 // бот, которым ещё не пользовались: вместо поля ввода — «Старт» (как в Telegram)
-                BotStartBar { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { model.startBot() } }
+                BotStartBar { withAnimation(.spring(response: 0.48, dampingFraction: 0.86)) { model.startBot() } }
             } else if model.canWrite {
                 inputRow
+                    // после «Старт» поле ввода не «выпрыгивает», а мягко поднимается на место кнопки
+                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 18)).combined(with: .scale(scale: 0.97, anchor: .bottom)),
+                                            removal: .opacity))
                 if let kb = model.botKeyboard, botKeysOpen, !kbVisible, !recording {
                     BotReplyKeyboardPanel(keyboard: kb) { model.pressBotKey($0) }
                         .transition(.move(edge: .bottom).combined(with: .opacity))

@@ -265,6 +265,8 @@ struct BotStartBar: View {
     @State private var bob = false            // стрелочки покачиваются вниз — к кнопке
     @State private var glow = false           // кнопка мягко «дышит» свечением
     @State private var shine: CGFloat = -1    // блик пробегает по кнопке
+    @State private var launching = false      // нажали «Старт»: подсказка улетает вверх, кнопка «вспыхивает» и превращается в поле ввода
+    @State private var ripple = false
 
     private var s: Strings { Strings(lang: lang) }
     private var hintFill: Color { theme.dark ? Color(white: 0.13) : Color.white }
@@ -291,15 +293,30 @@ struct BotStartBar: View {
                 BotHintTail().fill(hintFill).frame(width: 18, height: 9).offset(y: 8.5)
             }
             .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.12), radius: 12, y: 4)
-            .offset(y: shown ? (bob ? 2 : -2) : 24)
-            .opacity(shown ? 1 : 0)
+            .offset(y: launching ? -40 : (shown ? (bob ? 2 : -2) : 24))
+            .opacity(launching ? 0 : (shown ? 1 : 0))
+            .blur(radius: launching ? 6 : 0)
             .scaleEffect(shown ? 1 : 0.9, anchor: .bottom)
 
             Button {
+                guard !launching else { return }
                 Haptics.impact(.medium)
-                action()
+                // 1) кнопка мягко «вдавливается» и от неё расходится волна, подсказка улетает вверх
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.6)) { launching = true }
+                withAnimation(.easeOut(duration: 0.55)) { ripple = true }
+                // 2) чуть позже — /start уходит боту, а на месте кнопки плавно появляется поле ввода
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+                    Haptics.impact(.light)
+                    action()
+                }
             } label: {
-                Text(s.t("Старт", "Start"))
+                HStack(spacing: 8) {
+                    if launching {
+                        Image(systemName: "paperplane.fill").font(.system(size: 17, weight: .bold))
+                            .transition(.scale(scale: 0.3).combined(with: .opacity).combined(with: .offset(x: -10)))
+                    }
+                    Text(s.t("Старт", "Start"))
+                }
                     .font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
                     .frame(maxWidth: .infinity).frame(height: 58)
                     .background {
@@ -318,7 +335,13 @@ struct BotStartBar: View {
                     }
                     .overlay(Capsule().stroke(.white.opacity(0.28), lineWidth: 1))
                     .shadow(color: theme.accentColor.opacity(glow ? 0.65 : 0.3), radius: glow ? 20 : 10, y: 5)
-                    .scaleEffect(glow ? 1.012 : 1)
+                    .scaleEffect(launching ? 0.94 : (glow ? 1.012 : 1))
+                    // волна от кнопки при нажатии
+                    .background {
+                        Capsule().stroke(theme.accentColor.opacity(ripple ? 0 : 0.7), lineWidth: ripple ? 1 : 6)
+                            .scaleEffect(x: ripple ? 1.12 : 1, y: ripple ? 1.6 : 1)
+                            .opacity(launching ? 1 : 0)
+                    }
             }
             .buttonStyle(PressStyle())
             .scaleEffect(shown ? 1 : 0.85)
@@ -327,7 +350,8 @@ struct BotStartBar: View {
         .padding(.horizontal, 16)
         .padding(.top, 8).padding(.bottom, 12)
         .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
-                                removal: .scale(scale: 0.9).combined(with: .opacity)))
+                                removal: .scale(scale: 0.96, anchor: .bottom).combined(with: .opacity)
+                                    .combined(with: .offset(y: 12))))
         .onAppear {
             withAnimation(.spring(response: 0.55, dampingFraction: 0.72).delay(0.15)) { shown = true }
             withAnimation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true).delay(0.6)) { bob = true }
