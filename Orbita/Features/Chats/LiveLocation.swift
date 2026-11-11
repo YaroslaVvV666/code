@@ -571,7 +571,9 @@ struct LocationBlock: View {
             let img = await MapSnapshotCache.image(lat: geo.lat, lon: geo.lon, size: size, dark: theme.dark, span: span)
             withAnimation(.easeOut(duration: 0.2)) { snapshot = img ?? snapshot }
         }
-        .fullScreenCover(isPresented: $showMap) {
+        // карта на весь экран открывается из отдельного пустого слоя, а не из самого пузыря:
+        // жесты сообщения (нажатие, долгое нажатие) не перехватывают касания на открытой карте
+        .background { Color.clear.fullScreenCover(isPresented: $showMap) {
             if geo.isLive, !chatLive.people.isEmpty {
                 // трансляция: общая карта — и моя, и его аватарки, закончившиеся — серые на последней точке
                 LiveMapScreen(context: chatLive, focus: messageID)
@@ -580,7 +582,7 @@ struct LocationBlock: View {
             LocationMapView(geo: geo, messageID: messageID, mine: mine, avatarID: pinAvatar, name: pinName)
                 .environment(\.theme, theme).environment(\.lang, lang)
             }
-        }
+        } }
     }
 
     @Environment(\.liveAvatars) private var avatars
@@ -699,13 +701,15 @@ struct LocationMapView: View {
 
             HStack {
                 Button { dismiss() } label: {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
-                        .frame(width: 42, height: 42).glassCircle()
+                    Image(systemName: "xmark").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.text)
+                        .frame(width: 46, height: 46).glassCircle()
+                        .padding(8).contentShape(Rectangle())          // нажимается и чуть мимо кружка
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 Spacer()
             }
-            .padding(.horizontal, 16).padding(.top, 8)
+            .padding(.horizontal, 8).padding(.top, 0)
+            .zIndex(10)                                                // поверх карты: касания не уходят в карту
 
             VStack {
                 Spacer()
@@ -719,16 +723,18 @@ struct LocationMapView: View {
                                 .font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.danger)
                                 .frame(maxWidth: .infinity).frame(height: 50)
                                 .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: true)
+                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressStyle())
                     }
                     Button { openInMaps() } label: {
                         Label(s.t("Маршрут", "Directions"), systemImage: "arrow.triangle.turn.up.right.diamond.fill")
                             .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
                             .frame(maxWidth: .infinity).frame(height: 50)
                             .background(theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressStyle())
                 }
                 .padding(16)
             }
@@ -946,22 +952,25 @@ struct LiveMapScreen: View {
 
             HStack {
                 Button { dismiss() } label: {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
-                        .frame(width: 44, height: 44).glassCircle()
+                    Image(systemName: "xmark").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.text)
+                        .frame(width: 46, height: 46).glassCircle()
+                        .padding(8).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 Spacer()
                 Text(s.t("Геопозиция", "Location")).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.text)
                     .shadow(color: .black.opacity(0.25), radius: 3)
                 Spacer()
                 Button { Haptics.select(); showAll() } label: {
                     Text(s.t("Показать все", "Show all")).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
-                        .padding(.horizontal, 14).frame(height: 44)
+                        .padding(.horizontal, 16).frame(height: 46)
                         .glass(Capsule())
+                        .padding(8).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
             }
-            .padding(.horizontal, 16).padding(.top, 8)
+            .padding(.horizontal, 8)
+            .zIndex(10)
 
             VStack { Spacer(); panel }
         }
