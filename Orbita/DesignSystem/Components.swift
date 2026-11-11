@@ -651,3 +651,73 @@ struct ExpandableBlock<Content: View>: View {
         }
     }
 }
+
+// MARK: - Длинный текст, как в TikTok: «…ещё» серым прямо в конце последней строки
+
+/// Свёрнут до `lines` строк; в конце последней строки — серое «… ещё» (нажатие раскрывает).
+/// Раскрытый текст заканчивается серым «Свернуть». Короткий текст показывается как есть
+struct InlineMoreText<Content: View>: View {
+    var lines: Int = 6
+    /// Цвет фона под текстом — «… ещё» мягко закрывает конец последней строки
+    var background: Color
+    var moreColor: Color? = nil
+    var fontSize: CGFloat = 15
+    @ViewBuilder var content: () -> Content
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var fullHeight: CGFloat = 0
+    @State private var cutHeight: CGFloat = 0
+    @State private var open = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let needs = fullHeight > cutHeight + 2
+        let grey = moreColor ?? theme.textTertiary
+        VStack(alignment: .leading, spacing: 4) {
+            content()
+                .lineLimit(open ? nil : lines)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in if !open { cutHeight = h } }
+                .background(alignment: .topLeading) {
+                    // полная высота — по невидимой копии без ограничения строк
+                    content().lineLimit(nil).fixedSize(horizontal: false, vertical: true).hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if needs && !open {
+                        HStack(spacing: 0) {
+                            LinearGradient(colors: [background.opacity(0), background], startPoint: .leading, endPoint: .trailing)
+                                .frame(width: 26)
+                            Text("… ").foregroundStyle(theme.text)
+                                + Text(s.t("ещё", "more")).foregroundStyle(grey).fontWeight(.semibold)
+                        }
+                        .font(.system(size: fontSize))
+                        .fixedSize()
+                        .background(alignment: .trailing) { background.padding(.leading, 26) }
+                        .padding(.top, 10).padding(.leading, 20)            // область нажатия побольше
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Haptics.select()
+                            withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open = true }
+                        }
+                        .transition(.opacity)
+                    }
+                }
+            if needs && open {
+                Button {
+                    Haptics.select()
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open = false }
+                } label: {
+                    Text(s.t("Свернуть", "Show less"))
+                        .font(.system(size: fontSize - 1, weight: .semibold))
+                        .foregroundStyle(grey)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.opacity)
+            }
+        }
+    }
+}

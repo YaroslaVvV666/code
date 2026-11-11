@@ -276,9 +276,9 @@ struct CommentsSheet: View {
         .buttonStyle(.plain)
     }
 
-    /// Длинный комментарий — свёрнут до 6 строк, «Ещё» / «Свернуть»
+    /// Длинный комментарий — 6 строк, в конце последней серое «… ещё», как в TikTok
     private func commentText(_ comment: Comment) -> some View {
-        ExpandableBlock(collapsedHeight: 118) { commentBody(comment) }
+        InlineMoreText(lines: 6, background: theme.sheet) { commentBody(comment) }
     }
 
     @ViewBuilder

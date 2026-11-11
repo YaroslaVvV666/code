@@ -348,6 +348,7 @@ struct ReelsView: View {
     }
 
     @State private var kb: CGFloat = 0
+    @State private var panelBottom: CGFloat = 0
     @State private var slideX: CGFloat = 0
     @State private var sliding = false
 
@@ -672,6 +673,10 @@ struct ReelsView: View {
                             Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
                                 .allowsHitTesting(false)
                         }
+                        // где панель встала на самом деле: если между ней и клавиатурой остался зазор
+                        // (SwiftUI добавляет к отступу ещё нижнюю безопасную зону), опускаем её вплотную
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { panelBottom = $0 }
+                        .offset(y: kb > 0 ? max(0, (H - kb) - panelBottom) : 0)
                         .padding(.bottom, kb)                       // клавиатуру учитываем сами: ввод всегда над ней
                         .ignoresSafeArea(.container, edges: .bottom)
                         .transition(.move(edge: .bottom))
