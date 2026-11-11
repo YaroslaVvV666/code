@@ -388,6 +388,7 @@ private struct ReelGridPage: View {
     private var s: Strings { Strings(lang: lang) }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
                 if tab == .best { filters }
@@ -405,6 +406,12 @@ private struct ReelGridPage: View {
             }
         }
         .scrollDismissesKeyboard(.immediately)
+        // заиграл следующий ролик — плавно подвозим его карточку в центр экрана: за кадром ничего не играет
+        .onChange(of: autoplay.currentID) { old, new in
+            guard active, old != nil, let new, items.contains(where: { $0.id == new }) else { return }
+            withAnimation(.easeInOut(duration: 0.45)) { proxy.scrollTo(new, anchor: .center) }
+        }
+        }
         .task {
             guard !loaded else { return }
             if !initial.isEmpty {
@@ -448,6 +455,7 @@ private struct ReelGridPage: View {
                 LazyVStack(spacing: 6) {
                     ForEach(cols[c]) { item in
                         SearchCard(item: item, autoplay: autoplay, active: active)
+                            .id(item.id)
                             .onTapGesture { autoplay.handOff(item.id); onOpen(items.map(\.reel), item.id) }
                             .onAppear {
                                 onShown(item.id)
@@ -516,10 +524,13 @@ private struct SearchCard: View {
     private var post: Post { item.post }
     private var playing: Bool { active && autoplay.currentID == item.id }
 
-    /// Высота медиа относительно ширины: вертикальное видео выше, квадратное — ниже (в разумных пределах)
-    static func mediaHeightRatio(_ post: Post) -> CGFloat {
-        guard let m = post.media.first, m.width > 0, m.height > 0 else { return 1.33 }
-        return min(1.6, max(1.0, CGFloat(m.height) / CGFloat(m.width)))
+    /// Все карточки — 9:16, как сами шортсы. Горизонтальное видео не растягивается: уменьшено и стоит по центру
+    static func mediaHeightRatio(_ post: Post) -> CGFloat { 16.0 / 9.0 }
+
+    /// Вертикальное (9:16 и близкие) заполняет карточку, горизонтальное и квадратное — целиком по центру на чёрном
+    private func fills(_ m: MediaItem) -> Bool {
+        guard m.width > 0, m.height > 0 else { return true }
+        return CGFloat(m.width) / CGFloat(m.height) < 0.7
     }
 
     var body: some View {
@@ -595,18 +606,21 @@ private struct SearchCard: View {
     private var media: some View {
         if playing, let player = autoplay.player {
             ZStack {
-                if let m = post.media.first { RemoteImage(id: m.thumbID ?? m.id, maxPixel: 600) }
-                PlayerLayerView(player: player).transition(.opacity)
+                Color.black
+                if let m = post.media.first {
+                    RemoteImage(id: m.thumbID ?? m.id, fill: fills(m), maxPixel: 600, backdrop: .black)
+                    PlayerLayerView(player: player, gravity: fills(m) ? .resizeAspectFill : .resizeAspect).transition(.opacity)
+                }
             }
         } else if post.media.count > 1 {
             // коллаж: у играющего кадры сменяются сами
             let i = playing ? min(autoplay.slide, post.media.count - 1) : 0
             let m = post.media[i]
-            RemoteImage(id: m.thumbID ?? m.id, maxPixel: 600)
+            RemoteImage(id: m.thumbID ?? m.id, fill: fills(m), maxPixel: 600, backdrop: .black)
                 .id(m.id)
                 .transition(.opacity)
         } else if let m = post.media.first {
-            RemoteImage(id: m.thumbID ?? m.id, maxPixel: 600)
+            RemoteImage(id: m.thumbID ?? m.id, fill: fills(m), maxPixel: 600, backdrop: .black)
         }
     }
 

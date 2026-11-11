@@ -1188,19 +1188,6 @@ struct ReelPage: View {
                     .allowsHitTesting(false)
                 }
                 Spacer()
-                if collage && post.media.count > 1 {
-                    // точечки снизу, как в TikTok
-                    HStack(spacing: 5) {
-                        ForEach(0..<post.media.count, id: \.self) { i in
-                            Capsule().fill(Color.white.opacity(i == page ? 1 : 0.45))
-                                .frame(width: i == page ? 14 : 6, height: 6)
-                        }
-                    }
-                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: page)
-                    .frame(maxWidth: .infinity)
-                    .padding(.bottom, 8)
-                    .allowsHitTesting(false)
-                }
                 HStack(alignment: .bottom, spacing: 0) {
                     caption
                     Spacer(minLength: 30)
@@ -1208,9 +1195,15 @@ struct ReelPage: View {
                 }
                 // без подписи имя и кнопки опускаются ближе к полосе — пустого места под ними не остаётся
                 .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, post.text.isEmpty ? -8 : 6)
-                progressBar(hitHeight: post.text.isEmpty ? 34 : 48)   // широкая зона перемотки: промазать по полоске трудно
-                    .opacity(collage && soundID == nil ? 0 : 1)     // коллаж без звука — перематывать нечего
-                    .padding(.horizontal, 14)
+                if collage {
+                    // у коллажа нет длительности и полосы времени: на её месте точечки, как в TikTok.
+                    // Зажал точечки и ведёшь вправо/влево — листаются фото
+                    CollageDots(count: post.media.count, page: $page, hitHeight: post.text.isEmpty ? 34 : 48)
+                        .padding(.horizontal, 14)
+                } else {
+                    progressBar(hitHeight: post.text.isEmpty ? 34 : 48)   // широкая зона перемотки: промазать по полоске трудно
+                        .padding(.horizontal, 14)
+                }
                 // кнопки/подпись/полоса прижаты ближе к панели вкладок (как в TikTok): оставляем место ровно под панель, без лишнего зазора
                 Color.clear.frame(height: max(0, bottomClear + Self.safeBottom - 10))   // полоса прогресса прижата к самому верху панели вкладок
             }
@@ -1233,7 +1226,7 @@ struct ReelPage: View {
         .onChange(of: active) { _, now in now ? activate() : deactivate() }
         // перемотка жестом по панели вкладок (как в TikTok) — применяем только к активному ролику
         .onChange(of: scrubBus.tick) { _, _ in
-            guard active, let f = scrubBus.target else { return }
+            guard active, !collage, let f = scrubBus.target else { return }
             scrubbing = true
             progress = f
             if let item = player?.currentItem, item.duration.seconds.isFinite {
@@ -2389,5 +2382,42 @@ struct ReelTouchLayer: UIViewRepresentable {
 
         // с прокруткой ленты и другими жестами — одновременно, ничего не блокируем
         func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+
+// MARK: - Точечки коллажа: где ты сейчас; зажал и ведёшь — листаются фото
+
+struct CollageDots: View {
+    let count: Int
+    @Binding var page: Int
+    var hitHeight: CGFloat = 40
+    @State private var holding = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            HStack(spacing: holding ? 7 : 5) {
+                ForEach(0..<max(count, 1), id: \.self) { i in
+                    Capsule().fill(Color.white.opacity(i == page ? 1 : 0.45))
+                        .frame(width: i == page ? (holding ? 20 : 14) : (holding ? 8 : 6), height: holding ? 8 : 6)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                }
+            }
+            .opacity(count > 1 ? 1 : 0)
+            .frame(width: w, height: hitHeight)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    guard count > 1 else { return }
+                    if !holding { withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { holding = true } }
+                    // вся ширина полосы делится на столько частей, сколько фото: палец над частью — это фото
+                    let i = min(count - 1, max(0, Int(v.location.x / max(w, 1) * CGFloat(count))))
+                    if i != page { withAnimation(.easeOut(duration: 0.22)) { page = i } }
+                }
+                .onEnded { _ in withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { holding = false } })
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: page)
+        }
+        .frame(height: hitHeight)
     }
 }

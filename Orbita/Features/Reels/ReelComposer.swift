@@ -32,11 +32,14 @@ struct ReelComposerView: View {
     /// Коллаж: несколько фото и живых фото — в шортсах листаются вбок, как в TikTok
     @State private var collage: [CollageItem] = []
     @State private var collagePage = 0
+    @State private var editingPhoto: Int?           // какое фото коллажа открыто в редакторе
+
+    private struct EditIndex: Identifiable { let id: Int }
 
     struct CollageItem: Identifiable {
         let id = UUID()
-        let image: UIImage
-        let jpeg: Data
+        var image: UIImage
+        var jpeg: Data
         var live: URL?                 // видео живого фото (со звуком)
     }
 
@@ -107,8 +110,21 @@ struct ReelComposerView: View {
                                onClose: { showEditor = false; if prepared == nil { discard() } })
             }
         }
+        .fullScreenCover(item: Binding(get: { editingPhoto.map { EditIndex(id: $0) } }, set: { editingPhoto = $0?.id })) { e in
+            if collage.indices.contains(e.id) {
+                PhotoEditorView(image: collage[e.id].image, onDone: { edited in
+                    if collage.indices.contains(e.id),
+                       let data = edited.jpegData(compressionQuality: 0.9),
+                       let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let img = UIImage(data: jpeg) {
+                        collage[e.id].image = img
+                        collage[e.id].jpeg = jpeg
+                    }
+                    editingPhoto = nil
+                }, onCancel: { editingPhoto = nil })
+            }
+        }
         .holdsMedia()
-        .onDisappear { if !showEditor { discard() } }
+        .onDisappear { if !showEditor && editingPhoto == nil { discard() } }
         .task {
             if let list = try? await session.socialRepo.playlist(userID: session.serverID) { tracks = list }
         }
@@ -123,16 +139,24 @@ struct ReelComposerView: View {
             ZStack(alignment: .topLeading) {
                 TabView(selection: $collagePage) {
                     ForEach(Array(collage.enumerated()), id: \.element.id) { i, item in
-                        ZStack(alignment: .topTrailing) {
-                            Color.black
-                            Image(uiImage: item.image).resizable().scaledToFit()
-                            if item.live != nil {
-                                Label("LIVE", systemImage: "livephoto").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                                    .padding(.horizontal, 7).frame(height: 20).background(Color.black.opacity(0.5), in: Capsule())
-                                    .padding(8)
+                        // каждое фото целиком и строго по центру кадра 9:16 — так же, как его увидят в шортсах
+                        Color.black
+                            .overlay {
+                                Image(uiImage: item.image).resizable().scaledToFit()
+                                    .frame(maxWidth: width, maxHeight: height)
                             }
-                        }
-                        .tag(i)
+                            .overlay(alignment: .topTrailing) {
+                                if item.live != nil {
+                                    Label("LIVE", systemImage: "livephoto").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                        .padding(.horizontal, 7).frame(height: 20).background(Color.black.opacity(0.5), in: Capsule())
+                                        .padding(8)
+                                }
+                            }
+                            .frame(width: width, height: height)
+                            .clipped()
+                            .contentShape(Rectangle())
+                            .onTapGesture { if item.live == nil { editingPhoto = i } }
+                            .tag(i)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
@@ -155,6 +179,15 @@ struct ReelComposerView: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: collagePage)
             }
             HStack(spacing: 10) {
+                if collage.indices.contains(collagePage), collage[collagePage].live == nil {
+                    // каждое фото коллажа можно отредактировать: обрезать, повернуть, рисовать, добавить текст
+                    Button { editingPhoto = collagePage } label: {
+                        Label(s.t("Изменить", "Edit"), systemImage: "slider.horizontal.3")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                    }
+                    .buttonStyle(PressStyle())
+                }
                 Button { showPicker = true } label: {
                     Label(s.t("Заменить", "Replace"), systemImage: "arrow.triangle.2.circlepath")
                         .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
@@ -167,7 +200,7 @@ struct ReelComposerView: View {
                         if let u = collage[i].live { try? FileManager.default.removeItem(at: u) }
                         withAnimation { _ = collage.remove(at: i); collagePage = max(0, min(collagePage, collage.count - 1)) }
                     } label: {
-                        Label(s.t("Убрать фото", "Remove photo"), systemImage: "trash")
+                        Label(s.t("Убрать", "Remove"), systemImage: "trash")
                             .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.danger)
                             .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
                     }
