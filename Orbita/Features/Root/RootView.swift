@@ -63,8 +63,14 @@ struct RootView: View {
             if appLock.locked && appLock.enabled {
                 AppLockView(lock: appLock, onForgot: { flow.logout() }).transition(.opacity)
             } else if appLock.enabled && scenePhase != .active {
-                // в переключателе приложений содержимое не видно
-                SpaceBackground(isDark: isDark, showStars: true).ignoresSafeArea()
+                // в переключателе приложений — как в Telegram: то же приложение, но сильно размытое (прочитать ничего нельзя)
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(.regularMaterial).opacity(0.85)
+                    Color.black.opacity(isDark ? 0.15 : 0.04)
+                }
+                .ignoresSafeArea()
+                .transaction { $0.animation = nil }          // без анимации: снимок для переключателя делается сразу
             }
         }
         .animation(.easeInOut(duration: 0.25), value: appLock.locked)
