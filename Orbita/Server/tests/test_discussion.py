@@ -15,6 +15,7 @@ owner, to = session("Админ")
 fan, tf = session("Подписчик")
 ch = jbody(req("POST", "/v1/groups", to, {"title": "МЕМАЧ", "type": "channel", "kind": "open", "handle": "memach_" + uuid.uuid4().hex[:8]})[1])["id"]
 dg = jbody(req("POST", "/v1/groups", to, {"title": "МЕМАЧ чат", "type": "group", "kind": "open", "handle": "memachat_" + uuid.uuid4().hex[:8]})[1])["id"]
+old_post = jbody(req("POST", "/v1/chats/%s/messages" % ch, to, {"text": "старый пост до обсуждения"})[1]) or {}
 check("обсуждение привязано", req("PUT", "/v1/groups/%s" % ch, to, {"discussion": dg})[0] == 200)
 req("POST", "/v1/groups/%s/join" % ch, tf)
 req("POST", "/v1/groups/%s/join" % dg, tf)
@@ -47,5 +48,12 @@ req("DELETE", "/v1/messages/%s?all=1" % post["id"], to)
 d = jbody(req("GET", "/v1/chats/%s/messages" % dg, tf)[1]) or {}
 check("удалили пост — копии в обсуждении нет", not any(m.get("from_channel") for m in d.get("messages", [])) and not d.get("pinned"),
       [m.get("text") for m in d.get("messages", [])])
+# старый пост (до привязки обсуждения): кнопка под ним есть, и комментарии открываются
+cm = jbody(req("GET", "/v1/chats/%s/messages" % ch, tf)[1]) or {}
+op = next((m for m in cm.get("messages", []) if m["id"] == old_post.get("id")), {})
+check("под старым постом — «Прокомментировать»", op.get("comments") == 0, op.get("comments"))
+s, b, _ = req("GET", "/v1/groups/%s/comments/%s" % (ch, old_post.get("id")), tf)
+check("комментарии старого поста открываются", s == 200, b[:200])
+check("комментарий к старому посту", req("POST", "/v1/groups/%s/comments/%s" % (ch, old_post.get("id")), tf, {"text": "и сюда можно"})[0] == 201)
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)

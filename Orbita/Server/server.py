@@ -11503,7 +11503,7 @@ def group_send(req, me, gid):
     req.send_json(201, gmsg_json(row, uid, g["type"] == "channel"))
 
 
-def mirror_post(g, row, uid, text, entities, now):
+def mirror_post(g, row, uid, text, entities, now, pin=True):
     """Пост канала дублируется в чате обсуждения — комментарии это ответы на эту копию"""
     dg = group_row(g["discussion"])
     if not dg or dg["type"] != "group":
@@ -11521,8 +11521,9 @@ def mirror_post(g, row, uid, text, entities, now):
          enc(uid, "messages", COL["msg_attach"], mid, json.dumps(atts)) if atts else None, None, now, None, row["id"]))
     store_article("group_messages", mid, uid, blocks, buttons)
     # каждый новый пост закрепляется в чате обсуждения
-    run("INSERT OR REPLACE INTO pins(chat_key, message_id, pinned_by, created_at) VALUES (?,?,?,?)",
-        (dg["id"], mid, uid, now))
+    if pin:
+        run("INSERT OR REPLACE INTO pins(chat_key, message_id, pinned_by, created_at) VALUES (?,?,?,?)",
+            (dg["id"], mid, uid, now))
     for mrow in q("SELECT user_id FROM group_members WHERE group_id = ? AND user_id != ?", (dg["id"], uid)):
         SHARED.events_publish(mrow["user_id"], "group")
 
@@ -11828,6 +11829,15 @@ def comment_thread(req, me, gid, mid):
         raise ApiError(404, "not_found")
     dg = group_row(g["discussion"])
     mirror = q1("SELECT * FROM group_messages WHERE mirror_of = ? AND group_id = ?", (mid, g["discussion"])) if dg else None
+    if not mirror and dg and dg["type"] == "group":
+        # пост вышел до того, как привязали обсуждение: копию в чате создаём при первом открытии комментариев
+        # (с датой самого поста и без закрепления) — комментировать можно любой пост, как в Telegram
+        post = q1("SELECT * FROM group_messages WHERE id = ? AND group_id = ? AND kind IS NULL", (mid, gid))
+        if post:
+            text = dec(post["sender"], "messages", COL["msg_text"], post["id"], post["text_enc"]) or ""
+            entities = json.loads(dec(post["sender"], "messages", COL["msg_entities"], post["id"], post["entities_enc"]) or "[]")
+            mirror_post(g, post, post["sender"], text, entities, post["created_at"], pin=False)
+            mirror = q1("SELECT * FROM group_messages WHERE mirror_of = ? AND group_id = ?", (mid, g["discussion"]))
     if not mirror:
         raise ApiError(404, "not_found")
     return g, dg, mem, mirror
