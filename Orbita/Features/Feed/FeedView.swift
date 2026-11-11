@@ -151,13 +151,6 @@ struct FeedView: View {
             .onChange(of: topRequest) { _, _ in scrollToTop(proxy) }
             }
         }
-        .overlay(alignment: .bottomTrailing) {
-            if composeFloating && !searching && vm.authorFilter == nil {
-                FloatingComposeButton(onPost: onCompose, stories: stories)
-                    .transition(.scale(scale: 0.4, anchor: .bottomTrailing).combined(with: .opacity))
-            }
-        }
-        .animation(.spring(response: 0.36, dampingFraction: 0.78), value: composeFloating)
         .task { await vm.load() }
         .task {
             stories.myID = session.serverID
@@ -497,53 +490,6 @@ struct FeedView: View {
         .padding(.horizontal, 16)
         .frame(height: 54)
         .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 1) }
-    }
-}
-
-// MARK: - Плавающая кнопка постинга
-
-/// Пролистали карточку «Что у вас нового?» — справа внизу остаётся кнопка: пост одним касанием,
-/// а рядом маленькая камера для истории. Пока листаем вниз и панель вкладок уезжает, кнопка опускается следом.
-private struct FloatingComposeButton: View {
-    let onPost: () -> Void
-    @ObservedObject var stories: StoryStore
-    @ObservedObject private var bar = TabBarVisibility.shared
-    @Environment(\.theme) private var theme
-    @Environment(\.lang) private var lang
-    @Environment(\.tabBarHeight) private var tabBarHeight
-
-    var body: some View {
-        let s = Strings(lang: lang)
-        VStack(spacing: 12) {
-            StoryAddPicker(store: stories) {
-                Image(systemName: stories.preparing ? "hourglass" : "camera.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(theme.accentColor)
-                    .frame(width: 44, height: 44)
-                    .glassCircle()
-                    .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
-            }
-            .accessibilityLabel(s.t("Новая история", "New story"))
-
-            Button {
-                Haptics.impact(.medium)
-                onPost()
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 58, height: 58)
-                    .background(theme.accent, in: Circle())
-                    .shadow(color: theme.accentColor.opacity(0.45), radius: 14, y: 6)
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityLabel(s.t("Новый пост", "New post"))
-        }
-        .padding(.trailing, 18)
-        .padding(.bottom, 14)
-        // панель вкладок спряталась — кнопка садится ниже, на её место
-        .offset(y: bar.hidden ? tabBarHeight - 6 : 0)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: bar.hidden)
     }
 }
 
