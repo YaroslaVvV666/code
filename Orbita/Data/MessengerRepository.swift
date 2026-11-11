@@ -540,6 +540,7 @@ struct ChatThread {
     var pinned: [ChatMessage] = []
     var firstUnread: String? = nil  // первое непрочитанное при входе — для плашки «Новые сообщения»
     var unread: Int? = nil          // сколько всего непрочитанных (может быть больше, чем загружено сообщений)
+    var hasNewer = false            // окно от первого непрочитанного: ниже есть ещё не загруженные сообщения
     var isPreview = false           // открытый канал/группа просматривается без вступления
     var ttl: Int = 0                // таймер исчезающих сообщений (секунды), 0 — выключен
     var botCommands: [BotCommand] = []  // переписка с ботом: его команды (меню «/»)
@@ -663,6 +664,9 @@ protocol MessengerRepository: Sendable {
     func chats() async throws -> (chats: [ChatSummary], unread: Int)
     /// topic — тема группы-форума ("general" — общая); nil — вся переписка
     func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread
+    /// Окно переписки, начиная с сообщения `from` (и 10 перед ним) — чат с огромным числом непрочитанных
+    /// открывается на первом непрочитанном; дальше окно растёт по мере прокрутки вниз
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?, from: String?) async throws -> ChatThread
     /// Прочитано до сообщения (включительно) или всё; ответ — сколько осталось непрочитанных
     func markRead(peerID: String, upTo: String?, topic: String?) async -> Int?
     /// Сохранённые на телефоне копии — без сети и без ожидания (nil — ещё ни разу не загружали)
@@ -1332,6 +1336,7 @@ private struct ThreadDTO: Decodable {
     let preview: Bool?
     let firstUnread: String?
     let unread: Int?
+    let hasNewer: Bool?
     let ttl: Int?
     let botCommands: [BotCommand]?
     let bot: BotInfo?
@@ -1404,6 +1409,17 @@ struct RemoteMessengerRepository: MessengerRepository {
     }
 
     func thread(peerID: String, limit: Int, peek: Bool, topic: String?) async throws -> ChatThread {
+        try await thread(peerID: peerID, limit: limit, peek: peek, topic: topic, from: nil)
+    }
+
+    func thread(peerID: String, limit: Int, peek: Bool, topic: String?, from: String?) async throws -> ChatThread {
+        if let from {
+            // окно не кэшируется на телефоне — это временный вид, обычная копия (последние сообщения) не затирается
+            var query = ["limit": String(limit), "from": from, "context": "10"]
+            if !peek { query["read"] = "manual" }
+            if let topic { query["topic"] = topic }
+            return try decodeThread(try await api.request("GET", "/v1/chats/\(peerID)/messages", query: query))
+        }
         var query = ["limit": String(limit)]
         if peek { query["peek"] = "1" }
         // прочитанным сервер ничего не отмечает сам — телефон отмечает то, что человек увидел на экране (markRead)
@@ -1467,7 +1483,7 @@ struct RemoteMessengerRepository: MessengerRepository {
                           lastSeen: dto.peer.lastSeen.map { Date(timeIntervalSince1970: $0) },
                           typing: dto.typing, canWrite: dto.canWrite, group: dto.group?.model,
                           isContact: dto.peer.isContact ?? false, realName: real.isEmpty ? nil : real,
-                          pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread, unread: dto.unread,
+                          pinned: (dto.pinned ?? []).map(\.model), firstUnread: dto.firstUnread, unread: dto.unread, hasNewer: dto.hasNewer ?? false,
                           isPreview: dto.preview ?? false, ttl: dto.ttl ?? 0, botCommands: dto.botCommands ?? dto.bot?.commands ?? [], bot: dto.bot,
                           botKeyboard: dto.botKeyboard)
     }

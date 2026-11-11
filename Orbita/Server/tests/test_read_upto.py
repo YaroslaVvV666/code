@@ -53,5 +53,13 @@ check("тема: прочитал 2 — осталось 2", r.get("unread") == 
 topics = (jbody(req("GET", "/v1/groups/%s/topics" % fg, ta)[1]) or {}).get("topics", [])
 tt = next((x for x in topics if x.get("id") == tid), {})
 check("в списке тем — 2", tt.get("unread") == 2, tt)
+# окно от первого непрочитанного: 10 до + limit после, has_newer — есть ли ниже
+w = jbody(req("GET", "/v1/chats/%s/messages?read=manual&limit=50&from=%s&context=10" % (bg, many[100]), ta)[1]) or {}
+wid = [m["id"] for m in w.get("messages", [])]
+check("окно: 10 до и 50 начиная с нужного", len(wid) == 60 and wid[10] == many[100] and w.get("has_newer") is True, (len(wid), w.get("has_newer")))
+w = jbody(req("GET", "/v1/chats/%s/messages?read=manual&limit=500&from=%s" % (bg, many[100]), ta)[1]) or {}
+check("окно до самого конца — ниже ничего", w.get("has_newer") is False and w["messages"][-1]["id"] == many[-1], w.get("has_newer"))
+dw = jbody(req("GET", "/v1/chats/%s/messages?read=manual&limit=3&from=%s&context=2" % (b, ids[5]), ta)[1]) or {}
+check("личка: окно", [m["id"] for m in dw.get("messages", [])] == ids[3:8] and dw.get("has_newer") is True, [m["text"] for m in dw.get("messages", [])])
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)

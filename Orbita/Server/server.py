@@ -525,6 +525,9 @@ DB.execute("CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_posts_reel ON posts(reel, created_at DESC)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient, sender, created_at)")
 DB.execute("CREATE INDEX IF NOT EXISTS idx_gm_sender ON group_messages(group_id, sender, created_at)")
+# непрочитанные в личке: счётчик и первое непрочитанное — по маленькому частичному индексу, а не по всей переписке
+DB.execute("CREATE INDEX IF NOT EXISTS idx_msg_unread_pair ON messages(recipient, sender, created_at) "
+           "WHERE read_at IS NULL AND del_recipient = 0")
 ensure_column("messages", "attachments_enc", "attachments_enc BLOB")
 ensure_column("users", "style_enc", "style_enc BLOB")
 ensure_column("users", "phone_idx", "phone_idx TEXT")
@@ -8758,16 +8761,30 @@ def unregister_push(req, me):
     req.send_json(200, {"ok": True})
 
 
+def dm_last_rows(uid, limit=200):
+    """Последнее сообщение каждой личной переписки. Собеседники — по индексам (только id, без чтения сообщений),
+    затем по одному последнему сообщению на каждого: быстро даже при миллионах сообщений в одной переписке"""
+    peers = {r["p"] for r in q("SELECT DISTINCT recipient AS p FROM messages WHERE sender = ?", (uid,))}
+    peers |= {r["p"] for r in q("SELECT DISTINCT sender AS p FROM messages WHERE recipient = ?", (uid,))}
+    out = []
+    for p in peers:
+        cand = q("SELECT * FROM messages WHERE sender = ? AND recipient = ? AND del_sender = 0 ORDER BY created_at DESC LIMIT 1", (uid, p))
+        if p != uid:
+            cand += q("SELECT * FROM messages WHERE sender = ? AND recipient = ? AND del_recipient = 0 ORDER BY created_at DESC LIMIT 1", (p, uid))
+        if cand:
+            last = dict(max(cand, key=lambda r: r["created_at"]))
+            last["peer"] = p
+            out.append(last)
+    out.sort(key=lambda r: r["created_at"], reverse=True)
+    return out[:limit]
+
+
 @route("GET", r"/v1/chats")
 def list_chats(req, me):
     uid = me["id"]
     group_rows, group_total = group_chat_rows(uid)
     # последнее сообщение каждого собеседника — одним запросом (оконная функция), непрочитанные — вторым
-    last_rows = q("SELECT * FROM (SELECT m.*, CASE WHEN sender = ?1 THEN recipient ELSE sender END AS peer, "
-                  "ROW_NUMBER() OVER (PARTITION BY CASE WHEN sender = ?1 THEN recipient ELSE sender END "
-                  "ORDER BY created_at DESC) AS rn FROM messages m "
-                  "WHERE (sender = ?1 AND del_sender = 0) OR (recipient = ?1 AND del_recipient = 0)) "
-                  "WHERE rn = 1 ORDER BY created_at DESC LIMIT 200", (uid,))
+    last_rows = dm_last_rows(uid)
     unread_by = {r["sender"]: r["c"] for r in q(
         "SELECT sender, COUNT(*) c FROM messages WHERE recipient = ? AND read_at IS NULL AND del_recipient = 0 "
         "GROUP BY sender", (uid,))}
@@ -8968,10 +8985,7 @@ def chat_messages(req, me, peer):
     if req.query().get("peek") != "1" and req.query().get("read") != "manual":       # предпросмотр не помечает прочитанным
         run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
             (now, peer, uid))
-    rows = q("SELECT * FROM messages WHERE ((sender = ? AND recipient = ? AND del_sender = 0) "
-             "OR (sender = ? AND recipient = ? AND del_recipient = 0)) ORDER BY created_at DESC LIMIT ?",
-             (uid, peer, peer, uid, limit))
-    rows.reverse()
+    rows, has_newer = dm_window(uid, peer, limit, req.query())
     prefetch_messages(rows, uid, "messages")
     try:
         items = [message_json(m, uid) for m in rows]
@@ -8981,6 +8995,7 @@ def chat_messages(req, me, peer):
                         "peer": {**profile_json(pr, uid), "name": contact_name(uid, peer) or names(pr)[2]},
                         "typing": typing_action(peer, uid),
                         "pinned": pinned_of(dm_key(uid, peer), uid), "first_unread": first_unread, "unread": dm_unread,
+                        "has_newer": has_newer,
                         "ttl": dm_ttl(dm_key(uid, peer)),
                         **bot_thread_fields(peer, uid),
                         "protected": dm_protected(dm_key(uid, peer)),
@@ -10821,13 +10836,12 @@ def group_messages(req, me, gid):
     topic = req.query().get("topic") or None
     if topic and topic != GENERAL_TOPIC and not topic_row(gid, topic):
         raise ApiError(404, "topic_not_found")
+    has_newer = False
     if preview and not g["history"]:
         rows = []
     elif topic:
         cond, args = topic_filter(topic)
-        rows = q("SELECT * FROM group_messages WHERE group_id = ? AND %s AND created_at >= ? AND id NOT IN "
-                 "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT ?" % cond,
-                 (gid,) + args + (0 if preview else history_since(g, mem), uid, limit))
+        rows, has_newer = group_window(gid, uid, 0 if preview else history_since(g, mem), limit, req.query(), cond, args)
         if not preview:
             # в теме — свои непрочитанные (а не общие по группе)
             lr = max(topic_last_read(gid, topic, uid, mem), history_since(g, mem))
@@ -10839,10 +10853,7 @@ def group_messages(req, me, gid):
         if not preview and req.query().get("peek") != "1" and req.query().get("read") != "manual":
             mark_topic_read(gid, topic, uid)
     else:
-        rows = q("SELECT * FROM group_messages WHERE group_id = ? AND created_at >= ? AND id NOT IN "
-                 "(SELECT message_id FROM group_hidden WHERE user_id = ?) ORDER BY created_at DESC LIMIT ?",
-                 (gid, 0 if preview else history_since(g, mem), uid, limit))
-    rows.reverse()
+        rows, has_newer = group_window(gid, uid, 0 if preview else history_since(g, mem), limit, req.query())
     channel = g["type"] == "channel"
     if channel and req.query().get("peek") != "1":
         source = "subscribers" if mem else ("url" if req.query().get("src") == "link" else "other")
@@ -10858,7 +10869,8 @@ def group_messages(req, me, gid):
     req.send_json(200, {"messages": items, "peer": group_peer(g),
                         "typing": None if preview else group_typing(gid, uid),
                         "can_write": can_write, "group": group_info(g, uid), "preview": preview,
-                        "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread, "unread": g_unread})
+                        "pinned": pinned_of(gid, uid, group=True), "first_unread": first_unread, "unread": g_unread,
+                        "has_newer": has_newer})
 
 
 def group_unread_count(g, mem, uid):
@@ -10867,6 +10879,76 @@ def group_unread_count(g, mem, uid):
               "AND kind IS NOT 'left' AND kind IS NOT 'joined' AND kind IS NOT 'removed' "
               "AND id NOT IN (SELECT message_id FROM group_hidden WHERE user_id = ?)",
               (g["id"], uid, max(mem["last_read"], history_since(g, mem)), uid))["c"]
+
+
+def mark_dm_read_bulk(peer, uid, until):
+    """Фоновая отметка «прочитано» порциями по 20 000 — от старых к новым"""
+    try:
+        while True:
+            row = q1("SELECT created_at FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
+                     "AND created_at <= ? ORDER BY created_at LIMIT 1 OFFSET 20000", (peer, uid, until))
+            edge = row["created_at"] if row else until
+            run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
+                "AND created_at <= ?", (time.time(), peer, uid, edge))
+            if not row:
+                break
+            time.sleep(0.01)                    # даём другим запросам пройти между порциями
+        SHARED.events_publish(peer, "dm")
+    except Exception as e:                      # фоновая задача не должна ронять сервер
+        print("mark_dm_read_bulk:", e, file=sys.stderr)
+
+
+def dm_window(uid, peer, limit, params):
+    """Сообщения лички по возрастанию. Обычно — последние limit. С from=<id> — окно, начиная с этого сообщения
+    (и context штук перед ним): так чат с миллионом непрочитанных открывается на первом непрочитанном.
+    has_newer — после окна есть ещё сообщения (телефон догрузит их, когда долистают)"""
+    mine = "SELECT * FROM messages WHERE sender = ? AND recipient = ? AND del_sender = 0"
+    theirs = "SELECT * FROM messages WHERE sender = ? AND recipient = ? AND del_recipient = 0"
+    start = params.get("from")
+    anchor = q1("SELECT created_at FROM messages WHERE id = ? AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))",
+                (start, uid, peer, peer, uid)) if start else None
+    if not anchor:
+        # две выборки по индексу вместо одной с OR: на огромной переписке не сканируем всё
+        a = q(mine + " ORDER BY created_at DESC LIMIT ?", (uid, peer, limit))
+        b = q(theirs + " ORDER BY created_at DESC LIMIT ?", (peer, uid, limit)) if peer != uid else []
+        rows = sorted(a + b, key=lambda r: r["created_at"])[-limit:]
+        return rows, False
+    t0 = anchor["created_at"]
+    try:
+        ctx = max(0, min(50, int(params.get("context", "10"))))
+    except ValueError:
+        ctx = 10
+    before = []
+    if ctx:
+        before = sorted(q(mine + " AND created_at < ? ORDER BY created_at DESC LIMIT ?", (uid, peer, t0, ctx)) +
+                        (q(theirs + " AND created_at < ? ORDER BY created_at DESC LIMIT ?", (peer, uid, t0, ctx)) if peer != uid else []),
+                        key=lambda r: r["created_at"])[-ctx:]
+    after = sorted(q(mine + " AND created_at >= ? ORDER BY created_at LIMIT ?", (uid, peer, t0, limit + 1)) +
+                   (q(theirs + " AND created_at >= ? ORDER BY created_at LIMIT ?", (peer, uid, t0, limit + 1)) if peer != uid else []),
+                   key=lambda r: r["created_at"])
+    return before + after[:limit], len(after) > limit
+
+
+def group_window(gid, uid, since, limit, params, cond="1=1", cargs=()):
+    """То же для группы/канала/темы: последние limit или окно с from=<id> (+ context перед ним)"""
+    base = ("SELECT * FROM group_messages WHERE group_id = ? AND %s AND created_at >= ? AND id NOT IN "
+            "(SELECT message_id FROM group_hidden WHERE user_id = ?)" % cond)
+    args = (gid,) + tuple(cargs) + (since, uid)
+    start = params.get("from")
+    anchor = q1("SELECT created_at FROM group_messages WHERE id = ? AND group_id = ?", (start, gid)) if start else None
+    if not anchor:
+        rows = q(base + " ORDER BY created_at DESC LIMIT ?", args + (limit,))
+        rows.reverse()
+        return rows, False
+    t0 = anchor["created_at"]
+    try:
+        ctx = max(0, min(50, int(params.get("context", "10"))))
+    except ValueError:
+        ctx = 10
+    before = q(base + " AND created_at < ? ORDER BY created_at DESC LIMIT ?", args + (t0, ctx)) if ctx else []
+    before.reverse()
+    after = q(base + " AND created_at >= ? ORDER BY created_at LIMIT ?", args + (t0, limit + 1))
+    return before + after[:limit], len(after) > limit
 
 
 @route("POST", r"/v1/chats/([A-Za-z0-9_\-]+)/read")
@@ -10912,10 +10994,17 @@ def read_up_to(req, me, peer):
             if not m:
                 raise ApiError(404, "not_found")
             t = m["created_at"]
-        run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
-            "AND created_at <= ?", (time.time(), peer, uid, t))
-        left = q1("SELECT COUNT(*) c FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
-                  (peer, uid))["c"]
+        todo = q1("SELECT COUNT(*) c FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
+                  "AND created_at <= ?", (peer, uid, t))["c"]
+        total = q1("SELECT COUNT(*) c FROM messages WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0",
+                   (peer, uid))["c"]
+        if todo > 50000:
+            # очень много (сотни тысяч): отвечаем сразу, а отмечаем в фоне порциями — сервер не замирает на секунды
+            threading.Thread(target=mark_dm_read_bulk, args=(peer, uid, t), daemon=True).start()
+        else:
+            run("UPDATE messages SET read_at = ? WHERE sender = ? AND recipient = ? AND read_at IS NULL AND del_recipient = 0 "
+                "AND created_at <= ?", (time.time(), peer, uid, t))
+        left = total - todo
         SHARED.events_publish(peer, "dm")              # у собеседника — галочки «прочитано»
     req.send_json(200, {"unread": left})
 

@@ -352,12 +352,18 @@ final class ChatModel: ObservableObject {
 
     /// Сколько последних сообщений держим в списке; при поиске по чату увеличивается, чтобы можно было перейти к любому найденному
     var historyLimit = 100
+    /// Окно от первого непрочитанного (чат с огромным числом непрочитанных): с какого сообщения грузим; nil — обычный хвост
+    @Published private(set) var windowFrom: String?
+    /// В окне ниже есть ещё не загруженные сообщения — догружаем, когда долистали
+    @Published private(set) var hasNewer = false
+    private var loadingNewer = false
 
     var items: [ChatMessage] { messages + pending }
 
     func refresh() async {
         do {
-            let thread = try await repo.thread(peerID: peerID, limit: historyLimit, peek: false, topic: topic?.id)
+            let thread = try await repo.thread(peerID: peerID, limit: historyLimit, peek: false, topic: topic?.id, from: windowFrom)
+            if hasNewer != thread.hasNewer { hasNewer = thread.hasNewer }
             // Тот же ключ у тех же сообщений: список не перерисовывается и не «прыгает»
             // одинаковый id дважды (кэш + сервер, отправка + обновление) раньше ронял приложение — берём первый
             let keys = Dictionary(messages.map { ($0.id, $0.key) }, uniquingKeysWith: { first, _ in first })
@@ -416,10 +422,11 @@ final class ChatModel: ObservableObject {
             if !loaded {
                 firstUnreadID = thread.firstUnread
                 unreadLeft = thread.unread
-                // непрочитанных больше, чем загружено (563 при 100 последних) — догружаем, чтобы начать с первого непрочитанного
-                if let n = thread.unread, let fu = thread.firstUnread, !thread.messages.contains(where: { $0.id == fu }),
-                   historyLimit < n + 30 {
-                    historyLimit = min(5000, n + 30)
+                // первое непрочитанное не попало в последние сообщения (563 или хоть миллион непрочитанных) —
+                // грузим окно, начиная с него: 10 сообщений до и 200 после; дальше окно растёт при прокрутке вниз
+                if let fu = thread.firstUnread, !thread.messages.contains(where: { $0.id == fu }), windowFrom == nil {
+                    windowFrom = fu
+                    historyLimit = 200
                     Task { await self.refresh() }
                 }
             }
@@ -452,12 +459,34 @@ final class ChatModel: ObservableObject {
     }
 
     /// Долистали до самого низа — прочитано всё
+    /// Долистали до низа окна, а ниже ещё есть сообщения — догружаем следующие 300
+    func loadNewer() {
+        guard windowFrom != nil, hasNewer, !loadingNewer else { return }
+        loadingNewer = true
+        historyLimit += 300
+        Task {
+            await refresh()
+            loadingNewer = false
+        }
+    }
+
+    /// Стрелка «вниз» в окне: к самым новым сообщениям (окно сбрасывается) — и всё прочитано
+    func jumpToLatest() async {
+        if windowFrom != nil {
+            windowFrom = nil
+            hasNewer = false
+            historyLimit = 100
+            await refresh()
+        }
+        markAllSeen()
+    }
+
     func markAllSeen() {
         guard !isPreview, let last = items.last(where: { !$0.isPending }) else { return }
         markSeen(last.id)
-        if unreadLeft != 0 && (items.last?.createdAt ?? .distantPast) <= readUpTo { unreadLeft = 0 }
+        if !hasNewer, unreadLeft != 0 && (items.last?.createdAt ?? .distantPast) <= readUpTo { unreadLeft = 0 }
         // всё прочитано — огромную историю, загруженную ради непрочитанных, дальше не тянем при каждом обновлении
-        if historyLimit > 300 { historyLimit = 300 }
+        if windowFrom == nil, historyLimit > 300 { historyLimit = 300 }
     }
 
     /// Пришло только событие «печатает» — обновляем лишь его, не загружая заново всю переписку
@@ -631,6 +660,8 @@ final class ChatModel: ObservableObject {
     func deliver(text: String, entities: [TextEntity], media: [OutgoingMedia] = [],
                  placeholders: [ChatAttachment] = [], silent: Bool = false, cleanup: URL? = nil, once: Bool = false) async -> Bool {
         guard !text.isEmpty || !media.isEmpty else { return false }
+        // читали окно от первого непрочитанного — своё сообщение показываем внизу самых новых
+        if hasNewer { await jumpToLatest() }
         let reply = replyTo
         replyTo = nil
         let local = ChatMessage(key: "local-" + UUID().uuidString, id: "local-" + UUID().uuidString, mine: true,

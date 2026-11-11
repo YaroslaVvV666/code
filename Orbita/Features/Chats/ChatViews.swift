@@ -2243,7 +2243,12 @@ struct ChatScreen: View {
                 let near = y < viewH + 140
                 if near != atBottom { atBottom = near }
                 // сам низ переписки на экране — прочитано всё
-                if y < viewH + 8, readArmed || userDragged, (model.unreadLeft ?? 0) > 0 || !unreadIDs.isEmpty { model.markAllSeen() }
+                if model.hasNewer {
+                    // окно от первого непрочитанного: долистали до его низа — догружаем следующие сообщения
+                    if y < viewH + 600, readArmed || userDragged { model.loadNewer() }
+                } else if y < viewH + 8, readArmed || userDragged, (model.unreadLeft ?? 0) > 0 || !unreadIDs.isEmpty {
+                    model.markAllSeen()
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in if !userDragged { userDragged = true } })   // запись в @State — один раз, а не на каждом движении пальца
@@ -2332,8 +2337,19 @@ struct ChatScreen: View {
                 if !tags.isEmpty {
                     tagButton(tags).padding(.horizontal, 12).padding(.top, 18).padding(.bottom, atBottom ? 12 : 4)
                 }
-                if !atBottom {
+                if !atBottom || model.hasNewer {
                     Button {
+                        if model.hasNewer {
+                            // загружено окно от первого непрочитанного — к самым новым сообщениям, всё прочитано
+                            withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
+                            Task {
+                                await model.jumpToLatest()
+                                // список уже новый — к самому низу через тот же путь, что и после отправки сообщения
+                                try? await Task.sleep(nanoseconds: 60_000_000)
+                                NotificationCenter.default.post(name: ChatScreen.scrollNote, object: nil)
+                            }
+                            return
+                        }
                         // Прыжок вниз. Сначала якорь прокрутки (scrollPosition) переставляем на последнее сообщение:
                         // иначе перерисовка (гаснет счётчик, уезжает кнопка) возвращала экран к старому сообщению
                         // и вниз доезжало только со второго нажатия
