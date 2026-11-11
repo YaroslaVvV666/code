@@ -509,6 +509,8 @@ struct LocationBlock: View {
     let mine: Bool
     let pending: Bool
     var avatarID: String? = nil
+    /// Просто точка: карта во весь пузырь, без подписей и скруглений (их даёт сам пузырь) — как в Telegram
+    var bare = false
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
@@ -531,9 +533,10 @@ struct LocationBlock: View {
                     }
                     pin(active: active)
                 }
-                .frame(width: size.width, height: size.height)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: bare ? 260 : size.width, height: bare ? 170 : size.height)
+                .clipShape(RoundedRectangle(cornerRadius: bare ? 0 : 14, style: .continuous))
 
+                if !bare {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(title(active: active)).font(.system(size: 14, weight: .semibold))
@@ -557,6 +560,7 @@ struct LocationBlock: View {
                 }
                 .padding(.horizontal, 4).padding(.top, 7).padding(.bottom, 2)
                 .frame(width: size.width, alignment: .leading)
+                }
             }
         }
         .contentShape(Rectangle())

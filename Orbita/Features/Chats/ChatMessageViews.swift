@@ -560,6 +560,12 @@ struct MessageRow: View {
     private var hasText: Bool { !message.text.isEmpty }
     private var onlyMedia: Bool { hasText == false && mediaItems.count == message.attachments.count && !mediaItems.isEmpty }
 
+    /// Одна обычная геопозиция без текста (не трансляция): карта на весь пузырь, время поверх карты — как в Telegram
+    private var placeOnly: Bool {
+        !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
+            && message.attachments[0].kind == .location && message.attachments[0].geo?.isLive == false
+    }
+
     /// Одно голосовое без текста: время кладётся в ту же строку, что и длительность, без отдельной пустой строки
     private var voiceOnly: Bool {
         !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
@@ -738,17 +744,20 @@ struct MessageRow: View {
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
                     case .location:
                         if let geo = a.geo {
-                            LocationBlock(geo: geo, messageID: message.id, mine: mine, pending: message.isPending)
+                            LocationBlock(geo: geo, messageID: message.id, mine: mine, pending: message.isPending, bare: placeOnly)
                                 .allowsHitTesting(!blocked)
+                                .overlay(alignment: .bottomTrailing) {
+                                    if placeOnly { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
+                                }
                         }
                     case .contact:
                         ContactCard(attachment: a, mine: mine) { id in if !blocked { onOpenProfile?(id) } }
                     default: StickerImage(sticker: a.asSticker, size: 120)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-                .padding(.bottom, hasText ? 0 : (fileOnly ? 4 : 6))
+                .padding(.horizontal, placeOnly ? 0 : 10)
+                .padding(.top, placeOnly ? 0 : 8)
+                .padding(.bottom, placeOnly ? 0 : (hasText ? 0 : (fileOnly ? 4 : 6)))
                 .metaCorner {
                     if (voiceOnly && a.kind == .voice) || fileOnly {
                         MessageMeta(message: message, color: secondary)
@@ -776,7 +785,7 @@ struct MessageRow: View {
                     .padding(.top, mediaItems.isEmpty && message.attachments.isEmpty && message.reply == nil ? 7 : 6)
                     .padding(.bottom, 7)
                     .metaCorner { MessageMeta(message: message, color: secondary) }
-            } else if !onlyMedia && message.poll == nil && !voiceOnly && !fileOnly {
+            } else if !onlyMedia && message.poll == nil && !voiceOnly && !fileOnly && !placeOnly {
                 HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
                     .padding(.trailing, MetaInset.trailing)
                     .padding(.bottom, MetaInset.bottom)
