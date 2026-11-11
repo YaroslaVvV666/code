@@ -134,7 +134,7 @@ enum DuetComposer {
         }
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = range
-        instruction.layerInstructions = [try await layer(ta, source: va, x: 0), try await layer(tb, source: vb, x: half.width)]
+        instruction.layerInstructions = [try await layer(ta, source: va, x: 0), try await layer(tb, source: vb, x: box.width)]
         instruction.backgroundColor = UIColor.black.cgColor
         let video = AVMutableVideoComposition()
         video.renderSize = render
