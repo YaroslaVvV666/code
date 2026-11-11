@@ -167,6 +167,14 @@ struct ChatInputBar: View {
                     }
                     editingDraft = nil
                 }, onCancel: { editingDraft = nil })
+            } else if case .media(let m) = draft.source, case .video(let url) = m.source {
+                VideoEditorView(url: url, startAsGIF: m.gif, onDone: { media in
+                    if let i = drafts.firstIndex(where: { $0.id == draft.id }) {
+                        drafts[i] = DraftAttachment(source: .media(media))
+                    }
+                    editingDraft = nil
+                }, onCancel: { editingDraft = nil })
+                .environment(\.lang, lang)
             }
         }
         .sheet(isPresented: $showChain) {
@@ -1239,7 +1247,13 @@ struct ChatInputBar: View {
         Task {
             var converted: [DraftAttachment] = []
             for item in items {
-                if case .media(let m) = item.source, case .video(let url) = m.source, let silent = await VideoSilencer.stripAudio(url) {
+                if case .media(let m) = item.source, case .video(let url) = m.source {
+                    guard let silent = await VideoSilencer.stripAudio(url) else {
+                        // не получилось — не отправляем молча обычное видео со звуком, а говорим об этом
+                        preparing -= 1
+                        flash(s.t("Не получилось сделать GIF из этого видео", "Couldn't make a GIF from this video"))
+                        return
+                    }
                     var gif = PreparedMedia(source: .video(silent), width: m.width, height: m.height,
                                             duration: m.duration, thumbnail: m.thumbnail)
                     gif.gif = true
@@ -1408,7 +1422,10 @@ private struct DraftThumb: View {
     @Environment(\.theme) private var theme
 
     private var canEdit: Bool {
-        if case .media(let m) = draft.source, case .image = m.source { return true }
+        if case .media(let m) = draft.source {
+            if case .image = m.source { return true }
+            if case .video = m.source { return true }       // видео тоже редактируется: обрезка, звук, поворот, GIF
+        }
         return false
     }
 
@@ -1655,21 +1672,10 @@ private struct TrashBinShape: View {
     }
 }
 
-/// Убирает звуковую дорожку из видео (без перекодирования): так отправляется «GIF»
+/// Видео без звука для «GIF»: перекодируем в обычный mp4 (H.264, до 720p). Раньше дорожка просто вырезалась
+/// без перекодирования — у части видео с iPhone (HEVC и т. п.) получался файл, который сервер не принимал
 enum VideoSilencer {
     static func stripAudio(_ url: URL) async -> URL? {
-        let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-              let duration = try? await asset.load(.duration) else { return nil }
-        let composition = AVMutableComposition()
-        guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
-        do { try video.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero) } catch { return nil }
-        video.preferredTransform = (try? await track.load(.preferredTransform)) ?? .identity
-        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else { return nil }
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("gif-\(UUID().uuidString).mp4")
-        export.outputURL = out
-        export.outputFileType = .mp4
-        await export.export()
-        return export.status == .completed ? out : nil
+        await VideoEditExport.export(url, edit: VideoEdit(muted: true, asGIF: true))
     }
 }
