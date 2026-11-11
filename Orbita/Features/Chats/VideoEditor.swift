@@ -65,14 +65,27 @@ enum VideoEditExport {
         video.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(15, min(60, fps.rounded()))))
         video.instructions = [instruction]
 
-        guard let export = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) else { return nil }
+        if let out = await run(comp, preset: AVAssetExportPreset1280x720, video: video) { return out }
+        if let out = await run(comp, preset: AVAssetExportPresetHighestQuality, video: video) { return out }
+        // запасной путь без сборки кадров (без поворота): старые и необычные видео тоже уходят
+        if edit.rotation == 0 {
+            v.preferredTransform = pt
+            if let out = await run(comp, preset: AVAssetExportPresetMediumQuality, video: nil) { return out }
+        }
+        return nil
+    }
+
+    private static func run(_ asset: AVAsset, preset: String, video: AVVideoComposition?) async -> URL? {
+        guard let export = AVAssetExportSession(asset: asset, presetName: preset) else { return nil }
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("edit-\(UUID().uuidString).mp4")
-        export.videoComposition = video
+        if let video { export.videoComposition = video }
         export.outputURL = out
         export.outputFileType = .mp4
         export.shouldOptimizeForNetworkUse = true
         await export.export()
-        return export.status == .completed ? out : nil
+        if export.status == .completed { return out }
+        print("VideoEditExport \(preset):", export.error?.localizedDescription ?? "status \(export.status.rawValue)")
+        return nil
     }
 }
 

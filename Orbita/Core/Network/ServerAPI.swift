@@ -358,7 +358,8 @@ actor ServerAPI {
             case 401:       throw APIError.unauthorized
             default:
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                let code = (object?["error"] as? String) ?? "error"
+                // ответ не в нашем формате (обрыв, прокси, слишком большой запрос) — в тексте ошибки будет код HTTP
+                let code = (object?["error"] as? String) ?? "http_\(http.statusCode)"
                 if code == "content_blocked" {                 // нейросеть отклонила файл — крупная плашка «Я понял»
                     await MainActor.run { ContentNotice.show() }
                 }
