@@ -252,11 +252,15 @@ private struct TabBarHiding: ViewModifier {
     @ObservedObject private var visibility = TabBarVisibility.shared
 
     func body(content: Content) -> some View {
+        // уезжает вниз, чуть уменьшаясь и растворяясь; возвращается с мягкой пружинкой (как в YouTube)
         content
             .offset(y: visibility.hidden ? barHeight + 40 : 0)
+            .scaleEffect(visibility.hidden ? 0.9 : 1, anchor: .bottom)
+            .blur(radius: visibility.hidden ? 6 : 0)
             .opacity(visibility.hidden ? 0 : 1)
             .allowsHitTesting(!visibility.hidden)
-            .animation(.spring(response: 0.34, dampingFraction: 0.82), value: visibility.hidden)
+            .animation(visibility.hidden ? .easeIn(duration: 0.22) : .spring(response: 0.38, dampingFraction: 0.72),
+                       value: visibility.hidden)
     }
 }
 

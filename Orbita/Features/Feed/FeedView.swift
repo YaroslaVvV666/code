@@ -127,7 +127,12 @@ struct FeedView: View {
             }
             .coordinateSpace(name: "feedScroll")
             .onPreferenceChange(FeedPullKey.self) { handlePull($0) }
-            .onPreferenceChange(FeedScrollKey.self) { handleScroll($0) }
+            .onPreferenceChange(FeedScrollKey.self) { y in
+                if #available(iOS 18.0, *) { return }            // на iOS 18 — точный сдвиг из FeedScrollWatcher
+                handleScroll(y)
+            }
+            // как в YouTube: листаешь вниз — панель вкладок уезжает, малейшее движение вверх — возвращается
+            .modifier(FeedScrollWatcher { y in handleScroll(y) })
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
                 // потянули вниз — лента и истории обновляются
@@ -249,13 +254,13 @@ struct FeedView: View {
         let t = scrollTrack
         guard t.ready else { t.ready = true; t.last = y; return }
         let dy = y - t.last
-        guard abs(dy) > 1.5 else { return }               // игнорируем микродрожание
+        guard abs(dy) > 1 else { return }                 // игнорируем микродрожание
         t.last = y
-        if y > -70 {                                      // у самого верха — панель всегда видна
+        if y > -40 {                                      // у самого верха — панель всегда видна
             if session.tabBarHidden { session.tabBarHidden = false }
-        } else if dy < -3 {                               // листаем вниз — прячем
+        } else if dy < -4 {                               // листаем вниз — прячем
             if !session.tabBarHidden { session.tabBarHidden = true }
-        } else if dy > 3 {                                // листаем вверх — возвращаем сразу
+        } else if dy > 1.5 {                              // хоть чуть-чуть вверх — сразу возвращаем
             if session.tabBarHidden { session.tabBarHidden = false }
         }
     }
@@ -832,6 +837,23 @@ struct PostCard: View {
                 .environmentObject(session)
                 .preferredColorScheme(theme.dark ? .dark : .light)
                 .sheetStyle(theme)
+        }
+    }
+}
+
+/// Точный сдвиг ленты (iOS 18+): y = 0 у верха, минус — пролистали вниз (как у прежнего замера через рамки)
+struct FeedScrollWatcher: ViewModifier {
+    let onChange: (CGFloat) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(for: Int.self) { g in
+                Int((g.contentOffset.y + g.contentInsets.top) / 2)      // шаг 2 pt: точно и без лишних пересчётов
+            } action: { _, step in
+                onChange(-CGFloat(step) * 2)
+            }
+        } else {
+            content
         }
     }
 }
