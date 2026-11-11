@@ -38,5 +38,14 @@ check("комментарий в чате — ответ на пост", (last.g
 cm = jbody(req("GET", "/v1/chats/%s/messages" % ch, tf)[1]) or {}
 p = next((m for m in cm.get("messages", []) if m["id"] == post["id"]), {})
 check("под постом «1 комментарий»", p.get("comments") == 1, {k: p.get(k) for k in ("comments", "commenters")})
+# правка поста — копия в обсуждении тоже меняется; удаление — копия пропадает
+req("PUT", "/v1/messages/%s" % post["id"], to, {"text": "pov: выходной (исправлено)"})
+d = jbody(req("GET", "/v1/chats/%s/messages" % dg, tf)[1]) or {}
+mm = next((m for m in d.get("messages", []) if m.get("from_channel")), {})
+check("правка поста дошла до обсуждения", mm.get("text") == "pov: выходной (исправлено)", mm.get("text"))
+req("DELETE", "/v1/messages/%s?all=1" % post["id"], to)
+d = jbody(req("GET", "/v1/chats/%s/messages" % dg, tf)[1]) or {}
+check("удалили пост — копии в обсуждении нет", not any(m.get("from_channel") for m in d.get("messages", [])) and not d.get("pinned"),
+      [m.get("text") for m in d.get("messages", [])])
 print("FAILS: %d" % fails)
 sys.exit(1 if fails else 0)

@@ -11540,6 +11540,12 @@ def group_edit(req, me, mid):
         (enc(me["id"], "messages", COL["msg_text"], mid, text),
          enc(me["id"], "messages", COL["msg_entities"], mid, json.dumps(entities, ensure_ascii=False)),
          time.time(), mid))
+    # пост канала исправили — его копия в обсуждении меняется вместе с ним (как в Telegram)
+    for mr in q("SELECT id, sender FROM group_messages WHERE mirror_of = ?", (mid,)):
+        run("UPDATE group_messages SET text_enc = ?, entities_enc = ?, edited_at = ? WHERE id = ?",
+            (enc(mr["sender"], "messages", COL["msg_text"], mr["id"], text),
+             enc(mr["sender"], "messages", COL["msg_entities"], mr["id"], json.dumps(entities, ensure_ascii=False)),
+             time.time(), mr["id"]))
     req.send_json(200, gmsg_json(q1("SELECT * FROM group_messages WHERE id = ?", (mid,)), me["id"]))
 
 
@@ -11550,6 +11556,10 @@ def group_delete(req, me, mid):
     if not mem:
         raise ApiError(404, "not_found")
     if req.query().get("all") == "1" and (m["sender"] == uid or is_admin(mem)):
+        # пост канала удалили — пропадает и его копия в обсуждении (комментарии остаются в чате, как в Telegram)
+        for mr in q("SELECT id FROM group_messages WHERE mirror_of = ?", (mid,)):
+            run("DELETE FROM group_messages WHERE id = ?", (mr["id"],))
+            run("DELETE FROM pins WHERE message_id = ?", (mr["id"],))
         drop_message_media(m)
         run("DELETE FROM group_messages WHERE id = ?", (mid,))
         run("DELETE FROM live_locations WHERE message_id = ?", (mid,))

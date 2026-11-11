@@ -1213,6 +1213,7 @@ struct ChatScreen: View {
     @State private var translateText: String?
     @State private var stickerPack: StickerPackRoute?       // нажали на свой стикер — шторка набора               // «Перевести» из меню сообщения — системная шторка перевода
     @State private var profileID: String?
+    @State private var channelRoute: ChatRoute?          // пост канала в обсуждении: нажали на имя канала — открываем канал
     @State private var reactionWho: ReactionWhoRoute?      // кто поставил реакции (окно поверх чата)
     @ObservedObject private var emojiPacks = EmojiPackPresenter.shared   // нажали на своё эмодзи — его набор
     @State private var entitySheet: ChatEntity?             // нажали на номер / карту / адрес в тексте
@@ -1275,7 +1276,7 @@ struct ChatScreen: View {
                 .overlay {
                     if let route = reactionWho {
                         ReactionWhoOverlay(route: route, onClose: { reactionWho = nil },
-                                           onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
+                                           onOpenProfile: { id in openSender(id) })
                             .environmentObject(session)
                             .transition(.opacity)
                             .zIndex(50)
@@ -1575,6 +1576,10 @@ struct ChatScreen: View {
                 .sheetStyle(theme)
         }
         .profileSheet(id: $profileID)
+        .fullScreenCover(item: $channelRoute) { r in
+            ChatScreen(route: r, session: session, standalone: true)
+                .environmentObject(session).environmentObject(flow)
+        }
         .sheet(item: $noteTarget) { m in
             MessageNoteSheet(message: m) { model.setNote(m, text: $0) }
                 .environment(\.theme, theme).environment(\.lang, lang)
@@ -1591,7 +1596,7 @@ struct ChatScreen: View {
             .sheetStyle(theme)
         }
         .sheet(item: $entitySheet) { e in
-            EntityInfoSheet(entity: e, onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } })
+            EntityInfoSheet(entity: e, onOpenProfile: { id in openSender(id) })
                 .environmentObject(session)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium])
@@ -2411,6 +2416,16 @@ struct ChatScreen: View {
         return unreadIDs.count
     }
 
+    /// Нажали на автора: человек — его профиль; канал (пост канала в чате обсуждения) — сам канал
+    private func openSender(_ id: String) {
+        if id.hasPrefix("g_") {
+            let name = model.messages.first { $0.sender?.id == id }?.sender?.name ?? ""
+            channelRoute = ChatRoute(peer: ChatPeer(id: id, name: name, username: nil, avatarID: nil, isGroup: true, type: "channel"))
+        } else if id.lowercased() != session.serverID {
+            profileID = id
+        }
+    }
+
     /// Какие входящие ещё не прочитаны: всё от первого непрочитанного и ниже
     private func seedUnread() {
         unreadIDs = model.unreadCandidates()
@@ -2450,7 +2465,7 @@ struct ChatScreen: View {
             }
             if groupChat && !m.mine && m.system == nil {
                 if entry.isLast, let sender = m.sender {
-                    Button { profileID = sender.id } label: {
+                    Button { openSender(sender.id) } label: {
                         AvatarView(name: sender.name, size: 32, avatarID: sender.avatarID).clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -2472,7 +2487,7 @@ struct ChatScreen: View {
                 onJumpToReply: { scrollTarget = $0 },
                 onReact: { model.react(m, emoji: $0) },
                 onLongPress: { if !selecting { MessageMenu.isOpen = true; actionTarget = m } },     // флаг — сразу, ещё до первого кадра меню
-                onOpenProfile: { id in if id.lowercased() != session.serverID { profileID = id } },
+                onOpenProfile: { id in openSender(id) },
                 onOpenPost: { openSharedPost($0) },
                 onOpenStory: openStory,
                 onOpenComments: model.peer.isChannel ? { commentsRoute = CommentsRoute(channelID: model.peer.id, post: m) } : nil,
