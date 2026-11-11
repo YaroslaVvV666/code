@@ -192,16 +192,19 @@ struct BotIntroCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let banner = info.banner {
-                Group {
-                    if info.bannerIsVideo {
-                        BotBannerVideo(mediaID: banner)
-                    } else {
-                        RemoteImage(id: banner)
+                // баннер только накладывается на рамку нужного размера: картинка «на заполнение» шире экрана
+                // не раздвигает карточку, а с ней и всю переписку (раньше из-за этого чат бота выглядел растянутым)
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 210)
+                    .overlay {
+                        if info.bannerIsVideo {
+                            BotBannerVideo(mediaID: banner)
+                        } else {
+                            RemoteImage(id: banner)
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 210)
-                .clipped()
+                    .clipped()
             }
             if !info.description.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {

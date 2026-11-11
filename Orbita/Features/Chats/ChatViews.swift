@@ -1871,10 +1871,10 @@ struct ChatScreen: View {
                             Text("\(model.group?.count ?? model.peer.memberCount) \(s.memberWord(channel: model.peer.isChannel))")
                                 .foregroundStyle(theme.textSecondary)
                         } else if model.isBot {
-                            // у ботов «был(а) в сети» не пишем: либо ничего, либо «N пользователей в месяц»
-                            if let n = model.bot?.monthlyUsers {
-                                Text(BotUsers.text(n, lang: lang)).foregroundStyle(theme.textSecondary)
-                            }
+                            // у ботов «был(а) в сети» не пишем: «N пользователей в месяц», а пока их нет — просто «бот».
+                            // Вторая строка есть всегда — шапка бота той же высоты и вида, что у обычной переписки
+                            Text(model.bot?.monthlyUsers.map { BotUsers.text($0, lang: lang) } ?? s.t("бот", "bot"))
+                                .foregroundStyle(theme.textSecondary)
                         } else {
                             // «в сети» или «был(а) …» — как разрешил человек в приватности
                             Text(s.lastSeenText(model.lastSeen)).foregroundStyle(theme.textSecondary)
@@ -1948,7 +1948,7 @@ struct ChatScreen: View {
     /// Что сейчас написано под ником — от этого зависит ширина островка
     private var headerStatusKey: String {
         if let action = model.typing { return "typing:\(action)" }
-        if model.isBot { return model.bot?.monthlyUsers.map { BotUsers.text($0, lang: lang) } ?? "" }
+        if model.isBot { return model.bot?.monthlyUsers.map { BotUsers.text($0, lang: lang) } ?? "bot" }
         return s.lastSeenText(model.lastSeen)
     }
 

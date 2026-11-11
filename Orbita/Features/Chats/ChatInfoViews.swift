@@ -378,7 +378,7 @@ struct ChatInfoView: View {
         }
         // бот: не «был(а) в сети», а ничего или «N пользователей в месяц»
         if model.isBot || profile?.isBot == true {
-            return (model.bot?.monthlyUsers ?? profile?.monthlyUsers).map { BotUsers.text($0, lang: lang) } ?? ""
+            return (model.bot?.monthlyUsers ?? profile?.monthlyUsers).map { BotUsers.text($0, lang: lang) } ?? s.t("бот", "bot")
         }
         return s.lastSeenText(model.lastSeen)
     }
