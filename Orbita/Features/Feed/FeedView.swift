@@ -747,8 +747,11 @@ struct PostCard: View {
             }
 
             if !post.text.isEmpty {
-                FormattedText(text: post.text, entities: post.entities, size: textSize)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // длинный пост — свёрнут до ~8 строк, «Ещё» / «Свернуть»
+                ExpandableBlock(collapsedHeight: textSize * 1.32 * 8) {
+                    FormattedText(text: post.text, entities: post.entities, size: textSize)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             if !post.media.isEmpty {

@@ -227,8 +227,13 @@ struct CommentsSheet: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
+    /// Длинный комментарий — свёрнут до 6 строк, «Ещё» / «Свернуть»
     private func commentText(_ comment: Comment) -> some View {
+        ExpandableBlock(collapsedHeight: 118) { commentBody(comment) }
+    }
+
+    @ViewBuilder
+    private func commentBody(_ comment: Comment) -> some View {
         if let name = comment.replyToName, comment.parentID != nil {
             (Text(name + " ").foregroundStyle(theme.accentColor).fontWeight(.semibold)
              + Text(Linkify.attributed(comment.text)).foregroundStyle(theme.text))

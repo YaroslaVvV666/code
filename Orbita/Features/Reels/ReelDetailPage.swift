@@ -472,7 +472,9 @@ struct ReelDetailPage: View {
                             .foregroundStyle(Color(red: 0.3, green: 0.75, blue: 0.95))
                     }
                 }
-                Text(c.text).font(.system(size: 16)).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
+                ExpandableBlock(collapsedHeight: 126, tint: .white.opacity(0.85)) {
+                    Text(c.text).font(.system(size: 16)).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
+                }
                 let replies = comments.filter { $0.parentID == c.id }.count
                 if replies > 0 {
                     Button { showAllComments = true } label: {

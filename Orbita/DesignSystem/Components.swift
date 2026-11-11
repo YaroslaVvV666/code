@@ -595,3 +595,59 @@ struct ToastView: View {
             .onAppear { withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { shown = true } }
     }
 }
+
+// MARK: - Длинный текст: свёрнут до нескольких строк, «Ещё» раскрывает, «Свернуть» сворачивает обратно
+
+/// Оборачивает любой текст (обычный, со ссылками, с форматированием). Короткий показывается как есть, без кнопок;
+/// длинный — свёрнут с мягким затуханием внизу и кнопкой «Ещё»
+struct ExpandableBlock<Content: View>: View {
+    /// Высота в свёрнутом виде (примерно строки × высота строки)
+    var collapsedHeight: CGFloat
+    var tint: Color? = nil
+    @ViewBuilder var content: () -> Content
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var fullHeight: CGFloat = 0
+    @State private var open = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let needs = fullHeight > collapsedHeight + 10          // меньше строки «лишнего» — не сворачиваем
+        let folded = needs && !open
+        VStack(alignment: .leading, spacing: 4) {
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { fullHeight = g.size.height }
+                        .onChange(of: g.size.height) { _, h in fullHeight = h }
+                })
+                .frame(maxHeight: folded ? collapsedHeight : nil, alignment: .top)
+                .clipped()
+                .mask(
+                    LinearGradient(stops: [.init(color: .black, location: 0),
+                                           .init(color: .black, location: folded ? 0.62 : 1),
+                                           .init(color: folded ? .black.opacity(0.08) : .black, location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+            if needs {
+                Button {
+                    Haptics.select()
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open.toggle() }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(open ? s.t("Свернуть", "Show less") : s.t("Ещё", "Show more"))
+                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
+                            .rotationEffect(.degrees(open ? 180 : 0))
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(tint ?? theme.accentColor)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}

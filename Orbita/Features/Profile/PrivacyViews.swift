@@ -122,22 +122,24 @@ struct PrivacyScreen: View {
                     .padding(.horizontal, 14)
                     .frame(height: 52)
                 }
-                Text(s.t("""
-                    Когда включено (так по умолчанию), лента «Для вас» и шортсы подбираются по тому, что вы смотрите и сколько, \
-                    что лайкаете, комментируете, сохраняете, репостите, пересылаете и ищете, — чтобы чаще показывать похожее \
-                    и реже то, что вы пролистываете. Если выключить, ваши действия не запоминаются и не учитываются: \
-                    рекомендации строятся только по интересам, выбранным при регистрации, свежести и популярности. \
-                    Записи, на которые вы нажали «Не интересует», не показываются в любом случае. \
-                    Ваши действия видит только сервер Orbita — другим людям они не показываются.
-                    """, """
-                    When on (the default), your For You feed and shorts are picked based on what you watch and for how long, \
-                    what you like, comment on, save, repost, share and search for — to show more of what you enjoy and less of \
-                    what you skip. When off, your activity isn't remembered or used: recommendations are based only on the \
-                    interests you chose at sign-up, freshness and popularity. Posts you marked "Not interested" stay hidden either way. \
-                    Only the Orbita server sees your activity — it's never shown to other people.
-                    """))
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
+                ExpandableBlock(collapsedHeight: 52) {
+                    Text(s.t("""
+                        Когда включено (так по умолчанию), лента «Для вас» и шортсы подбираются по тому, что вы смотрите и сколько, \
+                        что лайкаете, комментируете, сохраняете, репостите, пересылаете и ищете, — чтобы чаще показывать похожее \
+                        и реже то, что вы пролистываете. Если выключить, ваши действия не запоминаются и не учитываются: \
+                        рекомендации строятся только по интересам, выбранным при регистрации, свежести и популярности. \
+                        Записи, на которые вы нажали «Не интересует», не показываются в любом случае. \
+                        Ваши действия видит только сервер Orbita — другим людям они не показываются.
+                        """, """
+                        When on (the default), your For You feed and shorts are picked based on what you watch and for how long, \
+                        what you like, comment on, save, repost, share and search for — to show more of what you enjoy and less of \
+                        what you skip. When off, your activity isn't remembered or used: recommendations are based only on the \
+                        interests you chose at sign-up, freshness and popularity. Posts you marked "Not interested" stay hidden either way. \
+                        Only the Orbita server sees your activity — it's never shown to other people.
+                        """))
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.textSecondary)
+                }
                     .padding(.horizontal, 30)
                     .fixedSize(horizontal: false, vertical: true)
             }
