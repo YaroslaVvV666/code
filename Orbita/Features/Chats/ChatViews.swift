@@ -1449,8 +1449,11 @@ struct ChatScreen: View {
         .onDisappear {
             session.chats.chatScreenDisappeared(tab: hostTab)
             // вышли — в списке чатов сразу точное число непрочитанных (или ничего, если всё прочитал)
-            let chats = session.chats
-            Task { try? await Task.sleep(nanoseconds: 500_000_000); await chats.refresh() }
+            let chats = session.chats, model = model
+            Task {
+                await model.flushRead()                  // сначала «прочитано» уходит на сервер, потом — свежий список
+                await chats.refresh()
+            }
         }
         .task {
             // анимации ряда реакций разбираем заранее (вне главного потока), пока чат открыт и читается:
@@ -2268,6 +2271,8 @@ struct ChatScreen: View {
                 }
             }
             .onChange(of: model.items.count) { old, new in
+                // догрузились ещё сообщения окна (или пришли новые) — непрочитанные среди них тоже считаются, когда увидишь
+                if new > old, !unreadIDs.isEmpty || userDragged { unreadIDs.formUnion(model.unreadCandidates()) }
                 // пришла более длинная история (предзагруженные 10 → 100): остаёмся внизу, а не у начала переписки
                 if new > old, !userDragged, route.focus == nil {
                     // догрузилась длинная история, где наконец есть первое непрочитанное — встаём на него
@@ -2408,8 +2413,7 @@ struct ChatScreen: View {
 
     /// Какие входящие ещё не прочитаны: всё от первого непрочитанного и ниже
     private func seedUnread() {
-        guard let first = model.firstUnreadID, let i = model.items.firstIndex(where: { $0.id == first }) else { return }
-        unreadIDs = Set(model.items[i...].filter { !$0.mine && $0.system == nil }.map(\.id))
+        unreadIDs = model.unreadCandidates()
     }
 
     /// Лоскуток «Новые сообщения» над первым непрочитанным

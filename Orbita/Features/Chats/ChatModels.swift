@@ -283,6 +283,7 @@ final class ChatModel: ObservableObject {
     @Published private(set) var unreadLeft: Int?
     private var readUpTo: Date = .distantPast          // до какого сообщения уже отметили прочитанным
     private var readTask: Task<Void, Never>?
+    private var pendingRead: String?                    // увидели, но ещё не отправили на сервер
     /// Растёт, когда поверх предзагруженных сообщений разом приходит длинная история: экран переписки создаётся заново
     /// и сразу открывается внизу — вместо кадров, где список стоял на месте, а контент под ним вырос
     @Published private(set) var generation = 0
@@ -450,12 +451,28 @@ final class ChatModel: ObservableObject {
             let notLoaded = max(0, left - total)            // непрочитанные, которых ещё нет в загруженной части
             unreadLeft = max(0, min(left, notLoaded + total - seen))
         }
+        pendingRead = id
         readTask?.cancel()
-        readTask = Task { [weak self, repo, peerID] in
+        readTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 450_000_000)
-            guard !Task.isCancelled, let self else { return }
-            if let left = await repo.markRead(peerID: peerID, upTo: id, topic: self.topic?.id) { self.unreadLeft = left }
+            guard !Task.isCancelled else { return }
+            await self?.flushRead()
         }
+    }
+
+    /// Входящие, которые ещё не отмечены прочитанными (от первого непрочитанного и новее последней отметки)
+    func unreadCandidates() -> Set<String> {
+        guard let first = firstUnreadID, let i = items.firstIndex(where: { $0.id == first }) else { return [] }
+        return Set(items[i...].filter { !$0.mine && $0.system == nil && !$0.isPending && $0.createdAt > readUpTo }.map(\.id))
+    }
+
+    /// Отправить «прочитано до» прямо сейчас (выходим из чата — не ждём паузы, иначе отметка терялась)
+    func flushRead() async {
+        guard let id = pendingRead else { return }
+        pendingRead = nil
+        readTask?.cancel()
+        let repo = repo, peerID = peerID, topicID = topic?.id
+        if let left = await repo.markRead(peerID: peerID, upTo: id, topic: topicID) { unreadLeft = left }
     }
 
     /// Долистали до самого низа — прочитано всё
