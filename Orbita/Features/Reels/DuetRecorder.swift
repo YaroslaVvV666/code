@@ -27,8 +27,15 @@ final class DuetCamera: NSObject, ObservableObject, AVCaptureFileOutputRecording
     }
 
     private func configure(withMic: Bool) {
+        // звук настраиваем сами: оригинал играет в динамик, а микрофон его не слышит (эхоподавление, как в видеозвонке) —
+        // в дуэте нет «двойного» звука оригинала и гула
+        session.automaticallyConfiguresApplicationAudioSession = false
+        let audio = AVAudioSession.sharedInstance()
+        try? audio.setCategory(.playAndRecord, mode: .videoChat, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        AudioSessionGate.willActivate()
+        try? audio.setActive(true)
         session.beginConfiguration()
-        session.sessionPreset = .hd1280x720
+        session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .hd1280x720     // чётко, не мыльно
         if let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
            let input = try? AVCaptureDeviceInput(device: cam), session.canAddInput(input) { session.addInput(input) }
         if withMic, let mic = AVCaptureDevice.default(for: .audio),
@@ -83,7 +90,8 @@ private struct DuetPreview: UIViewRepresentable {
     func updateUIView(_ v: V, context: Context) {}
 }
 
-/// Склейка двух видео в одно 9:16: две половины, каждая — «заполнить» со срезом краёв
+/// Склейка двух видео в одно 9:16 1080×1920: слева оригинал, справа ты — каждое ЦЕЛИКОМ (без обрезки),
+/// вписано в свою половину 540×960 по центру по высоте, вокруг — чёрное (как дуэт в TikTok)
 enum DuetComposer {
     static func compose(original: URL, mine: URL) async throws -> URL {
         let a = AVURLAsset(url: original), b = AVURLAsset(url: mine)
@@ -105,7 +113,8 @@ enum DuetComposer {
             }
         }
         let render = CGSize(width: 1080, height: 1920)
-        let half = CGSize(width: render.width / 2, height: render.height)
+        let box = CGSize(width: render.width / 2, height: render.width / 2 * 16 / 9)       // 540×960 — половина под 9:16
+        let boxY = (render.height - box.height) / 2
         func layer(_ track: AVCompositionTrack?, source: AVAssetTrack, x: CGFloat) async throws -> AVMutableVideoCompositionLayerInstruction {
             let li = AVMutableVideoCompositionLayerInstruction(assetTrack: track!)
             let size = try await source.load(.naturalSize)
@@ -113,15 +122,13 @@ enum DuetComposer {
             // учитываем поворот исходника
             let oriented = CGRect(origin: .zero, size: size).applying(pt)
             let w = abs(oriented.width), h = abs(oriented.height)
-            let scale = max(half.width / w, half.height / h)
-            // срез по центру: видимая часть исходника — ровно половина кадра
-            let visW = half.width / scale, visH = half.height / scale
-            let crop = CGRect(x: (w - visW) / 2, y: (h - visH) / 2, width: visW, height: visH)
-            var t = pt.concatenating(CGAffineTransform(translationX: -oriented.minX, y: -oriented.minY))
-            li.setCropRectangle(crop.applying(t.inverted()), at: .zero)
-            t = t.concatenating(CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+            // вписать целиком (ничего не срезаем); горизонтальное видео — по центру с полосами
+            let scale = min(box.width / w, box.height / h)
+            let dx = x + (box.width - w * scale) / 2
+            let dy = boxY + (box.height - h * scale) / 2
+            let t = pt.concatenating(CGAffineTransform(translationX: -oriented.minX, y: -oriented.minY))
                 .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-                .concatenating(CGAffineTransform(translationX: x, y: 0))
+                .concatenating(CGAffineTransform(translationX: dx, y: dy))
             li.setTransform(t, at: .zero)
             return li
         }
@@ -139,6 +146,14 @@ enum DuetComposer {
             throw CocoaError(.fileWriteUnknown)
         }
         export.videoComposition = video
+        // громкость: оригинал чуть тише, голос — полностью (как в TikTok), без перегруза
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = comp.tracks(withMediaType: .audio).enumerated().map { i, track in
+            let p = AVMutableAudioMixInputParameters(track: track)
+            p.setVolume(i == 0 ? 0.8 : 1.0, at: .zero)
+            return p
+        }
+        export.audioMix = mix
         export.outputURL = out
         export.outputFileType = .mp4
         export.shouldOptimizeForNetworkUse = true
@@ -176,21 +191,24 @@ struct DuetRecorderView: View {
             if phase == .review || phase == .posting, let result {
                 review(result)
             } else {
+                // как будет в готовом дуэте: две половины 9:16 рядом, каждое видео целиком
                 GeometryReader { geo in
+                    let w = geo.size.width / 2 - 1
                     HStack(spacing: 2) {
                         ZStack {
-                            if let player { PlayerLayerView(player: player, gravity: .resizeAspectFill) }
+                            if let player { PlayerLayerView(player: player, gravity: .resizeAspect) }
                             else { ProgressView().tint(.white) }
                         }
-                        .frame(width: geo.size.width / 2 - 1).clipped()
+                        .frame(width: w, height: w * 16 / 9).clipped()
                         ZStack {
                             DuetPreview(session: camera.session)
                             if camera.denied {
                                 Text(s.cameraDenied).font(.system(size: 13)).foregroundStyle(.white).multilineTextAlignment(.center).padding()
                             }
                         }
-                        .frame(width: geo.size.width / 2 - 1).clipped()
+                        .frame(width: w, height: w * 16 / 9).clipped()
                     }
+                    .frame(width: geo.size.width, height: geo.size.height)
                 }
                 .ignoresSafeArea()
                 controls
@@ -284,6 +302,12 @@ struct DuetRecorderView: View {
     }
 
     private func prepare() async {
+        // всё постороннее — на паузу: музыка, голосовые, кружки, видео в ленте
+        session.player.stop()
+        VoicePlayer.shared.pause()
+        CircleFocus.shared.stop()
+        MediaSilence.pauseAll()
+        NotificationCenter.default.post(name: .orbitaVideoWithSound, object: nil)
         camera.start()
         guard let v = video, let url = ServerConfig.mediaURL(v.id) else { errorText = s.mediaFailed; return }
         // оригинал нужен файлом — для склейки
@@ -293,6 +317,8 @@ struct DuetRecorderView: View {
             try FileManager.default.moveItem(at: tmp, to: local)
             localOriginal = local
             let p = AVPlayer(url: local)
+            p.isMuted = false
+            p.volume = 1
             player = p
             phase = .ready
         } catch {
@@ -363,6 +389,8 @@ struct DuetRecorderView: View {
     private func cleanup() {
         camera.shutdown()
         player?.pause()
+        // вернуть обычный звук приложения (без микрофона)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         for u in [localOriginal, result] { if let u { try? FileManager.default.removeItem(at: u) } }
     }
 }

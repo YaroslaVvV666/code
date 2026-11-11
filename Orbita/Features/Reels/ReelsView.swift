@@ -525,7 +525,7 @@ struct ReelsView: View {
                                     ReelPage(reel: reel,
                                              active: reel.id == current,
                                              near: abs(index - currentIndex) <= 1,
-                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active
+                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active || duetFor != nil
                                                  || detailFor != nil,       // пока открыто «выложить видео» или страница поста, текущий ролик стоит
                                              topInset: topInset,
                                              bottomClear: bottomClear,
