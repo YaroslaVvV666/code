@@ -2209,9 +2209,11 @@ struct ChatScreen: View {
                                 }
                             }
                             .padding(.top, entry.isFirst ? 7 : 2)
+                            // новое сообщение: вырастает из своего угла (входящее — слева, своё — справа), чуть поднимается
+                            // снизу и проявляется из лёгкого размытия
                             .transition(.asymmetric(
-                                insertion: .scale(scale: 0.88, anchor: entry.message.mine ? .bottomTrailing : .bottomLeading)
-                                    .combined(with: .move(edge: .bottom)).combined(with: .opacity),
+                                insertion: .modifier(active: MessageArrive(on: true, mine: entry.message.mine),
+                                                     identity: MessageArrive(on: false, mine: entry.message.mine)),
                                 removal: .opacity.combined(with: .scale(scale: 0.9))))
                         }
                     }
@@ -3210,5 +3212,19 @@ struct ChatsFilterWatcher: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// Появление сообщения: из своего угла, с подъёмом снизу и из размытия — мягко, как в Telegram
+private struct MessageArrive: ViewModifier {
+    let on: Bool
+    let mine: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(on ? 0.82 : 1, anchor: mine ? .bottomTrailing : .bottomLeading)
+            .offset(x: on ? (mine ? 14 : -14) : 0, y: on ? 22 : 0)
+            .blur(radius: on ? 5 : 0)
+            .opacity(on ? 0 : 1)
     }
 }

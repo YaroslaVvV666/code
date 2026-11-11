@@ -395,6 +395,9 @@ final class ChatModel: ObservableObject {
                     // и экран на миг оставался пустым, пока не пролистаешь
                     var t = Transaction(); t.disablesAnimations = true
                     withTransaction(t) { messages = fresh }
+                } else if refreshedOnce, let last = fresh.last, !last.mine, !messages.contains(where: { $0.id == last.id }) {
+                    // пришло новое сообщение — «всплывает» снизу мягкой пружинкой (как в Telegram), а не появляется рывком
+                    withAnimation(.spring(response: 0.46, dampingFraction: 0.8)) { messages = fresh }
                 } else {
                     messages = fresh
                 }

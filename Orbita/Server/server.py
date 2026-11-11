@@ -6208,8 +6208,40 @@ BOTGOD_HELP = ("Я — BotGod. Помогу создать своих ботов
                "Код бота работает через Bot API: https://<ваш сервер>/bot<токен>/getUpdates, sendMessage, setMyCommands…")
 
 
+# Встроенные боты отвечают не мгновенно, а как в Telegram: «печатает…», пауза по длине ответа, потом сообщение.
+# Несколько ответов подряд идут по очереди, в том же порядке. ORBITA_BOT_DELAY=0 — мгновенно (для тестов)
+BOT_REPLY_DELAY = float(os.environ.get("ORBITA_BOT_DELAY", "0.9"))
+_bot_reply_lock = threading.Lock()
+_bot_reply_next = {}
+
+
+def bot_reply(bot_id, uid, text, entities=None, attachments=None):
+    if BOT_REPLY_DELAY <= 0:
+        return deliver_dm(bot_id, uid, text, entities or [], attachments or [], None, silent=True)
+    with _bot_reply_lock:
+        now = time.time()
+        delay = min(2.4, BOT_REPLY_DELAY + len(text or "") / 700.0)      # длинный ответ «печатается» чуть дольше
+        at = max(now, _bot_reply_next.get((bot_id, uid), now)) + delay
+        _bot_reply_next[(bot_id, uid)] = at
+        if len(_bot_reply_next) > 5000:
+            _bot_reply_next.clear()
+    SHARED.typing_set(bot_id, uid, "typing", int(max(TYPING_TTL, at - now + 1)))
+    SHARED.events_publish(uid, "dm")                       # у человека сразу «печатает…»
+
+    def fire():
+        try:
+            SHARED.typing_clear(bot_id, uid)
+            deliver_dm(bot_id, uid, text, entities or [], attachments or [], None, silent=True)
+        except Exception as e:                             # фоновая отправка не должна ронять сервер
+            print("bot_reply:", e, file=sys.stderr)
+
+    timer = threading.Timer(at - now, fire)
+    timer.daemon = True
+    timer.start()
+
+
 def botgod_say(uid, text):
-    deliver_dm(BOTGOD_ID, uid, text, [], [], None, silent=True)
+    bot_reply(BOTGOD_ID, uid, text)
 
 
 def owner_bots(uid):
@@ -6430,7 +6462,7 @@ def botgod_handle(uid, text, atts):
 
 
 def bot_say(uid, text, attachments=None, entities=None):
-    deliver_dm(STICKER_BOT_ID, uid, text, entities or [], attachments or [], None, silent=True)
+    bot_reply(STICKER_BOT_ID, uid, text, entities, attachments)
 
 
 def bot_sticker_media(atts):
