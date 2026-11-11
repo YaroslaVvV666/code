@@ -642,7 +642,26 @@ struct ReelsView: View {
                 ZStack(alignment: .bottom) {
                     Color.black.opacity(0.45).ignoresSafeArea()
                         .onTapGesture { closeComments() }
-                    CommentsSheet(post: post, vm: session.feed, onClose: { closeComments() })
+                    CommentsSheet(post: post, vm: session.feed, onClose: { closeComments() },
+                                  onHeaderDrag: { v, ended in
+                                      // тянут за шапку с фильтрами — панель едет за пальцем; отпустили — закрыть или зафиксировать высоту
+                                      if !ended {
+                                          var t = Transaction(); t.disablesAnimations = true
+                                          withTransaction(t) { sheetDrag = v.translation.height }
+                                          return
+                                      }
+                                      let final = base - v.translation.height
+                                      let predicted = base - v.predictedEndTranslation.height
+                                      withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                          if predicted < 0.45 * H || (!sheetTall && v.translation.height > 140) {
+                                              commentsFor = nil
+                                              if let id = current { Task { await model.refreshPost(id, session: session) } }
+                                          } else {
+                                              sheetTall = final > 0.82 * H || predicted > 0.88 * H
+                                          }
+                                          sheetDrag = 0
+                                      }
+                                  })
                         .environmentObject(session).environmentObject(flow)
                         .environment(\.theme, theme).environment(\.lang, lang)
                         .frame(maxWidth: .infinity)
@@ -650,29 +669,8 @@ struct ReelsView: View {
                         .background(theme.sheet)
                         .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22, style: .continuous))
                         .overlay(alignment: .top) {
-                            // за верхнюю кромку шторку можно тянуть вверх и вниз.
-                            // тянем только центральную часть — углы (в т.ч. крестик) остаются нажимаемыми
-                            ZStack(alignment: .top) {
-                                Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
-                                Color.clear.frame(width: 200, height: 56).contentShape(Rectangle())
-                                .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .global)
-                                    .onChanged { v in var t = Transaction(); t.disablesAnimations = true
-                                        withTransaction(t) { sheetDrag = v.translation.height } }
-                                    .onEnded { v in
-                                        let final = base - v.translation.height
-                                        let predicted = base - v.predictedEndTranslation.height
-                                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                                            if predicted < 0.45 * H || (!sheetTall && v.translation.height > 140) {
-                                                commentsFor = nil
-                                                if let id = current { Task { await model.refreshPost(id, session: session) } }
-                                            } else {
-                                                sheetTall = final > 0.82 * H || predicted > 0.88 * H
-                                            }
-                                            sheetDrag = 0
-                                        }
-                                    })
-                            }
-                            .frame(maxWidth: .infinity)             // полоса во всю ширину, но тянется только центр
+                            Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
+                                .allowsHitTesting(false)
                         }
                         .padding(.bottom, kb)                       // клавиатуру учитываем сами: ввод всегда над ней
                         .ignoresSafeArea(.container, edges: .bottom)
