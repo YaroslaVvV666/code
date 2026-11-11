@@ -46,6 +46,7 @@ targets:
         NSContactsUsageDescription: Контакты нужны, чтобы найти друзей, которые уже в Orbita.
         NSPhotoLibraryUsageDescription: Доступ к фото нужен, чтобы отправлять их в чаты и публикации.
         NSPhotoLibraryAddUsageDescription: Нужно, чтобы сохранять фото и видео из чатов в галерею.
+        NSFaceIDUsageDescription: Face ID нужен, чтобы входить в Orbita без ввода кода.
         NSLocationWhenInUseUsageDescription: Геопозиция нужна, чтобы отправлять своё местоположение и транслировать его в чат.
         NSLocationAlwaysAndWhenInUseUsageDescription: Чтобы трансляция геопозиции продолжалась, когда приложение свёрнуто.
         NSLocalNetworkUsageDescription: Нужно для подключения к вашему серверу Orbita в локальной сети.

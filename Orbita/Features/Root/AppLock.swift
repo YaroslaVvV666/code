@@ -186,8 +186,15 @@ final class AppLock: ObservableObject {
     var biometryIcon: String { biometryName == "Touch ID" ? "touchid" : (biometryName == "Optic ID" ? "opticid" : "faceid") }
 
     var biometryAvailable: Bool {
-        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        let c = LAContext()
+        guard c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else { return false }
+        // Face ID без строки NSFaceIDUsageDescription в Info.plist iOS убивает приложение при первом же запросе —
+        // в такой сборке Face ID просто не предлагаем (вход по коду работает)
+        if c.biometryType == .faceID, !Self.faceIDKeyPresent { return false }
+        return true
     }
+
+    static var faceIDKeyPresent: Bool { Bundle.main.object(forInfoDictionaryKey: "NSFaceIDUsageDescription") != nil }
 
     private var biometryRunning = false
 
