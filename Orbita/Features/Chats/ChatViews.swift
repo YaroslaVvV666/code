@@ -1204,6 +1204,9 @@ struct ChatScreen: View {
     @State private var showRequests = false
     @State private var scrollTarget: String?
     @State private var highlightID: String?
+    /// Откуда переходили по цитатам ответов: стрелка вниз сначала возвращает сюда (последний переход — первым)
+    @State private var replyTrail: [String] = []
+    @State private var replyJumpAt = Date.distantPast
     @State private var pinIndex = 0
     @State private var forwardIDs: ForwardRoute?
     @State private var selecting = false
@@ -2255,6 +2258,8 @@ struct ChatScreen: View {
             .onPreferenceChange(BottomKey.self) { y in
                 let near = y < viewH + 140
                 if near != atBottom { atBottom = near }
+                // сами долистали до самого низа — возвращаться некуда (сразу после перехода по цитате не считаем)
+                if near, !replyTrail.isEmpty, Date().timeIntervalSince(replyJumpAt) > 1.2 { replyTrail.removeAll() }
                 // сам низ переписки на экране — прочитано всё
                 if model.hasNewer {
                     // окно от первого непрочитанного: долистали до его низа — догружаем следующие сообщения
@@ -2352,8 +2357,14 @@ struct ChatScreen: View {
                 if !tags.isEmpty {
                     tagButton(tags).padding(.horizontal, 12).padding(.top, 18).padding(.bottom, atBottom ? 12 : 4)
                 }
-                if !atBottom || model.hasNewer {
+                if !atBottom || model.hasNewer || !replyTrail.isEmpty {
                     Button {
+                        // перешли по цитате ответа — сначала назад к сообщению, с которого переходили
+                        if let back = replyTrail.popLast() {
+                            Haptics.select()
+                            scrollTarget = back
+                            return
+                        }
                         if model.hasNewer {
                             // загружено окно от первого непрочитанного — к самым новым сообщениям, всё прочитано
                             withAnimation(.easeOut(duration: 0.2)) { unreadIDs.removeAll() }
@@ -2489,7 +2500,12 @@ struct ChatScreen: View {
                 showSender: groupChat,
                 noForward: model.peer.noForward || model.group?.noForward == true,
                 onReactionInfo: { emoji in reactionWho = ReactionWhoRoute(message: m, emoji: emoji) },
-                onJumpToReply: { scrollTarget = $0 },
+                onJumpToReply: { target in
+                    if replyTrail.last != m.id { replyTrail.append(m.id) }
+                    if replyTrail.count > 30 { replyTrail.removeFirst() }
+                    replyJumpAt = Date()
+                    scrollTarget = target
+                },
                 onReact: { model.react(m, emoji: $0) },
                 onLongPress: { if !selecting { MessageMenu.isOpen = true; actionTarget = m } },     // флаг — сразу, ещё до первого кадра меню
                 onOpenProfile: { id in openSender(id) },
