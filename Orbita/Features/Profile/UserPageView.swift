@@ -382,6 +382,7 @@ struct UserPageView: View {
     @State private var stageForward = true
     @State private var avatarTop: CGFloat = 0          // верх аватарки в координатах страницы
     @State private var pullArmed = true
+    @State private var stageScroll: CGFloat = 0        // прокрутка страницы: раскрытое фото едет вместе с ней
     @State private var tracker = PageScrollTracker()
     /// Ник страницы и плашка появляются только после того, как раскрытое фото свернулось (иначе ник наезжает на фото)
     @State private var namesReady = true
@@ -741,6 +742,7 @@ struct UserPageView: View {
 
     /// Потянули вниз — аватарка вырастает в шапку на всю ширину, потянули ещё — на весь экран; прокрутили вверх — сворачивается
     private func handleScroll(_ offset: CGFloat, profile: UserProfile) {
+        if stage >= 1 || stageScroll != 0 { stageScroll = stage >= 1 ? offset : 0 }
         if offset > -8, !pullArmed { pullArmed = true }
         guard !profile.avatars.isEmpty, !profile.blockedMe else { return }
         let pull = -offset
@@ -810,7 +812,7 @@ struct UserPageView: View {
                            onVertical: { stageDrag($0) },
                         onClose: { setStage(0) },
                            track: model.tracks.first ?? profile.track, queue: model.tracks, player: player,
-                           onMusic: { showPlaylist = true })
+                           onMusic: { showPlaylist = true }, scroll: stageScroll)
             .offset(y: -pageTop)
             .allowsHitTesting(stage >= 1)
     }

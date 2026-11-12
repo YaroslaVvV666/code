@@ -60,6 +60,7 @@ struct ChatInfoView: View {
     @State private var stageStarted = false            // при первом открытии сразу встаём в среднее положение
     @State private var avatarTop: CGFloat = 0
     @State private var pullArmed = true
+    @State private var stageScroll: CGFloat = 0
     @State private var tracker = PageScrollTracker()
     private var pageTop: CGFloat { TopInset.value }
     private static let avatarPad: CGFloat = 40
@@ -319,7 +320,7 @@ struct ChatInfoView: View {
                         onStep: { stepPhoto($0, count: count) },
                         onCenter: { setStage(stage == 1 ? 2 : 1) },
                         onVertical: { stageDrag($0) },
-                        onClose: { setStage(0) })
+                        onClose: { setStage(0) }, scroll: stageScroll)
                 .offset(y: -pageTop)
                 .allowsHitTesting(st >= 1)
             if st == 2 {
@@ -334,6 +335,7 @@ struct ChatInfoView: View {
     }
 
     private func handleScroll(_ offset: CGFloat) {
+        if stage >= 1 || stageScroll != 0 { stageScroll = stage >= 1 ? offset : 0 }
         if offset > -8, !pullArmed { pullArmed = true }
         guard hasStagePhotos else { return }
         let pull = -offset

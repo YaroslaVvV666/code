@@ -494,6 +494,9 @@ struct AvatarStage: View, Animatable {
     var queue: [Track] = []
     var player: AudioPlayer? = nil
     var onMusic: () -> Void = {}
+    /// Насколько прокручена страница (вверх — плюс): в среднем положении фото едет вместе со страницей,
+    /// а не стоит на месте, пока описание под ним уезжает под фото
+    var scroll: CGFloat = 0
 
     var animatableData: CGFloat {
         get { expand }
@@ -512,7 +515,7 @@ struct AvatarStage: View, Animatable {
         let h1: CGFloat = 112 + (headerHeight - 112) * t1
         let h: CGFloat = h1                                           // на последней ступени фото не растёт, а съезжает в центр
         let x: CGFloat = (screen.width - w) / 2
-        let y: CGFloat = circleTop * (1 - t1) + (screen.height - headerHeight) / 2 * t2
+        let y: CGFloat = circleTop * (1 - t1) - scroll * (t1 - t2) + (screen.height - headerHeight) / 2 * t2
         let r: CGFloat = 56 * (1 - t1)
         let ui: Double = Double(max(0, (t1 - 0.6) / 0.4))
         return ZStack(alignment: .topLeading) {

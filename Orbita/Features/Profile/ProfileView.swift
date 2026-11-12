@@ -274,7 +274,7 @@ struct ProfileView: View {
                         onVertical: { stageDrag($0) },
                         onClose: { setStage(0) },
                         track: store.profile?.track, queue: store.profile?.track.map { [$0] } ?? [], player: session.player,
-                        onMusic: { openPlaylist() })
+                        onMusic: { openPlaylist() }, scroll: raw)
         }
         .allowsHitTesting(pullStage >= 1)
     }
@@ -525,7 +525,7 @@ struct ProfileView: View {
                         setStage(2)
                     }
                     // листаем страницу вверх — шапка сворачивается обратно в кружок
-                    if offset > 24, pullStage == 1 { setStage(0) }
+                    if offset > 40, pullStage == 1 { setStage(0) }
                 }
                 .frame(width: 0, height: 0)
             }
@@ -676,7 +676,7 @@ struct ProfileView: View {
                 }
             }
             // при раскрытой шапке под фото освобождается место, а содержимое плавно съезжает вниз
-            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - (TopInset.value + 60) - 10) : 112,
+            .frame(height: pullStage >= 1 ? max(112, UIScreen.main.bounds.width * 0.96 - (TopInset.value + 60) + 12) : 112,
                    alignment: .top)
             .zIndex(1)                                                  // орбита пролетает поверх никнейма
 
@@ -709,6 +709,7 @@ struct ProfileView: View {
                     .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
+                    .padding(.bottom, pullStage >= 1 ? 10 : 0)       // и до кнопок ниже — тот же воздух
             }
 
             if let error = store.loadError.flatMap({ store.profile == nil ? s.api($0) : nil }) {
