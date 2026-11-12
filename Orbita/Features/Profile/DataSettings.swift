@@ -303,6 +303,7 @@ struct DataScreen: View {
     @State private var sheet: Sub?
     @State private var storageTotal: Int?
     @State private var autoTick = 0
+    @State private var showBackup = false
 
     enum Sub: String, Identifiable { case storage, network, cellular, wifi; var id: String { rawValue } }
 
@@ -370,6 +371,14 @@ struct DataScreen: View {
             footer(s.t("Фото, видео и файлы, которые вы не открывали дольше этого срока, удаляются с телефона — при необходимости скачаются снова.",
                        "Media you haven't opened for longer than this is removed from the phone and re-downloaded if needed."))
 
+            header(s.t("Резервная копия", "Backup"))
+            SettingsGroup {
+                SettingsRow(icon: "lock.doc.fill", tint: .indigo, title: s.t("Резервная копия переписок", "Chat backup"),
+                            showsChevron: true) { showBackup = true }
+            }
+            footer(s.t("Зашифрованный файл со всеми личными переписками и настройками — сохраните в «Файлы» или iCloud Drive и восстановите на любом телефоне.",
+                       "An encrypted file with all your private chats and settings — save it to Files or iCloud Drive and restore on any phone."))
+
             header(s.t("Другое", "Other"))
             SettingsGroup {
                 toggleRow("photo.badge.checkmark.fill", .pink, s.t("Сохранять изменённые фото", "Save edited photos"), $saveEdited)
@@ -385,6 +394,9 @@ struct DataScreen: View {
         .onChange(of: saveGroups) { _, on in if on { askPhotos() } }
         .onChange(of: saveChannels) { _, on in if on { askPhotos() } }
         .onChange(of: saveEdited) { _, on in if on { askPhotos() } }
+        .sheet(isPresented: $showBackup) {
+            BackupScreen().environment(\.theme, theme).environment(\.lang, lang)
+        }
         .sheet(item: $sheet, onDismiss: { Task { await refreshTotal() }; autoTick += 1 }) { sub in
             Group {
                 switch sub {

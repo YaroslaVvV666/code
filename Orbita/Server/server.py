@@ -9434,6 +9434,7 @@ def import_chat(req, me, peer):
         raise ApiError(400, "bad_value")
     now = time.time()
     added = 0
+    skip_existing = bool(d.get("skip_existing"))        # восстановление из резервной копии: то, что ещё есть, не дублируем
     with LOCK:
         run("BEGIN")
         try:
@@ -9451,6 +9452,9 @@ def import_chat(req, me, peer):
                 if not 946684800 <= date <= now:                     # с 2000 года и не из будущего
                     continue
                 sender, recipient = (uid, peer) if it.get("mine") else (peer, uid)
+                if skip_existing and q1("SELECT 1 FROM messages WHERE sender = ? AND recipient = ? AND created_at BETWEEN ? AND ? LIMIT 1",
+                                        (sender, recipient, date - 0.002, date + 0.002)):
+                    continue
                 mid = uuid.uuid4().hex
                 meta = {"source": source, "name": clean_line(it.get("name"), 64), "by": uid}
                 run("INSERT INTO messages(id, sender, recipient, text_enc, entities_enc, created_at, read_at, attachments_enc, imported_enc) "

@@ -697,6 +697,8 @@ protocol MessengerRepository: Sendable {
     func exportPage(peerID: String, before: Double?) async throws -> (messages: [ChatMessage], more: Bool, before: Double?)
     /// Импорт: пачка сообщений из Telegram / WhatsApp, возвращает сколько добавлено
     func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int
+    /// Восстановление из резервной копии: сообщения, которые ещё есть на сервере, не дублируются
+    func restoreBatch(peerID: String, messages: [[String: Any]]) async throws -> Int
     // фото-цепочка
     func sendChain(peerID: String, theme: String, moderated: Bool) async throws -> ChatMessage
     func chainAdd(messageID: String, mediaID: String) async throws -> PhotoChain
@@ -1625,6 +1627,13 @@ struct RemoteMessengerRepository: MessengerRepository {
 
     func playlistCopy(trackID: String) async throws -> AudioCopy {
         try decodeAPI(AudioCopy.self, from: try await api.request("POST", "/v1/me/playlist/\(trackID)/copy"))
+    }
+
+    func restoreBatch(peerID: String, messages: [[String: Any]]) async throws -> Int {
+        struct R: Decodable { let added: Int }
+        let data = try await api.request("POST", "/v1/chats/\(peerID)/import",
+                                         body: ServerAPI.json(["source": "orbita", "skip_existing": true, "messages": messages]))
+        return try decodeAPI(R.self, from: data).added
     }
 
     func importBatch(peerID: String, source: String, messages: [[String: Any]]) async throws -> Int {
