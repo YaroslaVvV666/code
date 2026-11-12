@@ -125,11 +125,18 @@ struct ProfilePageTint: View {
 
     var body: some View {
         if let pair = ProfilePalette.pair(color), !theme.dark {
-            LinearGradient(colors: [pair.1.opacity(0.42), pair.1.opacity(0.22), pair.0.opacity(0.12)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-                .transition(.opacity)
+            // вся страница залита градиентом цвета профиля (по диагонали, как сама шапка),
+            // а под шапкой — гуще, чтобы цвет из неё перетекал без границы
+            ZStack(alignment: .top) {
+                Color.white
+                LinearGradient(colors: [pair.0.opacity(0.38), pair.1.opacity(0.34), pair.0.opacity(0.26)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                LinearGradient(colors: [pair.1.opacity(0.42), pair.1.opacity(0)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 760)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .transition(.opacity)
         }
     }
 }

@@ -548,8 +548,10 @@ struct UserPageView: View {
             }
         }
         .coordinateSpace(name: "userPageBody")
-        // цвет профиля (светлая тема): вся страница в его мягком оттенке, а не на белом
-        .background(alignment: .top) { ProfilePageTint(color: model.profile?.styleColor).padding(.top, -400) }
+        // короткая страница — всё равно на весь экран, чтобы цвет профиля не обрывался белым внизу
+        .frame(minHeight: UIScreen.main.bounds.height, alignment: .top)
+        // цвет профиля (светлая тема): вся страница залита его градиентом, а не белым
+        .background(alignment: .top) { ProfilePageTint(color: model.profile?.styleColor).padding(.top, -400).padding(.bottom, -400) }
         .environmentObject(tracker)
         // день рождения — хлопушки каждый раз, когда открываешь профиль именинника
         .task(id: model.profile?.id) {
