@@ -970,8 +970,16 @@ struct MediaBlock: View {
         Group {
             switch items.count {
             case 1:
-                let aspect = min(1.5, max(0.5625, CGFloat(items[0].aspect)))      // вертикальное 9:16 — целиком, без обрезки
-                cell(items[0], index: 0).frame(width: width, height: width / aspect)
+                if fullWidth != nil, items[0].kind == .photo, items[0].aspect > 0 {
+                    // статья: фото во всю ширину. Узкое (уже 4:5) — целиком по центру, на всю высоту блока,
+                    // а по бокам — то же фото, увеличенное и размытое (как в Telegram)
+                    let real = CGFloat(items[0].aspect)
+                    let shown = min(1.9, max(0.8, real))
+                    cell(items[0], index: 0, fit: real < shown - 0.01).frame(width: width, height: width / shown)
+                } else {
+                    let aspect = min(1.5, max(0.5625, CGFloat(items[0].aspect)))      // вертикальное 9:16 — целиком, без обрезки
+                    cell(items[0], index: 0).frame(width: width, height: width / aspect)
+                }
             case 2:
                 if asp(0) > 1.25 && asp(1) > 1.25 {
                     // две горизонтальные — друг под другом
@@ -1030,9 +1038,20 @@ struct MediaBlock: View {
         .clipped()          // картинка не должна вылезать за свой кадр и налезать на подпись под ней
     }
 
-    private func cell(_ a: ChatAttachment, index: Int) -> some View {
+    private func cell(_ a: ChatAttachment, index: Int, fit: Bool = false) -> some View {
         ZStack {
-            if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
+            if fit {
+                // фото уже блока: само — целиком по центру, по бокам — оно же, увеличенное и размытое
+                if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
+                    Color.clear.overlay { Image(uiImage: image).resizable().scaledToFill().blur(radius: 28).overlay(Color.black.opacity(0.18)) }
+                        .clipped()
+                    Image(uiImage: image).resizable().scaledToFit()
+                } else if let id = a.mediaID ?? a.thumbID {
+                    Color.clear.overlay { RemoteImage(id: id, maxPixel: 300).blur(radius: 28).overlay(Color.black.opacity(0.18)) }
+                        .clipped()
+                    RemoteImage(id: id, fill: false, backdrop: .clear)
+                }
+            } else if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if a.kind == .photo, !pending, let id = a.mediaID ?? a.thumbID {
                 GatedRemoteImage(id: id)                 // автозагрузка фото по этой сети выключена — кнопка «скачать»
