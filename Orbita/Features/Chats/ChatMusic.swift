@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import UIKit
+import Combine
 
 // MARK: - Музыка в переписке
 
@@ -37,7 +38,8 @@ struct ChatMusicItem: Identifiable, Equatable {
 
 func chatMusicItems(_ messages: [ChatMessage]) -> [ChatMusicItem] {
     messages.flatMap { m in
-        m.attachments.compactMap { a in
+        // вложения сообщения и звук внутри статьи — в одной очереди
+        (m.attachments + m.blocks.compactMap(\.media)).compactMap { a in
             a.track.map { ChatMusicItem(messageID: m.id, attachment: a, track: $0, mine: m.mine) }
         }
     }
@@ -87,7 +89,7 @@ struct AudioBlock: View {
     var body: some View {
         let primary = mine ? Color.white : theme.text
         let secondary = mine ? Color.white.opacity(0.75) : theme.textTertiary
-        HStack(spacing: 11) {
+        HStack(spacing: 12) {
             Button(action: onPlay) {
                 ZStack {
                     if let cover = attachment.thumbID {
@@ -97,47 +99,73 @@ struct AudioBlock: View {
                         Circle().fill(mine ? Color.white : theme.accentColor)
                     }
                     if pending {
-                        ProgressView().tint(.white).scaleEffect(0.7)
+                        ProgressView().tint(attachment.thumbID != nil || !mine ? .white : theme.accentColor)
                     } else {
                         Image(systemName: playing ? "pause.fill" : "play.fill")
-                            .font(.system(size: 17, weight: .bold))
+                            .font(.system(size: 21, weight: .bold))
                             .foregroundStyle(attachment.thumbID != nil ? Color.white : (mine ? theme.accentColor : Color.white))
                     }
                 }
-                .frame(width: 46, height: 46)
+                .frame(width: 52, height: 52)
+                .clipShape(Circle())
             }
             .buttonStyle(.plain)
 
+            // Название — всегда одной строкой: длинное сокращается в середине («Lose Yourself … Remaster»),
+            // ниже — исполнитель (у песен и звуков; у mp3, отправленного файлом, его нет), ещё ниже — время и формат
             VStack(alignment: .leading, spacing: 2) {
-                Text(attachment.displayTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                Text(attachment.displayTitle.isEmpty ? "Без названия" : attachment.displayTitle)
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(primary)
                     .lineLimit(1)
-                Text([attachment.artist ?? "", attachment.duration > 0 ? mmss(Int(attachment.duration)) : ""]
-                        .filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 13))
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let artist = shownArtist {
+                    Text(artist)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(mine ? Color.white.opacity(0.9) : theme.accentColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Text(subtitle)
+                    .font(.system(size: 13).monospacedDigit())
                     .foregroundStyle(secondary)
                     .lineLimit(1)
+                    .padding(.trailing, 44)       // под время сообщения
             }
-            Spacer(minLength: 0)
-            if !pending, attachment.mediaID != nil {
-                Button { Task { _ = await AttachmentExporter.export(attachment) } } label: {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 22, weight: .regular))
-                        .foregroundStyle(mine ? Color.white.opacity(0.9) : theme.accentColor)
-                        .frame(width: 30, height: 40)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+            .layoutPriority(1)
         }
-        .frame(width: 214)
+        .frame(width: 252)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+
+    /// Исполнитель — только у песни/звука (теги файла); mp3, отправленный как обычный файл, без исполнителя
+    private var shownArtist: String? {
+        guard attachment.kind == .audio, let a = attachment.artist?.trimmingCharacters(in: .whitespaces), !a.isEmpty else { return nil }
+        return a
+    }
+
+    /// Ниже исполнителя: длительность (у играющего — сколько прошло) и формат файла
+    private var subtitle: String {
+        let name = attachment.name ?? ""
+        let ext = name.contains(".") ? (name.split(separator: ".").last.map { String($0).uppercased() } ?? "") : ""
+        var time = attachment.duration > 0 ? mmss(Int(safe: attachment.duration)) : ""
+        if playing || (track.map { player.isCurrent($0) } ?? false), attachment.duration > 0 {
+            time = mmss(Int(safe: player.elapsed)) + " / " + time
+        }
+        var parts = [time]
+        if attachment.kind == .file, ext.count <= 5 { parts.append(ext) }
+        if attachment.kind == .file, attachment.size > 0 { parts.append(ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file)) }
+        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
 // MARK: - Полоска «сейчас играет» под шапкой чата
 
 struct NowPlayingBar: View {
+    /// Внутри общей карточки шапки (закреп / перевод / песня) — без своего «стекла» и отступов
+    var embedded = false
     let onOpen: () -> Void
 
     @EnvironmentObject private var player: AudioPlayer
@@ -152,7 +180,8 @@ struct NowPlayingBar: View {
                     Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(theme.accentColor)
-                        .frame(width: 34, height: 34)
+                        .frame(width: 52, height: 56)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
 
@@ -162,7 +191,7 @@ struct NowPlayingBar: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
-                        Text("\(mmss(Int(player.elapsed))) / \(mmss(Int(track.duration)))" + (track.artist.isEmpty ? "" : " · " + track.artist))
+                        Text("\(mmss(Int(safe: player.elapsed))) / \(mmss(Int(safe: track.duration)))" + (track.artist.isEmpty ? "" : " · " + track.artist))
                             .font(.system(size: 12).monospacedDigit())
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
@@ -176,13 +205,14 @@ struct NowPlayingBar: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(theme.textSecondary)
-                        .frame(width: 34, height: 34)
+                        .frame(width: 52, height: 56)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 10)
-            .frame(height: 52)
-            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.horizontal, 4)
+            .frame(height: 56)
+            .background { if !embedded { Color.clear.glass(RoundedRectangle(cornerRadius: 18, style: .continuous)) } }
             .overlay(alignment: .bottom) {
                 GeometryReader { geo in
                     Capsule().fill(theme.accentColor)
@@ -192,10 +222,50 @@ struct NowPlayingBar: View {
                 }
                 .frame(height: 3).padding(.bottom, 3)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, embedded ? 0 : 10)
+            .padding(.bottom, embedded ? 0 : 8)        // воздух между островком и перепиской
             .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+}
+
+/// Одна карточка в шапке чата: закреплённое, перевод канала и играющая песня — разделены линиями, как в профиле
+struct ChatTopCard<Pinned: View>: View {
+    let hasPinned: Bool
+    let chatID: String
+    let translateLanguage: String?
+    let messages: [ChatMessage]
+    let onOpenPlayer: () -> Void
+    @ViewBuilder let pinned: () -> Pinned
+
+    @EnvironmentObject private var player: AudioPlayer
+    @ObservedObject private var translator = ChatTranslator.shared
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let showT = translateLanguage != nil && !translator.hiddenChats.contains(chatID)
+            && !translator.never.contains(translateLanguage ?? "")
+        let music = player.current != nil
+        if hasPinned || showT || music {
+            VStack(spacing: 0) {
+                if hasPinned { pinned() }
+                if hasPinned && (showT || music) { line }
+                if showT, let l = translateLanguage {
+                    ChannelTranslateBar(chatID: chatID, language: l, messages: messages)
+                }
+                if showT && music { line }
+                if music { NowPlayingBar(embedded: true, onOpen: onOpenPlayer) }
+            }
+            .glass(RoundedRectangle(cornerRadius: 22, style: .continuous), interactive: true)
+            .padding(.horizontal, 10)
+            .padding(.bottom, music ? 4 : 0)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showT)
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: music)
+        }
+    }
+
+    private var line: some View { Rectangle().fill(theme.text.opacity(0.12)).frame(height: 0.5).padding(.horizontal, 14) }
 }
 
 // MARK: - Большой плеер (как в Spotify)
@@ -298,9 +368,9 @@ struct FullPlayerSheet: View {
         VStack(spacing: 2) {
             FlowingProgress(progress: player.progress, tint: .white, track: .white.opacity(0.22)) { player.seek(toFraction: $0) }
             HStack {
-                Text(mmss(Int(player.elapsed)))
+                Text(mmss(Int(safe: player.elapsed)))
                 Spacer()
-                Text(mmss(Int(player.total)))
+                Text(mmss(Int(safe: player.total)))
             }
             .font(.system(size: 12).monospacedDigit())
             .foregroundStyle(.white.opacity(0.6))
@@ -382,7 +452,7 @@ struct FullPlayerSheet: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.track.title).font(.system(size: 16, weight: .semibold))
                                     .foregroundStyle(selected ? theme.accentColor : .white).lineLimit(1)
-                                Text([item.track.duration > 0 ? mmss(Int(item.track.duration)) : "", item.track.artist]
+                                Text([item.track.duration > 0 ? mmss(Int(safe: item.track.duration)) : "", item.track.artist]
                                         .filter { !$0.isEmpty }.joined(separator: " • "))
                                     .font(.system(size: 14)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                             }
@@ -433,55 +503,113 @@ struct FullPlayerSheet: View {
 // MARK: - Полоска «играет голосовое» (скорость, закрыть) — вместо трека
 
 struct VoiceNowBar: View {
+    var includeCircle = true
+    /// Внутри общей карточки (список чатов) — без своего «стекла» и отступов
+    var embedded = false
     @ObservedObject private var voice = VoicePlayer.shared
+    @ObservedObject private var focus = CircleFocus.shared
+
+    var body: some View {
+        if includeCircle, let circle = focus.current {
+            CircleNowBar(playback: circle, embedded: embedded)
+        } else if voice.currentID != nil {
+            VoiceNowBarLive(voice: voice, clock: voice.clock, embedded: embedded)
+        }
+    }
+}
+
+/// Сама полоска голосового: на часы подписана только она
+private struct VoiceNowBarLive: View {
+    @ObservedObject var voice: VoicePlayer
+    @ObservedObject var clock: PlaybackClock
+    var embedded = false
+
+    var body: some View {
+        NowBarLayout(title: nil, isPlaying: voice.isPlaying, progress: clock.value, duration: voice.duration, rate: voice.rate,
+                     embedded: embedded,
+                     onToggle: { voice.isPlaying ? voice.pause() : voice.resume() },
+                     onSeek: { voice.seek(toFraction: $0) },
+                     onRate: { voice.cycleRate() },
+                     onClose: { voice.stop() })
+    }
+}
+
+/// Полоска «играет видеосообщение» — те же кнопки: пауза, перемотка, скорость, закрыть
+struct CircleNowBar: View {
+    @ObservedObject var playback: CirclePlayback
+    var embedded = false
+
+    var body: some View {
+        NowBarLayout(title: Strings(lang: .ru).t("Видеосообщение", "Video message"), isPlaying: playback.isPlaying, progress: playback.progress,
+                     duration: playback.duration, rate: VoicePlayer.shared.rate, embedded: embedded,
+                     onToggle: { playback.isPlaying ? playback.pause() : playback.resume() },
+                     onSeek: { playback.seek(toFraction: $0) },
+                     onRate: { VoicePlayer.shared.cycleRate(); playback.applyRate() },
+                     onClose: { playback.stop() })
+    }
+}
+
+struct NowBarLayout: View {
+    let title: String?
+    let isPlaying: Bool
+    let progress: Double
+    let duration: Double
+    let rate: Float
+    var embedded = false
+    var onToggle: () -> Void
+    var onSeek: (Double) -> Void
+    var onRate: () -> Void
+    var onClose: () -> Void
+
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
     var body: some View {
-        if voice.currentID != nil {
-            HStack(spacing: 8) {
-                Button { voice.isPlaying ? voice.pause() : voice.resume() } label: {
-                    Image(systemName: voice.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 16, weight: .bold)).foregroundStyle(theme.accentColor)
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.plain)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(Strings(lang: lang).t("Голосовое сообщение", "Voice message"))
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
-                    FlowingProgress(progress: voice.progress, tint: theme.accentColor, track: theme.stroke) {
-                        voice.seek(toFraction: $0)
-                    }
-                    .frame(height: 12)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text(mmss(Int(voice.progress * voice.duration)))
-                    .font(.system(size: 12).monospacedDigit()).foregroundStyle(theme.textSecondary)
-
-                Button {
-                    Haptics.impact(.light)
-                    voice.cycleRate()
-                } label: {
-                    Text(voice.rate == 1 ? "1×" : (voice.rate == 1.5 ? "1.5×" : "2×"))
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(voice.rate == 1 ? theme.text : Color.white)
-                        .frame(minWidth: 34).padding(.horizontal, 6).frame(height: 28)
-                        .background(voice.rate == 1 ? AnyShapeStyle(theme.surface) : AnyShapeStyle(theme.accent), in: Capsule())
-                }
-                .buttonStyle(.plain)
-
-                Button { voice.stop() } label: {
-                    Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(theme.textSecondary).frame(width: 30, height: 34)
-                }
-                .buttonStyle(.plain)
+        HStack(spacing: 8) {
+            Button(action: onToggle) {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 16, weight: .bold)).foregroundStyle(theme.accentColor)
+                    .frame(width: 48, height: 52).contentShape(Rectangle())
             }
-            .padding(.horizontal, 12).frame(height: 52)
-            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .padding(.horizontal, 10)
-            .transition(.move(edge: .top).combined(with: .opacity))
+            .buttonStyle(.plain)
+            .padding(.leading, -8)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title.map { _ in Strings(lang: lang).t("Видеосообщение", "Video message") }
+                     ?? Strings(lang: lang).t("Голосовое сообщение", "Voice message"))
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                FlowingProgress(progress: progress, tint: theme.accentColor, track: theme.stroke) { onSeek($0) }
+                    .frame(height: 12)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(mmss(Int(safe: progress * duration)))
+                .font(.system(size: 12).monospacedDigit()).foregroundStyle(theme.textSecondary)
+
+            Button {
+                Haptics.impact(.light)
+                onRate()
+            } label: {
+                Text(rate == 1 ? "1×" : (rate == 1.5 ? "1.5×" : "2×"))
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(rate == 1 ? theme.text : Color.white)
+                    .frame(minWidth: 34).padding(.horizontal, 6).frame(height: 28)
+                    .background(rate == 1 ? AnyShapeStyle(theme.surface) : AnyShapeStyle(theme.accent), in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 52, height: 52)                     // большая зона нажатия — по всей высоте полоски
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, -8)
         }
+        .padding(.horizontal, 12).frame(height: 52)
+        .background { if !embedded { Color.clear.glass(RoundedRectangle(cornerRadius: 18, style: .continuous)) } }
+        .padding(.horizontal, embedded ? 0 : 10)
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 }

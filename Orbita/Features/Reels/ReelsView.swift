@@ -1,12 +1,14 @@
 import SwiftUI
+import UIKit
 import AVFoundation
 import Combine
+import CoreMedia
 
 // MARK: - Модель ленты коротких видео
 
 @MainActor
 final class ReelsModel: ObservableObject {
-    enum Kind { case friends, forYou }
+    enum Kind { case friends, forYou, following }
 
     @Published var kind: Kind = .forYou
     @Published private(set) var reels: [Reel] = []
@@ -16,43 +18,91 @@ final class ReelsModel: ObservableObject {
 
     private var exhausted = false
     private var generation = 0
+    /// Какой ролик смотрели последним: вернулись во вкладку — продолжаем с него
+    var resumeID: String?
+
+    /// Каждая вкладка помнит свою ленту: быстро переключаешься туда-обратно — ролики не смешиваются и не повторяются
+    private struct Saved { var reels: [Reel]; var exhausted: Bool; var resume: String? }
+    private var saved: [Kind: Saved] = [:]
 
     func switchTo(_ new: Kind, session: AppSession) {
         guard new != kind else { return }
-        kind = new
-        reels = []
-        loaded = false
-        exhausted = false
+        // запоминаем, что было во вкладке, которую покидаем
+        if loaded { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         generation += 1
-        Task { await loadMore(session: session) }
+        loading = false                 // старый запрос больше не держит «занято» — новая вкладка грузится сразу
+        kind = new
+        failed = nil
+        if let back = saved[new], !back.reels.isEmpty {
+            reels = back.reels
+            exhausted = back.exhausted
+            resumeID = back.resume
+            loaded = true
+        } else {
+            reels = []
+            loaded = false
+            exhausted = false
+            resumeID = nil
+            Task { await loadMore(session: session) }
+        }
+    }
+
+    /// Ролик, с которого продолжать во вкладке (после переключения)
+    var resumeInCurrent: String? {
+        if let id = resumeID, reels.contains(where: { $0.id == id }) { return id }
+        return reels.first?.id
     }
 
     func loadMore(session: AppSession) async {
         guard !loading, !exhausted else { return }
         loading = true
         let gen = generation
+        let want = kind
         defer { if gen == generation { loading = false } }
         do {
-            let batch = try await session.extras.reels(friendsOnly: kind == .friends, exclude: reels.map(\.id))
-            guard gen == generation else { return }
+            let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
+            var batch = try await session.extras.reels(feed: feed, exclude: reels.map(\.id))
+            // пока ждали ответ, переключили вкладку — этот ответ уже не для неё
+            guard gen == generation, want == kind else { return }
+            // «Подписки» — строго авторы, на которых ты подписан (и твои собственные не подмешиваются)
+            if want == .following { batch = batch.filter { $0.state == "following" } }
             let known = Set(reels.map(\.id))
-            let fresh = batch.filter { !known.contains($0.id) }
+            var seen = Set<String>()
+            let fresh = batch.filter { !known.contains($0.id) && seen.insert($0.id).inserted }
             if fresh.isEmpty { exhausted = true } else { reels += fresh }
             failed = nil
         } catch {
-            guard gen == generation else { return }
+            guard gen == generation, want == kind else { return }
             failed = Strings(lang: .ru).api((error as? APIError) ?? .offline)
         }
         loaded = true
     }
 
+    @Published var refreshing = false
+
+
     func refresh(session: AppSession) async {
+        refreshing = true
+        defer { refreshing = false }
         generation += 1
+        let gen = generation, want = kind
+        let feed: String? = want == .friends ? "friends" : (want == .following ? "following" : nil)
+        // «Рекомендации»: уже показанные не повторяем — подборка правда новая; новых нет — лучшие заново
+        let skip = want == .forYou ? Array(reels.map(\.id).prefix(60)) : []
+        var batch = try? await session.extras.reels(feed: feed, exclude: skip)
+        if let b = batch, b.isEmpty, !skip.isEmpty { batch = try? await session.extras.reels(feed: feed, exclude: []) }
+        // старые ролики остаются на экране, пока не пришли новые (без пустого чёрного экрана); нет сети — остаются как были
+        guard gen == generation, want == kind, var fresh = batch else { if gen == generation { loading = false }; return }
+        if want == .following { fresh = fresh.filter { $0.state == "following" } }
+        var seen = Set<String>()
+        fresh = fresh.filter { seen.insert($0.id).inserted }
+        reels = fresh
+        exhausted = fresh.isEmpty
         loading = false
-        exhausted = false
-        reels = []
-        loaded = false
-        await loadMore(session: session)
+        loaded = true
+        failed = nil
+        resumeID = nil
+        saved[kind] = nil
     }
 
     func toggleLike(_ id: String, session: AppSession) {
@@ -73,6 +123,19 @@ final class ReelsModel: ObservableObject {
     func remove(_ id: String) { reels.removeAll { $0.id == id } }
 
     /// Готовый список (шортсы под один звук): без подгрузки
+    /// Ролик, на который пришли по ссылке (из чата): он первый, дальше идут рекомендации
+    func pin(_ post: Post) {
+        reels = [Reel(post: post, state: post.isMine ? "me" : "none")]
+        loaded = true
+    }
+
+    /// Ролик, присланный в чат: ставим первым в ленте
+    func insertFirst(_ post: Post) {
+        reels.removeAll { $0.id == post.id }
+        reels.insert(Reel(post: post, state: post.isMine ? "me" : "none"), at: 0)
+        loaded = true
+    }
+
     func seed(_ list: [Reel]) {
         reels = list
         loaded = true
@@ -80,19 +143,32 @@ final class ReelsModel: ObservableObject {
     }
 
     func toggleRepost(_ id: String, session: AppSession) {
-        guard let i = reels.firstIndex(where: { $0.id == id }), !reels[i].post.isMine else { return }
+        guard let i = reels.firstIndex(where: { $0.id == id }),
+              reels[i].post.allowRepost || reels[i].post.isMine || reels[i].post.repostedByMe else { return }
         reels[i].post.repostedByMe.toggle()
-        reels[i].post.reposts += reels[i].post.repostedByMe ? 1 : -1
+        reels[i].post.reposts = max(0, reels[i].post.reposts + (reels[i].post.repostedByMe ? 1 : -1))
         let on = reels[i].post.repostedByMe
         Task {
-            do { try await session.extras.setReposted(id: id, on: on) } catch {
+            do {
+                // число и состояние берём у сервера — так счётчик всегда настоящий
+                if let r = try await session.extras.setReposted(id: id, on: on), let j = reels.firstIndex(where: { $0.id == id }) {
+                    reels[j].post.reposts = r.count
+                    reels[j].post.repostedByMe = r.mine
+                }
+            } catch {
                 if let j = reels.firstIndex(where: { $0.id == id }) {
                     reels[j].post.repostedByMe = !on
-                    reels[j].post.reposts += on ? -1 : 1
+                    reels[j].post.reposts = max(0, reels[j].post.reposts + (on ? -1 : 1))
                 }
+                // репост не удался — говорим почему, а не молча откатываем
+                notice = Strings(lang: .ru).api((error as? APIError) ?? .offline)
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                notice = nil
             }
         }
     }
+
+    @Published var notice: String?
 
     func like(_ id: String, session: AppSession) {
         guard let r = reels.first(where: { $0.id == id }), !r.post.likedByMe else { return }
@@ -101,8 +177,20 @@ final class ReelsModel: ObservableObject {
 
     /// Новый шортс только что опубликован — показываем его первым во вкладке «Друзья» (там видны и свои)
     func showMine(session: AppSession) async {
+        if loaded, kind != .friends { saved[kind] = Saved(reels: reels, exhausted: exhausted, resume: resumeID) }
         kind = .friends
         await refresh(session: session)
+    }
+
+    /// Авторы, у которых сейчас показана галочка (5 секунд после подписки)
+    @Published var checkAuthors: Set<String> = []
+
+    func flashCheck(_ author: String) {
+        checkAuthors.insert(author)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            checkAuthors.remove(author)
+        }
     }
 
     func setState(_ id: String, _ state: String) {
@@ -125,23 +213,49 @@ final class ReelsModel: ObservableObject {
 // MARK: - Экран «Шортс»
 
 struct ReelsView: View {
+    @Environment(\.tabBarHeight) private var tabBarHeight
     var onOpenAuthor: (Author) -> Void
     var suspended = false          // поверх открыт профиль — звук и видео стоят
     /// Режим «один звук»: показываем заданный список, начиная с startID, и кнопку «назад» вместо вкладок
     var fixed: [Reel]? = nil
     var startID: String? = nil
+    var pinned: Post? = nil        // открыто по ссылке: этот шортс первым, затем обычная лента
     var onClose: (() -> Void)? = nil
 
+    @ObservedObject private var callActivity = CallActivity.shared      // во время звонка шортсы не играют
     @EnvironmentObject private var session: AppSession
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
-    @StateObject private var model = ReelsModel()
+    @StateObject private var model: ReelsModel
     @State private var current: String?
+
+    init(onOpenAuthor: @escaping (Author) -> Void, suspended: Bool = false, fixed: [Reel]? = nil, startID: String? = nil,
+         pinned: Post? = nil, onClose: (() -> Void)? = nil, shared: ReelsModel? = nil) {
+        self.onOpenAuthor = onOpenAuthor
+        self.suspended = suspended
+        self.fixed = fixed
+        self.startID = startID
+        self.pinned = pinned
+        self.onClose = onClose
+        _model = StateObject(wrappedValue: shared ?? ReelsModel())
+        // вернулись во вкладку «Шортс» — сразу встаём на тот же ролик
+        if fixed == nil, pinned == nil, let shared, let id = shared.resumeID, shared.reels.contains(where: { $0.id == id }) {
+            _current = State(initialValue: id)
+        }
+    }
     @State private var commentsFor: Post?
+    @State private var holdFast = false             // палец зажат (ускорение ×2): листать нельзя, пока не отпустишь
+    @State private var sheetTall = false            // шторка комментариев раскрыта выше
+    @State private var sheetDrag: CGFloat = 0
     @State private var shareFor: Post?
+    @State private var duetFor: Post?                   // снять дуэт с этим шортсом
     @State private var showComposer = false
+    @State private var showSearch = false          // поиск по шортсам: текущее видео стоит
+    @State private var detailFor: Reel?            // «ещё» в подписи: страница поста целиком
+    @State private var searchQuery = ""            // предзаполненный запрос (нажали на #хэштег)
     @State private var musicFor: PostMusic?
+    @State private var soundTrackID = ""
 
     private var s: Strings { Strings(lang: lang) }
     private var onCompose: () -> Void { { showComposer = true } }
@@ -149,6 +263,58 @@ struct ReelsView: View {
         commentsFor = nil
         if let id = current { Task { await model.refreshPost(id, session: session) } }
     }
+    /// Скачать шортс в галерею с водяным знаком и ником автора
+    private func download(_ post: Post) {
+        let ru = lang == .ru
+        model.notice = ru ? "Скачиваю…" : "Downloading…"
+        Task {
+            do {
+                try await ReelDownload.run(post)
+                Haptics.notify(.success)
+                model.notice = ru ? "Сохранено в галерею" : "Saved to Photos"
+            } catch ReelDownload.Failure.noAccess {
+                model.notice = ru ? "Разрешите доступ к фото в Настройках" : "Allow Photos access in Settings"
+            } catch {
+                model.notice = ru ? "Не удалось скачать" : "Couldn't download"
+            }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            model.notice = nil
+        }
+    }
+    /// Жалоба: отправляем на сервер и, как «не интересует», убираем ролик из ленты
+    private func report(_ post: Post, reason: String) {
+        Task {
+            try? await session.extras.reportPost(id: post.id, reason: reason)
+            model.notice = Strings(lang: lang).t("Жалоба отправлена. Спасибо!", "Report sent. Thank you!")
+            if let r = model.reels.first(where: { $0.id == post.id }) { hide(r) }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            model.notice = nil
+        }
+    }
+
+    /// Автор удаляет своё видео: уходит с сервера, из ленты и со стены
+    private func deleteReel(_ post: Post) {
+        let ru = Strings(lang: lang)
+        Task {
+            do {
+                try await session.feedRepo.deletePost(id: post.id)
+                session.feed.forget(post.id)
+                let i = currentIndex
+                let next = model.reels.indices.contains(i + 1) ? model.reels[i + 1].id : (i > 0 ? model.reels[i - 1].id : nil)
+                Haptics.notify(.success)
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    if current == post.id { current = next }
+                    model.remove(post.id)
+                }
+                model.notice = ru.t("Видео удалено", "Video deleted")
+            } catch {
+                model.notice = ru.t("Не удалось удалить", "Couldn't delete")
+            }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            model.notice = nil
+        }
+    }
+
     /// «Не интересует»: учитываем в рекомендациях и сразу листаем к соседнему ролику
     private func hide(_ reel: Reel) {
         session.taste.notInterested(reel.id)
@@ -160,7 +326,191 @@ struct ReelsView: View {
             model.remove(reel.id)
         }
     }
+    /// Нажали на присланный в чат шортс: он становится первым в ленте и сразу открывается
+    private func openRequested() {
+        guard fixed == nil, pinned == nil, let post = session.reelRequest else { return }
+        session.reelRequest = nil
+        model.insertFirst(post)
+        current = post.id
+    }
     private var currentIndex: Int { model.reels.firstIndex { $0.id == current } ?? 0 }
+    @ObservedObject private var landscapeMode = LandscapeMode.shared
+    /// Повёрнутый режим для текущего ролика: верхние вкладки и «+» скрыты
+    private var rotatedNow: Bool {
+        guard landscapeMode.on, model.reels.indices.contains(currentIndex) else { return false }
+        let v = model.reels[currentIndex].post.media.first { $0.kind == .video }
+        return (v?.aspect ?? 1) >= 0.7
+    }
+
+    private func isLandscape(_ r: Reel) -> Bool {
+        let v = r.post.media.first { $0.kind == .video }
+        return (v?.aspect ?? 1) >= 0.7
+    }
+
+    @State private var kb: CGFloat = 0
+    @State private var panelBottom: CGFloat = 0
+    @State private var slideX: CGFloat = 0
+    @State private var sliding = false
+
+    /// В повёрнутом режиме «вверх» повёрнутого видео — это вправо на экране: свайп туда — следующее, обратно — предыдущее.
+    /// Вертикальный свайп отключён, а лента едет по той же оси, что и палец. Ролики, которые так не показать, пропускаются сразу
+    /// Обычное положение: свайп вправо — назад к профилю (если шортсы открыты оттуда), свайп влево — профиль создателя
+    private enum SwipeKind { case none, peek, back, vertical }
+    @State private var swipeKind: SwipeKind = .none
+    @State private var peekID: String?
+    @State private var peekX: CGFloat = UIScreen.main.bounds.width
+    @State private var peekOpen = false
+    @State private var backX: CGFloat = 0
+    private var screenW: CGFloat { UIScreen.main.bounds.width }
+
+    @State private var pullDist: CGFloat = 0
+    @State private var pullRefreshing = false        // обновление запущено оттяжкой — вместо вкладок «Обновляем…»
+
+    /// Кружок «обновить» сверху: тянешь — проявляется и крутится, отпустил после порога — лента обновляется
+    private var pullIndicator: some View {
+        let k = min(1, pullDist / ReelPullToRefresh.threshold)
+        let ready = k >= 1
+        return HStack(spacing: 8) {
+            if pullRefreshing {
+                ProgressView().tint(.white).controlSize(.small)
+                Text(s.t("Обновляем…", "Refreshing…"))
+            } else {
+                // кольцо заполняется, пока тянешь; заполнилось — можно отпускать
+                ZStack {
+                    Circle().stroke(Color.white.opacity(0.3), lineWidth: 2.5)
+                    Circle().trim(from: 0, to: k)
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 18, height: 18)
+                Text(ready ? s.t("Отпустите, чтобы обновить", "Release to refresh")
+                           : s.t("Потяните вниз, чтобы обновить", "Pull down to refresh"))
+                    .contentTransition(.opacity)
+            }
+        }
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.5), radius: 3)
+        .frame(height: 40)
+        .opacity(pullRefreshing ? 1 : Double(min(1, k * 2)))
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.18), value: ready)
+    }
+
+    private func refreshFromPull() {
+        guard !model.refreshing else { return }
+        Haptics.impact(.medium)
+        withAnimation(.easeOut(duration: 0.2)) { pullRefreshing = true }
+        Task {
+            await model.refresh(session: session)
+            current = model.reels.first?.id
+            withAnimation(.easeOut(duration: 0.25)) { pullRefreshing = false }
+        }
+    }
+
+    private func edgeChanged(_ v: DragGesture.Value) {
+        if swipeKind == .vertical { return }
+        if swipeKind == .none {
+            // у коллажа вбок листаются фото — профиль автора свайпом не открываем
+            if model.reels.indices.contains(currentIndex), model.reels[currentIndex].post.isCollage { swipeKind = .vertical; return }
+            guard !rotatedNow, commentsFor == nil, !holdFast, peekID == nil,
+                  v.startLocation.y < UIScreen.main.bounds.height - bottomClear - 56,        // не мешаем перемотке по полосе внизу
+                  model.reels.indices.contains(currentIndex) else { return }
+            // ось выбирается один раз в начале жеста: диагональ — это листание, профиль не открывается
+            guard abs(v.translation.width) > abs(v.translation.height) * 2.4 else { swipeKind = .vertical; return }
+            if v.translation.width < 0 {
+                peekID = model.reels[currentIndex].post.creator.id
+                swipeKind = .peek
+            } else if onClose != nil {
+                swipeKind = .back
+            } else { return }
+        }
+        var t = Transaction(); t.disablesAnimations = true
+        withTransaction(t) {
+            if swipeKind == .peek { peekX = min(screenW, max(0, screenW + v.translation.width)) }
+            else if swipeKind == .back { backX = max(0, v.translation.width) }
+        }
+    }
+
+    private func edgeEnded(_ v: DragGesture.Value) {
+        let kind = swipeKind
+        swipeKind = .none
+        let spring = Animation.spring(response: 0.36, dampingFraction: 0.88)
+        switch kind {
+        case .peek:
+            if v.translation.width < -screenW * 0.28 || v.predictedEndTranslation.width < -screenW * 0.6 {
+                Haptics.impact(.light)
+                withAnimation(spring) { peekX = 0 }
+                peekOpen = true
+            } else { closePeek() }
+        case .back:
+            if v.translation.width > screenW * 0.3 || v.predictedEndTranslation.width > screenW * 0.6 {
+                Haptics.impact(.light)
+                onClose?()
+            } else { withAnimation(spring) { backX = 0 } }
+        case .none, .vertical: break
+        }
+    }
+
+    /// Закрыть выехавший профиль: он уезжает за край, шортс возвращается
+    private func closePeek() {
+        peekOpen = false
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) { peekX = screenW }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 380_000_000)
+            if !peekOpen, swipeKind != .peek { peekID = nil }
+        }
+    }
+
+    private func profilePanel(_ id: String) -> some View {
+        PublicProfileSheet(source: .id(id), onClose: { closePeek() })
+            .environmentObject(session).environmentObject(flow)
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(theme.sheet.ignoresSafeArea())
+            .shadow(color: .black.opacity(0.35), radius: 14, x: -4)
+            .offset(x: peekX)
+            .simultaneousGesture(DragGesture(minimumDistance: 24)
+                .onChanged { v in
+                    guard peekOpen, v.translation.width > 0, abs(v.translation.width) > abs(v.translation.height) * 1.4 else { return }
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { peekX = min(screenW, v.translation.width) }
+                }
+                .onEnded { v in
+                    guard peekOpen else { return }
+                    if v.translation.width > screenW * 0.3 || v.predictedEndTranslation.width > screenW * 0.6,
+                       abs(v.translation.width) > abs(v.translation.height) {
+                        Haptics.impact(.light); closePeek()
+                    } else {
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) { peekX = 0 }
+                    }
+                })
+    }
+
+    private func rotatedSwipe(_ v: DragGesture.Value) {
+        guard rotatedNow, !sliding, !landscapeMode.commentsOpen, abs(v.translation.width) > 50, abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
+        let step = v.translation.width > 0 ? 1 : -1
+        var i = currentIndex + step
+        while model.reels.indices.contains(i), !isLandscape(model.reels[i]) { i += step }
+        guard model.reels.indices.contains(i) else {
+            if step > 0, fixed == nil { Task { await model.loadMore(session: session) } }
+            return
+        }
+        let target = model.reels[i].id
+        let w = UIScreen.main.bounds.width
+        sliding = true
+        Haptics.impact(.light)
+        withAnimation(.easeIn(duration: 0.16)) { slideX = CGFloat(step) * w }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 170_000_000)
+            var t = Transaction(); t.disablesAnimations = true
+            withTransaction(t) { current = target; slideX = CGFloat(-step) * w }
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            withAnimation(.easeOut(duration: 0.24)) { slideX = 0 }
+            try? await Task.sleep(nanoseconds: 240_000_000)
+            sliding = false
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -176,7 +526,8 @@ struct ReelsView: View {
                                     ReelPage(reel: reel,
                                              active: reel.id == current,
                                              near: abs(index - currentIndex) <= 1,
-                                             suspended: suspended || showComposer || musicFor != nil,       // пока открыто «выложить видео», текущий ролик стоит
+                                             suspended: suspended || showComposer || showSearch || session.mediaHeld || musicFor != nil || peekOpen || callActivity.active || duetFor != nil
+                                                 || detailFor != nil,       // пока открыто «выложить видео» или страница поста, текущий ролик стоит
                                              topInset: topInset,
                                              bottomClear: bottomClear,
                                              onLike: { model.toggleLike(reel.id, session: session) },
@@ -186,61 +537,189 @@ struct ReelsView: View {
                                              onRepost: { model.toggleRepost(reel.id, session: session) },
                                              onMusic: { if fixed != nil { onClose?() } else if let m = reel.post.music { musicFor = m } },
                                              onAuthor: { onOpenAuthor(reel.post.author) },
+                                             onOpenUser: { onOpenAuthor($0) },
+                                             onOpenTag: { tag in searchQuery = "#" + tag; showSearch = true },
+                                             onHold: { holdFast = $0 },
                                              onFollow: { follow(reel) },
-                                             onHide: { hide(reel) })
-                                        .frame(width: geo.size.width, height: geo.size.height)
+                                             onUnfollow: { unfollow(reel) },
+                                             showCheck: model.checkAuthors.contains(reel.post.author.id),
+                                             onHide: { hide(reel) },
+                                             onOpenDetail: { detailFor = reel })
+                                        .containerRelativeFrame([.horizontal, .vertical])      // страница ровно по окну ленты: соседний ролик не заезжает и страница не сдвигается
+                                        .clipped()                                             // и ничего не рисуется за пределами своей страницы
                                         .id(reel.id)
                                 }
                             }
                             .scrollTargetLayout()
                         }
                         .scrollTargetBehavior(.paging)
+                            .scrollDisabled(holdFast || rotatedNow || swipeKind == .peek || swipeKind == .back)
+                        .offset(x: slideX)
                         .scrollPosition(id: $current)
+                        // на самом первом ролике потянул вниз и отпустил — лента обновляется
+                        .modifier(ReelPullToRefresh(enabled: fixed == nil && pinned == nil && currentIndex == 0 && !model.refreshing,
+                                                    pull: $pullDist) { refreshFromPull() })
                         .ignoresSafeArea()
+                        // повторное нажатие «Шортс»: к первому ролику, а если уже на нём — свежая подборка
+                        .onReceive(TabReselect.shared.publisher(.reels)) { _ in
+                            guard fixed == nil, pinned == nil, onClose == nil, !suspended else { return }
+                            if currentIndex > 0, let first = model.reels.first?.id {
+                                withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) { current = first }
+                            } else {
+                                Task {
+                                    await model.refresh(session: session)
+                                    current = model.reels.first?.id
+                                }
+                            }
+                        }
                     }
-                    topBar
+                    // тянешь первый ролик вниз — вкладки растворяются, на их месте «Потяните вниз, чтобы обновить» (как в TikTok)
+                    if !rotatedNow { topBar.opacity(fixed == nil ? (pullRefreshing ? 0 : max(0, 1 - Double(pullDist) / 36)) : 1) }
+                    if !rotatedNow, fixed == nil, pullDist > 4 || pullRefreshing {
+                        pullIndicator.frame(maxHeight: .infinity, alignment: .top).padding(.top, topInset + 8)
+                    }
                 }
+                .frame(width: geo.size.width, height: geo.size.height)      // что бы ни случилось внутри, лента не шире экрана и не съезжает
             }
+            .simultaneousGesture(DragGesture(minimumDistance: 30)
+                .onChanged { if !rotatedNow { edgeChanged($0) } }
+                .onEnded { rotatedNow ? rotatedSwipe($0) : edgeEnded($0) })
+            .offset(x: peekID != nil ? -(screenW - peekX) * 0.28 : backX)
+            .overlay { Color.black.opacity(peekID != nil ? 0.45 * Double(1 - peekX / screenW) : 0.35 * Double(backX / screenW)).allowsHitTesting(false) }
             .ignoresSafeArea()                                   // видео на весь экран, до самых краёв (как в TikTok)
         }
+        .overlay { if let id = peekID { profilePanel(id) } }
+        .overlay {
+            // идёт звонок — ролики стоят, по центру подсказка; кнопки шортсов (закрыть, профиль) по-прежнему нажимаются
+            if callActivity.active {
+                ZStack {
+                    Color.black.opacity(0.55).ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        Image(systemName: "phone.fill").font(.system(size: 28, weight: .semibold)).foregroundStyle(.green)
+                        Text(CallGate.message(lang, .shorts))
+                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                            .multilineTextAlignment(.center).padding(.horizontal, 40)
+                    }
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: callActivity.active)
+        .onChange(of: peekID) { _, id in session.tabBarHidden = id != nil || commentsFor != nil }
         .preferredColorScheme(.dark)
         .task {
             configureAudio()
             session.player.stop()
             if let fixed {
-                if model.reels.isEmpty { model.seed(fixed) }
+                // сначала выбираем стартовый ролик, потом показываем ленту: тогда она сразу стоит на нём и листается и с первого
                 if current == nil { current = startID ?? fixed.first?.id }
+                if model.reels.isEmpty { model.seed(fixed) }
                 return
             }
-            if model.reels.isEmpty { await model.loadMore(session: session) }
+            if let pinned, model.reels.isEmpty { model.pin(pinned); current = pinned.id }
+            openRequested()
+            if model.reels.count < 2 { await model.loadMore(session: session) }
             if current == nil { current = model.reels.first?.id }
         }
+        .onChange(of: session.reelRequest?.id) { _, id in if id != nil { openRequested() } }
+        .onChange(of: rotatedNow) { _, on in if commentsFor == nil { session.tabBarHidden = on } }
+        .overlay(alignment: .top) {
+            if let text = model.notice { ToastView(text: text).padding(.top, topInset + 8).transition(.opacity) }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.notice)
         .onChange(of: model.reels.first?.id) { _, id in if current == nil || !model.reels.contains(where: { $0.id == current }) { current = id } }
-        .onChange(of: current) { _, _ in
+        .onChange(of: current) { _, new in
+            if landscapeMode.commentsOpen { landscapeMode.commentsOpen = false }
+            if fixed == nil, let new { model.resumeID = new }
             if fixed == nil, currentIndex >= model.reels.count - 3 { Task { await model.loadMore(session: session) } }
         }
         .overlay {
             // комментарии — панель на всю ширину экрана, без зазоров по бокам (системная шторка на iOS 26 «плавает»)
             if let post = commentsFor {
+                let H = UIScreen.main.bounds.height
+                let base = (sheetTall ? 0.93 : 0.7) * H
+                let h = min(0.95 * H, max(0.12 * H, base - sheetDrag), max(0.3 * H, H - kb - topInset - 8))
                 ZStack(alignment: .bottom) {
                     Color.black.opacity(0.45).ignoresSafeArea()
                         .onTapGesture { closeComments() }
-                    CommentsSheet(post: post, vm: session.feed, onClose: { closeComments() })
+                    CommentsSheet(post: post, vm: session.feed, onClose: { closeComments() },
+                                  onHeaderDrag: { v, ended in
+                                      // тянут за шапку с фильтрами — панель едет за пальцем; отпустили — закрыть или зафиксировать высоту
+                                      if !ended {
+                                          var t = Transaction(); t.disablesAnimations = true
+                                          withTransaction(t) { sheetDrag = v.translation.height }
+                                          return
+                                      }
+                                      let final = base - v.translation.height
+                                      let predicted = base - v.predictedEndTranslation.height
+                                      withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                          if predicted < 0.45 * H || (!sheetTall && v.translation.height > 140) {
+                                              commentsFor = nil
+                                              if let id = current { Task { await model.refreshPost(id, session: session) } }
+                                          } else {
+                                              sheetTall = final > 0.82 * H || predicted > 0.88 * H
+                                          }
+                                          sheetDrag = 0
+                                      }
+                                  })
                         .environmentObject(session).environmentObject(flow)
                         .environment(\.theme, theme).environment(\.lang, lang)
                         .frame(maxWidth: .infinity)
-                        .frame(height: UIScreen.main.bounds.height * 0.7)
+                        .frame(height: h)
                         .background(theme.sheet)
                         .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, topTrailingRadius: 22, style: .continuous))
+                        .overlay(alignment: .top) {
+                            Capsule().fill(theme.textTertiary.opacity(0.6)).frame(width: 38, height: 5).padding(.top, 8)
+                                .allowsHitTesting(false)
+                        }
+                        // где панель встала на самом деле: если между ней и клавиатурой остался зазор
+                        // (SwiftUI добавляет к отступу ещё нижнюю безопасную зону), опускаем её вплотную
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { panelBottom = $0 }
+                        .offset(y: kb > 0 ? max(0, (H - kb) - panelBottom) : 0)
+                        .padding(.bottom, kb)                       // клавиатуру учитываем сами: ввод всегда над ней
                         .ignoresSafeArea(.container, edges: .bottom)
                         .transition(.move(edge: .bottom))
                 }
+                .ignoresSafeArea(.keyboard, edges: .bottom)
                 .zIndex(30)
             }
         }
-        .animation(.easeOut(duration: 0.25), value: commentsFor?.id)
-        .fullScreenCover(item: $musicFor) { music in
-            ReelMusicPage(music: music)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { n in
+            guard let f = n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let h = max(0, UIScreen.main.bounds.height - f.minY)
+            withAnimation(.easeOut(duration: 0.25)) { kb = h }
+        }
+        .animation(.spring(response: 0.36, dampingFraction: 0.88), value: commentsFor?.id)
+        .onChange(of: commentsFor?.id) { _, id in
+            session.tabBarHidden = id != nil
+            if id == nil { sheetTall = false; sheetDrag = 0 }
+        }
+        .onDisappear { session.tabBarHidden = false; landscapeMode.on = false }       // ушли из шортсов — повёрнутый режим сбрасывается
+        .sheet(item: $musicFor, onDismiss: {
+            if session.player.current?.id == soundTrackID { session.player.stop() }
+        }) { music in
+            SoundSheet(music: music)
+                .environmentObject(session).environmentObject(flow)
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDragIndicator(.hidden)
+                .onAppear { soundTrackID = music.mediaID }
+                .sheetStyle(theme)
+        }
+        .fullScreenCover(item: $duetFor) { post in
+            DuetRecorderView(original: post) { await model.showMine(session: session); current = model.reels.first?.id }
+                .environmentObject(session)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+        .fullScreenCover(item: $detailFor) { reel in
+            ReelDetailPage(reel: reel, onClose: { detailFor = nil },
+                           onOpenTag: { tag in detailFor = nil
+                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { searchQuery = "#" + tag; showSearch = true } })
+                .environmentObject(session).environmentObject(flow)
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+        .fullScreenCover(isPresented: $showSearch) {
+            ReelSearchView(onClose: { showSearch = false }, initialQuery: searchQuery)
                 .environmentObject(session).environmentObject(flow)
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
@@ -250,17 +729,27 @@ struct ReelsView: View {
                 .environment(\.theme, theme).environment(\.lang, lang)
         }
         .sheet(item: $shareFor) { post in
-            SendToChatSheet(postID: post.id)
+            SendToChatSheet(postID: post.id,
+                            onDownload: { download(post) },
+                            onNotInterested: { if let r = model.reels.first(where: { $0.id == post.id }) { hide(r) } },
+                            onReport: { reason in report(post, reason: reason) },
+                            onDelete: post.isMine && !post.isRepost ? { deleteReel(post) } : nil,
+                            onDuet: post.allowRepost && !post.isCollage && post.media.first?.kind == .video
+                                ? { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { duetFor = post } } : nil)
                 .environmentObject(session)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 
-    /// Сколько снизу занимает плавающая панель вкладок: подпись и полоса прогресса стоят над ней
+    /// Сколько снизу занимает плавающая панель вкладок: подпись и полоса прогресса стоят над ней.
+    /// Берём НАСТОЯЩУЮ высоту панели (измеряется в MainTabView), а не угаданную: раньше полоса течения видео
+    /// уходила под панель. Страница отводит снизу bottomClear + safeBottom − 10, а сама полоса стоит в 6,5 pt
+    /// над этим местом — итого линия ~14 pt над верхним краем панели.
     private var bottomClear: CGFloat {
         let bottom = (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.keyWindow?.safeAreaInsets.bottom) ?? 34
-        return fixed != nil ? bottom + 28 : bottom + 76          // в режиме «один звук» нижней панели нет
+        if fixed != nil { return bottom + 20 }                   // в режиме «один звук» нижней панели нет
+        return tabBarHeight + 18
     }
 
     private var topInset: CGFloat {
@@ -277,13 +766,23 @@ struct ReelsView: View {
     private func follow(_ reel: Reel) {
         Haptics.impact(.light)
         let author = reel.post.author.id
-        model.setState(reel.id, "outgoing")
+        model.setState(reel.id, "following")
+        model.flashCheck(author)
         Task {
-            if let state = await session.extras.addFriend(id: author) { model.setState(reel.id, state) }
+            if await session.extras.setFollow(id: author, on: true, source: reel.id) == nil {
+                model.setState(reel.id, "none")
+                model.checkAuthors.remove(author)
+            }
         }
     }
 
-    // MARK: Верх: «Друзья | Рекомендации»
+    private func unfollow(_ reel: Reel) {
+        Haptics.impact(.light)
+        model.setState(reel.id, "none")
+        Task { _ = await session.extras.setFollow(id: reel.post.author.id, on: false) }
+    }
+
+    // MARK: Верх: «Друзья | Рекомендации | Подписки»
 
     private var topBar: some View {
         VStack {
@@ -300,21 +799,50 @@ struct ReelsView: View {
                 .padding(.horizontal, 10)
                 .padding(.top, topInset)
             } else {
-            HStack(spacing: 18) {
-                Color.clear.frame(width: 28, height: 28)
-                Spacer(minLength: 0)
-                tab(s.t("Друзья", "Friends"), .friends)
-                tab(s.t("Рекомендации", "For you"), .forYou)
-                Spacer(minLength: 0)
-                Button { onCompose() } label: {
-                    Image(systemName: "video.badge.plus")
-                        .font(.system(size: 20, weight: .medium)).foregroundStyle(.white)
-                        .frame(width: 28, height: 28)
-                        .shadow(color: .black.opacity(0.5), radius: 3)
+            // вкладки листаются вбок (как в других соцсетях): выбранная — по центру, соседняя справа видна частично
+            // и растворяется к значку поиска. Значки справа: ширина строки никогда не больше экрана
+            HStack(spacing: 6) {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 16) {
+                            tab(s.t("Друзья", "Friends"), .friends).id(ReelsModel.Kind.friends)
+                            tab(s.t("Рекомендации", "For you"), .forYou).id(ReelsModel.Kind.forYou)
+                            tab(s.t("Подписки", "Following"), .following).id(ReelsModel.Kind.following)
+                        }
+                        .padding(.horizontal, 60)
+                    }
+                    .mask(
+                        LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.1),
+                                               .init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
+                                       startPoint: .leading, endPoint: .trailing)
+                    )
+                    .onAppear { proxy.scrollTo(model.kind, anchor: .center) }
+                    .onChange(of: model.kind) { _, k in
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { proxy.scrollTo(k, anchor: .center) }
+                    }
                 }
-                .buttonStyle(.plain)
+                HStack(spacing: 6) {
+                    Button { Haptics.impact(.light); searchQuery = ""; showSearch = true } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 19, weight: .medium)).foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                            .padding(4).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(-4)
+                    Button { onCompose() } label: {
+                        Image(systemName: "video.badge.plus")
+                            .font(.system(size: 20, weight: .medium)).foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .fixedSize()
             }
-            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .padding(.leading, 0).padding(.trailing, 12)
             .padding(.top, topInset + 4)
             }
             Spacer()
@@ -326,20 +854,45 @@ struct ReelsView: View {
         let on = model.kind == kind
         return Button {
             Haptics.select()
+            if model.kind == kind {
+                // уже на этой вкладке — нажатие обновляет ленту
+                guard !model.refreshing else { return }
+                Haptics.impact(.light)
+                Task {
+                    await model.refresh(session: session)
+                    current = model.reels.first?.id
+                }
+                return
+            }
             current = nil
             model.switchTo(kind, session: session)
-            Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                if current == nil { current = model.reels.first?.id }
+            if model.loaded {
+                current = model.resumeInCurrent          // вкладка уже была открыта — продолжаем с того же ролика
+            } else {
+                Task {
+                    // ждём ленту именно этой вкладки; если успели переключить дальше — ничего не трогаем
+                    for _ in 0..<40 {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        guard model.kind == kind else { return }
+                        if model.loaded { break }
+                    }
+                    if current == nil, model.kind == kind { current = model.reels.first?.id }
+                }
             }
         } label: {
             VStack(spacing: 5) {
                 Text(title)
                     .lineLimit(1).fixedSize(horizontal: true, vertical: false)       // «Рекомендации» всегда в одну строку
-                    .font(.system(size: 18, weight: on ? .bold : .semibold))
+                    .font(.system(size: 15.5, weight: on ? .bold : .semibold))
                     .foregroundStyle(on ? Color.white : Color.white.opacity(0.62))
                     .shadow(color: .black.opacity(0.55), radius: 3)
-                Capsule().fill(Color.white).frame(width: 26, height: 3).opacity(on ? 1 : 0)
+                ZStack {
+                    Capsule().fill(Color.white).frame(width: 26, height: 3).opacity(on && !(model.refreshing) ? 1 : 0)
+                    if on && model.refreshing {
+                        ProgressView().controlSize(.mini).tint(.white).frame(height: 3)
+                    }
+                }
+                .frame(height: 3)
             }
         }
         .buttonStyle(.plain)
@@ -349,14 +902,34 @@ struct ReelsView: View {
     private var emptyState: some View {
         VStack(spacing: 14) {
             if model.loading || !model.loaded {
-                ProgressView().tint(.white).scaleEffect(1.3)
+                // заглушка шортса: серый кадр с бликом, справа — кружки кнопок, снизу — строки подписи
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 0).fill(Color.white.opacity(0.05))
+                    HStack(alignment: .bottom) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) { Circle().fill(Color.white.opacity(0.12)).frame(width: 36, height: 36)
+                                RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.12)).frame(width: 120, height: 14) }
+                            RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.1)).frame(width: 220, height: 12)
+                            RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.1)).frame(width: 160, height: 12)
+                        }
+                        Spacer()
+                        VStack(spacing: 22) { ForEach(0..<4, id: \.self) { _ in Circle().fill(Color.white.opacity(0.12)).frame(width: 40, height: 40) } }
+                    }
+                    .padding(.horizontal, 16).padding(.bottom, 120)
+                }
+                .shimmer()
+                .ignoresSafeArea()
             } else {
-                Image(systemName: "play.rectangle.on.rectangle").font(.system(size: 44, weight: .light)).foregroundStyle(.white.opacity(0.7))
-                Text(model.failed ?? (model.kind == .friends
+                EmptyStateView(icon: model.kind == .following ? "person.crop.rectangle.stack" : "play.rectangle.on.rectangle",
+                               title: model.failed ?? (model.kind == .friends
                                        ? s.t("У друзей пока нет коротких видео", "Your friends have no short videos yet")
-                                       : s.t("Пока нет коротких видео", "No short videos yet")))
-                    .font(.system(size: 16, weight: .medium)).foregroundStyle(.white.opacity(0.85))
-                    .multilineTextAlignment(.center).padding(.horizontal, 40)
+                                       : model.kind == .following
+                                       ? s.t("Пока пусто", "Nothing here yet")
+                                       : s.t("Пока нет коротких видео", "No short videos yet")),
+                               subtitle: model.failed == nil && model.kind == .following
+                                       ? s.t("Подпишитесь на авторов — их новые шортсы появятся здесь",
+                                             "Follow creators — their new shorts will show up here") : nil,
+                               onDark: true)
                 Button { onCompose() } label: {
                     Text(s.t("Опубликовать видео", "Post a video"))
                         .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
@@ -389,12 +962,21 @@ struct ReelPage: View {
     var onRepost: () -> Void
     var onMusic: () -> Void = {}
     var onAuthor: () -> Void
+    var onOpenUser: (Author) -> Void = { _ in }
+    var onOpenTag: (String) -> Void = { _ in }       // нажали на #хэштег в подписи
+    var onHold: (Bool) -> Void = { _ in }
     var onFollow: () -> Void
+    var onUnfollow: () -> Void = {}
+    var showCheck: Bool = false
     var onHide: () -> Void = {}
+    var onOpenDetail: () -> Void = {}             // «ещё»: длинная подпись — страница поста целиком
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    @Environment(\.openURL) private var systemOpenURL
     @ObservedObject private var bookmarks = BookmarkStore.shared
+    @ObservedObject private var scrubBus = ReelScrubBus.shared
 
     @State private var player: AVPlayer?
     @State private var timeObserver: Any?
@@ -403,14 +985,35 @@ struct ReelPage: View {
     @State private var playing = false
     @State private var userPaused = false
     @State private var fast = false
+    @State private var fastRate: Float = 2            // зажали: ×2, ведёшь пальцем — от 1× до 3×
+    @State private var fastOrigin: CGFloat?
     @State private var ready = false
     @State private var burst = 0
     @State private var hearts: [FloatingHeart] = []
     @State private var expanded = false
     @State private var scrubbing = false
+    @ObservedObject private var mode = LandscapeMode.shared
+    @State private var lsControls = false         // кнопки в повёрнутом режиме: показываются по одному нажатию
+    @State private var lsHideTask: Task<Void, Never>?
+    /// «На весь экран» для горизонтального видео: режим общий — следующее горизонтальное видео тоже откроется повёрнутым
+    private var forceFill: Bool { mode.on && landscape }
+    /// Комментарии рядом с видео (только у текущего ролика в повёрнутом режиме)
+    private var sideComments: Bool { forceFill && active && mode.commentsOpen }
+    /// Доля ширины (в повёрнутом положении), которую занимает видео
+    private var videoShare: CGFloat { sideComments ? 0.5 : 1 }
+    /// Скорость воспроизведения: в повёрнутом режиме — выбранная кнопкой, иначе обычная
+    private var rateNow: Float { forceFill ? mode.speed : 1 }
+    @State private var lsMenu = false
+    @State private var page = 0                   // какое фото коллажа на экране
+    @State private var repostSpin = 0
+    @State private var repostsOpen = false
     // учёт просмотра
     @State private var watched: Double = 0
     @State private var playingSince: Date?
+
+    static var safeBottom: CGFloat {
+        (UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.keyWindow?.safeAreaInsets.bottom) ?? 34
+    }
 
     private var s: Strings { Strings(lang: lang) }
     private var post: Post { reel.post }
@@ -418,6 +1021,11 @@ struct ReelPage: View {
     private var duration: Double { video?.duration ?? 0 }
     /// Вертикальное видео (9:16 и близкие) растягивается на весь экран, горизонтальное — по центру с чёрными полосами
     private var fill: Bool { (video?.aspect ?? 1) < 0.7 }
+    private var landscape: Bool { !collage && (video?.aspect ?? 1) >= 0.7 }
+    /// Коллаж: фото и живые фото листаются вбок, звук (музыка или звук живого фото) идёт непрерывно
+    private var collage: Bool { post.isCollage }
+    /// Что звучит в коллаже: выбранная музыка, иначе звук первого живого фото — играет через все фото, не обрываясь
+    private var soundID: String? { post.music?.mediaID ?? post.media.first { $0.live }?.id }
     private let red = Color(red: 1, green: 0.17, blue: 0.33)
 
     struct FloatingHeart: Identifiable { let id = UUID(); let point: CGPoint; let tilt: Double }
@@ -425,16 +1033,42 @@ struct ReelPage: View {
     var body: some View {
         ZStack {
             Color.black
-            videoLayer
-            LinearGradient(colors: [.clear, .black.opacity(0.62)], startPoint: .init(x: 0.5, y: 0.5), endPoint: .bottom)
+            if forceFill {
+                // «На весь экран»: видео не растягивается, а поворачивается — 16:9 занимает весь экран в горизонтальном положении
+                GeometryReader { geo in
+                    // комментарии открыты — видео уменьшается и занимает левую половину, справа комментарии
+                    videoLayer
+                        .frame(width: geo.size.height * videoShare, height: geo.size.width)
+                        .frame(width: geo.size.height, height: geo.size.width, alignment: .leading)
+                        .rotationEffect(.degrees(90))
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+            } else if collage {
+                collageLayer
+            } else {
+                // Видео и его обложка — только наложение: их собственный размер (картинка «на всю высоту» шире экрана) не должен
+                // раздвигать страницу. Иначе пока обложка не сменилась кадром, колонка кнопок стояла за правым краем и потом «телепортировалась»
+                Color.black.overlay { videoLayer }.clipped()
+            }
+            // мягкая тень снизу: подпись и автор читаются на любом кадре (в три ступени — без видимой границы)
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black.opacity(0.18), location: 0.35),
+                                   .init(color: .black.opacity(0.62), location: 1)],
+                           startPoint: .init(x: 0.5, y: 0.55), endPoint: .bottom)
                 .allowsHitTesting(false)
-            LinearGradient(colors: [.black.opacity(0.35), .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.18))
+            // и справа — под колонкой кнопок
+            LinearGradient(colors: [.clear, .black.opacity(0.18)], startPoint: .init(x: 0.7, y: 0.5), endPoint: .trailing)
+                .allowsHitTesting(false)
+            LinearGradient(colors: [.black.opacity(0.22), .clear], startPoint: .top, endPoint: .init(x: 0.5, y: 0.12))
                 .allowsHitTesting(false)
 
-            // касания: один — пауза, два — сердечко
+            // касания: один — пауза, два — сердечко (у коллажа — свои, на листающихся фото)
+            if !collage {
             GeometryReader { geo in
-                Color.clear.contentShape(Rectangle())
-                    .onTapGesture(count: 2, coordinateSpace: .local) { point in
+                // касания на видео — системными распознавателями (UIKit): они не спорят с прокруткой ленты,
+                // поэтому листать можно и пальцем по самому видео
+                ReelTouchLayer(
+                    onTap: { if forceFill { toggleControls() } else { togglePause() } },
+                    onDoubleTap: { point in
                         onDoubleLike()
                         let h = FloatingHeart(point: point, tilt: Double.random(in: -18...18))
                         hearts.append(h)
@@ -443,60 +1077,164 @@ struct ReelPage: View {
                             try? await Task.sleep(nanoseconds: 900_000_000)
                             hearts.removeAll { $0.id == h.id }
                         }
-                    }
-                    .onTapGesture { togglePause() }
-                    // удержание — ускорение ×2, отпустили — обычная скорость
-                    .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40, perform: {
+                    },
+                    onHoldBegan: { point in
+                        // удержание — ×2
                         guard active, !userPaused else { return }
                         fast = true
+                        fastRate = 2
+                        fastOrigin = forceFill ? point.y : point.x
                         player?.rate = 2
                         Haptics.impact(.light)
-                    }, onPressingChanged: { pressing in
-                        if !pressing, fast {
-                            fast = false
-                            if !userPaused { player?.rate = 1 }
+                    },
+                    onHoldMoved: { point in
+                        // пока держишь: влево — медленнее (1,9 … 1×), вправо — быстрее (2,1 … 3×)
+                        guard fast else { return }
+                        let x = forceFill ? point.y : point.x
+                        let r = HoldSpeed.rate(dx: x - (fastOrigin ?? x))
+                        if r != fastRate {
+                            fastRate = r
+                            player?.rate = r
+                            Haptics.select()
                         }
-                    })
+                    },
+                    onHoldEnded: { endFast() }
+                )
                 ForEach(hearts) { h in
-                    TapHeart(tilt: h.tilt).position(h.point).allowsHitTesting(false)
+                    TapHeart(tilt: h.tilt, size: forceFill ? 150 : 86).rotationEffect(.degrees(forceFill ? 90 : 0)).position(h.point).allowsHitTesting(false)
+                }
+            }
+            }
+
+            // как в TikTok: у горизонтального видео под кадром кнопка «На весь экран»
+            if landscape && ready && !forceFill {
+                GeometryReader { geo in
+                    let h = geo.size.width / CGFloat(max(0.2, video?.aspect ?? 1.78))
+                    Button {
+                        Haptics.impact(.light)
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { mode.on = true }
+                        showControlsBriefly()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(s.t("На весь экран", "Full screen"))
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 13).frame(height: 30)
+                        .background(Color.black.opacity(0.55), in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        .padding(8).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .position(x: geo.size.width / 2,
+                              y: min(geo.size.height * 0.66, geo.size.height / 2 + h / 2 + 42))
                 }
             }
 
+            if forceFill { landscapeUI }
+            if sideComments { sideCommentsPanel.transition(.opacity) }
+
+            Color.clear.frame(width: 0, height: 0)
+                .onChange(of: fast) { _, v in onHold(v) }
+                .onDisappear { if fast { endFast() } }
             if fast {
-                Text("2×  ▸▸")
-                    .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                    .padding(.horizontal, 14).frame(height: 32)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .padding(.top, topInset + 56)
+                let badge = HoldSpeedBadge(rate: fastRate)
+                if forceFill {
+                    // повёрнутый режим: надпись сверху по центру повёрнутого видео
+                    GeometryReader { geo in
+                        badge
+                            .frame(width: geo.size.height, height: geo.size.width, alignment: .top)
+                            .padding(.top, 28)
+                            .rotationEffect(.degrees(90))
+                            .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    }
                     .allowsHitTesting(false)
-                    .transition(.scale.combined(with: .opacity))
+                    .transition(.opacity)
+                } else {
+                    badge
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .padding(.top, topInset + 56)
+                        .allowsHitTesting(false)
+                        .transition(.scale.combined(with: .opacity))
+                }
             }
 
-            if userPaused && active {
+            // в повёрнутом режиме, пока видны кнопки, на паузе только кнопка в кружке; кнопки скрылись — обычный значок
+            if userPaused && active && !(forceFill && lsControls) {
                 Image(systemName: "play.fill")
-                    .font(.system(size: 64)).foregroundStyle(.white.opacity(0.75))
+                    .font(.system(size: 64)).foregroundStyle(.white.opacity(0.38))
                     .shadow(color: .black.opacity(0.4), radius: 8)
+                    .rotationEffect(.degrees(forceFill ? 90 : 0))
                     .allowsHitTesting(false)
-                    .transition(.scale(scale: 1.3).combined(with: .opacity))
+                    .transition(forceFill ? .opacity : .scale(scale: 1.3).combined(with: .opacity))
             }
 
+            if !forceFill {
             VStack(spacing: 0) {
+                if collage && post.media.count > 1 {
+                    // слева сверху — какое фото из скольких
+                    HStack {
+                        Text("\(page + 1)/\(post.media.count)")
+                            .font(.system(size: 13, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                            .padding(.horizontal, 10).frame(height: 26)
+                            .background(Color.black.opacity(0.45), in: Capsule())
+                            .contentTransition(.numericText())
+                            .animation(.easeOut(duration: 0.2), value: page)
+                        Spacer()
+                    }
+                    .padding(.leading, 14).padding(.top, topInset + 58)
+                    .allowsHitTesting(false)
+                }
                 Spacer()
                 HStack(alignment: .bottom, spacing: 0) {
                     caption
-                    Spacer(minLength: 12)
+                    Spacer(minLength: 30)
                     rail
                 }
-                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, 10)
-                progressBar
-                    .padding(.horizontal, 14)
-                Color.clear.frame(height: bottomClear)         // место под плавающую панель вкладок
+                // без подписи имя и кнопки опускаются ближе к полосе — пустого места под ними не остаётся
+                .padding(.leading, 14).padding(.trailing, 8).padding(.bottom, post.text.isEmpty ? -8 : 6)
+                if collage {
+                    // у коллажа нет длительности и полосы времени: на её месте точечки, как в TikTok.
+                    // Зажал точечки и ведёшь вправо/влево — листаются фото
+                    CollageDots(count: post.media.count, page: $page, hitHeight: post.text.isEmpty ? 34 : 48)
+                        .padding(.horizontal, 14)
+                } else {
+                    progressBar(hitHeight: post.text.isEmpty ? 34 : 48)   // широкая зона перемотки: промазать по полоске трудно
+                        .padding(.horizontal, 14)
+                }
+                // кнопки/подпись/полоса прижаты ближе к панели вкладок (как в TikTok): оставляем место ровно под панель, без лишнего зазора
+                Color.clear.frame(height: max(0, bottomClear + Self.safeBottom - 10))   // полоса прогресса прижата к самому верху панели вкладок
+            }
+            // Слой считается от полного размера страницы, а не от безопасной области: она доходит до страницы не сразу, и кнопки
+            // сначала стояли ниже (под панелью вкладок), а потом «телепортировались» на место
+            .ignoresSafeArea()
+            // панель с аватаркой/лайком/комментом сразу стоит на месте: внешние неявные анимации (пауза, смена страницы) её не двигают
+            .transaction { $0.animation = nil }
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: userPaused)
+        .onChange(of: forceFill && active) { _, on in
+            if !on { lsControls = false; lsMenu = false }
+        }
+        .onChange(of: rateNow) { _, r in
+            player?.defaultRate = r
+            if playing, !userPaused, !fast { player?.rate = r }
+        }
         .onChange(of: near) { _, now in now ? makePlayer() : destroyPlayer() }
         .onChange(of: active) { _, now in now ? activate() : deactivate() }
+        // перемотка жестом по панели вкладок (как в TikTok) — применяем только к активному ролику
+        .onChange(of: scrubBus.tick) { _, _ in
+            guard active, !collage, let f = scrubBus.target else { return }
+            scrubbing = true
+            progress = f
+            if let item = player?.currentItem, item.duration.seconds.isFinite {
+                player?.seek(to: CMTime(seconds: item.duration.seconds * f, preferredTimescale: 600),
+                             toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
+        .onChange(of: scrubBus.active) { _, on in if active, !on { scrubbing = false } }
         .onChange(of: suspended) { _, now in
             guard active else { return }
             if now { pauseClock(); player?.pause() }
@@ -511,7 +1249,69 @@ struct ReelPage: View {
             if active { pauseClock() ; player?.pause() }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            if active, !userPaused { player?.play(); startClock() }
+            // вернулись в приложение: если сверху съёмка, публикация, профиль и т.п. — ролик остаётся на паузе
+            if active, !userPaused, !suspended { player?.play(); startClock() }
+        }
+    }
+
+    // MARK: Коллаж
+
+    /// Фото и живые фото листаются вбок; один тап — пауза звука, два — сердечко
+    private var collageLayer: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                SensitiveGate(sensitive: post.sensitive, id: post.id) {
+                    TabView(selection: $page) {
+                        ForEach(Array(post.media.enumerated()), id: \.offset) { i, m in
+                            ZStack {
+                                if m.live || m.kind == .video {
+                                    LiveLoopView(item: m, playing: active && page == i && !userPaused && !suspended)
+                                } else {
+                                    RemoteImage(id: m.id, fill: false, backdrop: .black)
+                                }
+                                if m.live {
+                                    // значок «живое фото»
+                                    VStack {
+                                        HStack {
+                                            Spacer()
+                                            Label("LIVE", systemImage: "livephoto")
+                                                .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                                .padding(.horizontal, 8).frame(height: 22)
+                                                .background(Color.black.opacity(0.45), in: Capsule())
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.top, topInset + 58).padding(.trailing, 14)
+                                    .allowsHitTesting(false)
+                                }
+                            }
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .tag(i)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .onChange(of: page) { _, _ in Haptics.select() }
+                }
+                ForEach(hearts) { h in
+                    TapHeart(tilt: h.tilt).position(h.point).allowsHitTesting(false)
+                }
+            }
+            // касания по фото: листание вбок остаётся у TabView, тапы ловим поверх без блокировки жестов
+            .simultaneousGesture(
+                SpatialTapGesture(count: 2).onEnded { v in
+                    onDoubleLike()
+                    let h = FloatingHeart(point: v.location, tilt: Double.random(in: -18...18))
+                    hearts.append(h)
+                    Haptics.impact(.medium)
+                    Task {
+                        try? await Task.sleep(nanoseconds: 900_000_000)
+                        hearts.removeAll { $0.id == h.id }
+                    }
+                }
+                .exclusively(before: TapGesture(count: 1).onEnded { togglePause() })     // один тап — пауза, два — сердечко
+            )
         }
     }
 
@@ -519,28 +1319,34 @@ struct ReelPage: View {
 
     @ViewBuilder
     private var videoLayer: some View {
-        ZStack {
-            if let v = video {
-                if !ready {
-                    RemoteImage(id: v.thumbID ?? v.id, fill: fill)
-                }
-                if let player {
-                    PlayerLayerView(player: player, gravity: fill ? .resizeAspectFill : .resizeAspect)
-                        .opacity(ready ? 1 : 0)
+        SensitiveGate(sensitive: post.sensitive, id: post.id) {
+            ZStack {
+                if let v = video {
+                    if !ready {
+                        RemoteImage(id: v.thumbID ?? v.id, fill: fill, backdrop: .black)
+                    }
+                    if let player {
+                        PlayerLayerView(player: player, gravity: fill ? .resizeAspectFill : .resizeAspect)
+                            .opacity(ready ? 1 : 0)
+                    }
                 }
             }
         }
     }
 
     private func makePlayer() {
-        guard player == nil, let v = video, let url = ServerConfig.mediaURL(v.id) else { return }
+        // у коллажа плеер — только звук (музыка или звук живого фото), он идёт через все фото
+        guard player == nil, let id = collage ? soundID : video?.id, let url = ServerConfig.mediaURL(id) else { return }
         let item = AVPlayerItem(url: url)
         let p = AVPlayer(playerItem: item)
+        MediaSilence.register(p)               // при блокировке — пауза
         p.actionAtItemEnd = .none
+        p.defaultRate = rateNow                       // play() сразу идёт с выбранной скоростью
         p.automaticallyWaitsToMinimizeStalling = true
         timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { t in
             let d = p.currentItem?.duration.seconds ?? 0
             if d.isFinite, d > 0, !scrubbing { progress = min(1, t.seconds / d) }
+            if active { ReelScrubBus.shared.currentFrac = progress }     // чтобы панель вкладок знала, откуда перематывать
             if !ready, t.seconds > 0.05 { ready = true }
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { _ in
@@ -548,7 +1354,12 @@ struct ReelPage: View {
             if active, !userPaused { p.play() }
         }
         player = p
-        if active, !userPaused { p.play(); startClock() }
+        if active {
+            // новый плеер после возврата во вкладку — сразу ставим на запомненную секунду
+            let resume = ReelResume.shared.time(post.id)
+            if resume > 0 { p.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+            if !userPaused { p.play(); startClock() }
+        }
     }
 
     private func destroyPlayer() {
@@ -566,13 +1377,17 @@ struct ReelPage: View {
         watched = 0
         playingSince = nil
         userPaused = false
-        player?.seek(to: .zero)
+        // продолжаем с той секунды, на которой остановились (ушли в поиск/на «Главную»/снимать видео)
+        let resume = ReelResume.shared.time(post.id)
+        player?.seek(to: CMTime(seconds: resume, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player?.defaultRate = rateNow
         player?.play()
         startClock()
     }
 
     private func deactivate() {
         pauseClock()
+        saveResume()
         let seconds = watched
         watched = 0
         player?.pause()
@@ -580,6 +1395,12 @@ struct ReelPage: View {
             let ratio = duration > 0 ? seconds / duration : 0
             session.taste.reelEnded(post.id, seconds: seconds, ratio: ratio)
         }
+    }
+
+    /// Запомнить текущий момент ролика — чтобы продолжить с него при возвращении
+    private func saveResume() {
+        guard let t = player?.currentTime().seconds, t.isFinite else { return }
+        ReelResume.shared.save(post.id, seconds: t, duration: duration)
     }
 
     private func startClock() { if playingSince == nil { playingSince = Date(); playing = true } }
@@ -590,15 +1411,262 @@ struct ReelPage: View {
         playing = false
     }
 
+    // MARK: Повёрнутый режим (как в TikTok): без кнопок, пока не нажмёшь один раз
+
+    private func toggleControls() {
+        withAnimation(.easeOut(duration: 0.2)) { lsControls.toggle() }
+        if lsControls { scheduleHide() } else { lsHideTask?.cancel() }
+    }
+
+    private func showControlsBriefly() {
+        withAnimation(.easeOut(duration: 0.2)) { lsControls = true }
+        scheduleHide()
+    }
+
+    private func scheduleHide() {
+        lsHideTask?.cancel()
+        lsHideTask = Task {
+            // на паузе надписи и кнопки уходят через 5 с — остаётся чистое видео; во время просмотра — через 3,5 с
+            try? await Task.sleep(nanoseconds: userPaused ? 5_000_000_000 : 3_500_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { if !scrubbing && !lsMenu { withAnimation(.easeOut(duration: 0.25)) { lsControls = false } } }
+        }
+    }
+
+    private func clock(_ t: Double) -> String {
+        let n = max(0, Int(t.rounded()))
+        return String(format: "%02d:%02d", n / 60, n % 60)
+    }
+
+    private var landscapeUI: some View {
+        GeometryReader { geo in
+            let w = geo.size.height, h = geo.size.width          // размеры в повёрнутой системе
+            ZStack {
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Button {
+                            Haptics.impact(.light)
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { mode.on = false }
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 22, weight: .semibold)).foregroundStyle(.white)
+                                .frame(width: 48, height: 48).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        VStack(alignment: .leading, spacing: 8) {
+                            let title = post.text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").first ?? ""
+                            if !title.isEmpty {
+                                Text(title)
+                                    .font(.system(size: 17, weight: .bold)).foregroundStyle(.white).lineLimit(1)
+                                    .shadow(color: .black.opacity(0.5), radius: 3)
+                            }
+                            HStack(spacing: 10) {
+                            Button(action: { exitThen(onAuthor) }) {
+                                HStack(spacing: 8) {
+                                    AvatarView(name: post.author.name, size: 28, avatarID: post.author.avatarID).clipShape(Circle())
+                                    Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
+                                         ? (post.author.username.map { "@" + $0 } ?? "") : post.author.name)
+                                        .font(.system(size: 15, weight: .bold)).foregroundStyle(.white).lineLimit(1)
+                                }
+                                .padding(.leading, 4).padding(.trailing, 12).frame(height: 36)
+                                .background(Color.black.opacity(0.35), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            if reel.state == "none" {
+                                Button(action: onFollow) {
+                                    Text(s.t("Подписаться", "Follow"))
+                                        .font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                                        .padding(.horizontal, 14).frame(height: 36)
+                                        .background(red, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            }
+                        }
+                        .padding(.top, 6)
+                        Spacer()
+                        // три точки: «Не интересно» и остальное
+                        Button {
+                            Haptics.impact(.light)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { lsMenu.toggle() }
+                            scheduleHide()
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
+                                .frame(width: 48, height: 48).contentShape(Rectangle())
+                                .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                    VStack(spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(clock(progress * duration)).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                            Text("/ " + clock(duration)).font(.system(size: 14).monospacedDigit()).foregroundStyle(.white.opacity(0.65))
+                            Spacer()
+                        }
+                        progressBar()
+                        HStack(spacing: 26) {
+                            lsAction(count: short(post.likes), action: { if !post.likedByMe { burst += 1; Haptics.impact(.medium) }; onLike() }) {
+                                StoryHeart(liked: post.likedByMe, burst: burst, size: 24, solidWhenIdle: true)
+                            }
+                            lsAction(count: short(post.comments), action: { toggleSideComments() }) { ReelCommentIcon().frame(width: 19, height: 18) }
+                                .opacity(post.commentsEnabled ? 1 : 0.4)
+                                .disabled(!post.commentsEnabled)
+                            lsAction(count: short(bookmarks.count(for: post)), action: { bookmarks.toggle(post.id); Haptics.impact(.light) }) {
+                                ReelBookmarkShape().fill(saved ? Color(red: 1, green: 0.8, blue: 0.2) : Color(white: 0.93))
+                                    .frame(width: 14, height: 18)
+                            }
+                            Spacer()
+                            // скорость: 1× → 1.5× → 2× → 0.5× → 1×
+                            Button {
+                                Haptics.select()
+                                mode.nextSpeed()
+                                scheduleHide()
+                            } label: {
+                                Text(LandscapeMode.label(mode.speed))
+                                    .font(.system(size: 17, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(mode.speed == 1 ? .white : Color(red: 1, green: 0.8, blue: 0.2))
+                                    .frame(minWidth: 48, minHeight: 40).contentShape(Rectangle())
+                                    .shadow(color: .black.opacity(0.5), radius: 3)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(s.t("Скорость", "Speed"))
+                        }
+                    }
+                }
+                .padding(.leading, topInset + 4).padding(.trailing, 28)       // слева — сторона с вырезом
+                .padding(.vertical, 24)
+
+                Button {
+                    togglePause()
+                    scheduleHide()                    // таймер скрытия заново: на паузе — 5 с
+                } label: {
+                    Image(systemName: userPaused ? "play.fill" : "pause.fill")
+                        .contentTransition(.symbolEffect(.replace))          // пауза ⇄ воспроизведение плавно
+                        .font(.system(size: 26)).foregroundStyle(.white)
+                        .frame(width: 64, height: 64)
+                        .background(Color.black.opacity(0.35), in: Circle())
+                }
+                .buttonStyle(.plain)
+
+                if lsMenu { lsMenuCard.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(.top, 70).padding(.trailing, 24) }
+            }
+            .frame(width: w * videoShare, height: h)                  // кнопки — только поверх видео, не над комментариями
+            .frame(width: w, height: h, alignment: .leading)
+            .opacity(lsControls ? 1 : 0)
+            .allowsHitTesting(lsControls)
+            .rotationEffect(.degrees(90))
+            .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+    }
+
+    /// Меню трёх точек в повёрнутом режиме
+    private var lsMenuCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            lsMenuRow(s.t("Не интересно", "Not interested"), icon: "eye.slash") {
+                lsMenu = false
+                lsControls = false
+                onHide()
+            }
+            Rectangle().fill(.white.opacity(0.12)).frame(height: 0.5)
+            lsMenuRow(s.t("Поделиться", "Share"), icon: "arrowshape.turn.up.right") {
+                lsMenu = false
+                exitThen(onShare)
+            }
+        }
+        .frame(width: 230)
+        .background(Color(white: 0.13).opacity(0.96), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+        .transition(.scale(scale: 0.85, anchor: .topTrailing).combined(with: .opacity))
+    }
+
+    private func lsMenuRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.easeOut(duration: 0.18)) { action() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 17, weight: .semibold)).frame(width: 24)
+                Text(title).font(.system(size: 16, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).frame(height: 50)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Комментарии сбоку: видео уменьшается до левой половины, справа — список. Писать комментарий удобнее в обычном
+    /// положении (клавиатура системная и не поворачивается), поэтому поле ввода возвращает экран и открывает обычную панель
+    private func toggleSideComments() {
+        Haptics.impact(.light)
+        lsMenu = false
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.88)) {
+            mode.commentsOpen.toggle()
+            lsControls = false
+        }
+    }
+
+    private var sideCommentsPanel: some View {
+        GeometryReader { geo in
+            let w = geo.size.height, h = geo.size.width          // размеры в повёрнутой системе
+            CommentsSheet(post: post, vm: session.feed,
+                          onClose: { toggleSideComments() },
+                          onWriteElsewhere: {
+                              withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) { mode.commentsOpen = false }
+                              exitThen(onComments)
+                          })
+                .frame(width: w * 0.5, height: h)
+                .background(theme.sheet)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, bottomLeadingRadius: 20, style: .continuous))
+                .frame(width: w, height: h, alignment: .trailing)
+                .rotationEffect(.degrees(90))
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+    }
+
+    /// Комментарии, профиль и т.п. открываются в обычном положении: сначала возвращаем экран, потом открываем нужное
+    private func exitThen(_ action: @escaping () -> Void) {
+        Haptics.impact(.light)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { mode.on = false }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 380_000_000)
+            action()
+        }
+    }
+
+    private func lsAction<Icon: View>(count: String, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                icon()
+                Text(count).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+            }
+            .frame(minHeight: 40).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Отпустили палец после ускорения — обычная скорость, лента снова листается
+    private func endFast() {
+        guard fast else { return }
+        fast = false
+        fastOrigin = nil
+        fastRate = 2
+        if !userPaused { player?.rate = rateNow }
+    }
+
     private func togglePause() {
-        guard let player else { return }
+        guard player != nil || collage else { return }
         if userPaused {
             userPaused = false
-            player.play()
+            player?.play()
             startClock()
         } else {
             userPaused = true
-            player.pause()
+            player?.pause()
             pauseClock()
         }
         Haptics.impact(.light)
@@ -613,14 +1681,26 @@ struct ReelPage: View {
         captionAttributed
     }
 
+    /// Ссылка-жест для #хэштега: слово без решётки и хвостовой пунктуации, схема orbita-tag:
+    static func tagLink(_ word: String) -> URL? {
+        let tag = String(word.dropFirst().prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+        guard tag.count >= 1, let enc = tag.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return URL(string: "orbita-tag:" + enc)
+    }
+
     private var captionAttributed: Text {
         let full = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cut = !expanded && full.count > collapsedLimit
-        let shown = cut ? String(full.prefix(collapsedLimit)).trimmingCharacters(in: .whitespaces) + "… " : full
+        let multiline = full.contains("\n")
+        let cut = !expanded && (full.count > collapsedLimit || multiline)
+        let firstLine = multiline ? String(full.prefix { $0 != "\n" }) : full
+        let shown = cut ? String(firstLine.prefix(collapsedLimit)).trimmingCharacters(in: .whitespaces) + "… " : full
         var result = AttributedString()
         for (i, word) in shown.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
             var piece = AttributedString((i == 0 ? "" : " ") + String(word))
-            if word.hasPrefix("#") || word.hasPrefix("@") {
+            if word.hasPrefix("#"), let tag = Self.tagLink(String(word)) {
+                piece.font = .system(size: 16, weight: .bold)
+                piece.link = tag
+            } else if word.hasPrefix("@") {
                 piece.font = .system(size: 16, weight: .bold)
             } else if let url = Linkify.url(in: String(word)) {
                 piece.link = url
@@ -637,19 +1717,138 @@ struct ReelPage: View {
         return Text(result)
     }
 
+    // MARK: Кто сделал репост
+
+    private struct Reposter: Identifiable { let id: String; let name: String; let avatarID: String?; let isMe: Bool; let author: Author? }
+
+    /// Я (если репостнул), автор репост-копии и друзья, которые репостнули оригинал — без повторов
+    private var reposters: [Reposter] {
+        var list: [Reposter] = []
+        if post.repostedByMe || (post.isRepost && post.isMine) {
+            let me = session.profile.profile
+            list.append(Reposter(id: "me", name: me?.name ?? "", avatarID: me?.avatarID, isMe: true, author: nil))
+        }
+        if post.isRepost, !post.isMine {
+            list.append(Reposter(id: post.author.id, name: post.author.name, avatarID: post.author.avatarID, isMe: false, author: post.author))
+        }
+        for f in post.repostFriends where !list.contains(where: { $0.id == f.id }) {
+            list.append(Reposter(id: f.id, name: f.name, avatarID: f.avatarID, isMe: false, author: f))
+        }
+        return list
+    }
+
+    @ViewBuilder
+    private var repostBadge: some View {
+        let list = reposters
+        if let first = list.first {
+            let firstName = first.name.components(separatedBy: " ").first ?? first.name
+            let others = list.count - 1
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    guard others > 0 else { return }
+                    Haptics.select()
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { repostsOpen.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        HStack(spacing: -7) {
+                            ForEach(Array(list.prefix(3).enumerated()), id: \.element.id) { i, r in
+                                AvatarView(name: r.name, size: 20, avatarID: r.avatarID).clipShape(Circle())
+                                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                                    .zIndex(Double(3 - i))
+                            }
+                        }
+                        Text(badgeTitle(first: first, firstName: firstName, others: others))
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(.black).lineLimit(1)
+                        if others > 0 {
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.black.opacity(0.6))
+                                .rotationEffect(.degrees(repostsOpen ? 180 : 0))
+                        }
+                    }
+                    .padding(.leading, 5).padding(.trailing, 10).frame(height: 28)
+                    .background(Color.white, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                if repostsOpen, others > 0 {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(list) { r in
+                            Button { if let a = r.author { onOpenUser(a) } } label: {
+                                HStack(spacing: 10) {
+                                    AvatarView(name: r.name, size: 28, avatarID: r.avatarID).clipShape(Circle())
+                                    Text(r.isMe ? s.t("Вы", "You") : r.name)
+                                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12).frame(height: 40).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(r.author == nil)
+                        }
+                    }
+                    .frame(width: 230)
+                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    .transition(.scale(scale: 0.9, anchor: .topLeading).combined(with: .opacity))
+                }
+            }
+            .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
+            .animation(.spring(response: 0.34, dampingFraction: 0.8), value: list.count)
+        }
+    }
+
+    private func badgeTitle(first: Reposter, firstName: String, others: Int) -> String {
+        if others == 0 {
+            return first.isMe ? s.t("Вы сделали репост", "You reposted") : s.t("\(firstName) сделал(а) репост", "\(firstName) reposted")
+        }
+        let who = first.isMe ? s.t("Вы", "You") : firstName
+        return s.t("\(who) и ещё \(others) сделали репост", "\(who) and \(others) more reposted")
+    }
+
     private var caption: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Button(action: onAuthor) {
-                Text(post.author.username.map { "@" + $0 } ?? post.author.name)
-                    .font(.system(size: 19, weight: .bold)).foregroundStyle(.white)
-                    .lineLimit(1)
+            repostBadge
+            if let duet = post.duet {
+                // дуэт: нажатие — к оригинальному шортсу
+                Button {
+                    Haptics.impact(.light)
+                    Task {
+                        if let original = try? await session.feedRepo.post(id: duet.postID) { session.reelRequest = original }
+                    }
+                } label: {
+                    Label(s.t("Дуэт с ", "Duet with ") + (duet.author.username.map { "@" + $0 } ?? duet.author.name),
+                          systemImage: "rectangle.split.2x1")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 10).frame(height: 26)
+                        .background(Color.black.opacity(0.35), in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            HStack(spacing: 8) {
+                Button(action: onAuthor) {
+                    // как в TikTok: имя человека; нет имени — @username
+                    Text(post.author.name.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? (post.author.username.map { "@" + $0 } ?? "")
+                         : post.author.name)
+                        .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                if collage {
+                    // фото-пост: пометка «Фото» рядом с ником
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.on.square.fill").font(.system(size: 10, weight: .bold))
+                        Text(s.t("Фото", "Photo")).font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7).frame(height: 22)
+                    .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+            }
             if let music = post.music {
                 Button(action: onMusic) {
                     HStack(spacing: 5) {
                         Image(systemName: "music.note").font(.system(size: 12, weight: .bold))
-                        Text(music.display).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                        Text(music.display).font(.system(size: 13, weight: .medium)).lineLimit(1).opacity(0.9)
                     }
                     .foregroundStyle(.white)
                 }
@@ -657,15 +1856,35 @@ struct ReelPage: View {
             }
             if !post.text.isEmpty {
                 captionText
-                    .font(.system(size: 16)).foregroundColor(.white)
+                    .font(.system(size: 15)).foregroundColor(.white.opacity(0.95))
                     .tint(.white)
                     .lineSpacing(2)
-                    .lineLimit(expanded ? 14 : 3)
+                    .lineLimit(expanded ? 14 : 2)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .environment(\.openURL, OpenURLAction { url in
+                        if url.scheme == "orbita-tag" {
+                            let enc = String(url.absoluteString.dropFirst("orbita-tag:".count))
+                            onOpenTag(enc.removingPercentEncoding ?? enc)
+                            return .handled
+                        }
+                        systemOpenURL(url)
+                        return .handled
+                    })
                     .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() } }
+                    .onTapGesture {
+                        // длинная подпись (или много строк) — «ещё» открывает страницу поста целиком; короткая — просто разворачивается
+                        let full = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if full.count > collapsedLimit || full.contains("\n") {
+                            Haptics.impact(.light)
+                            onOpenDetail()
+                        } else {
+                            withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
+                        }
+                    }
             }
+            // пометки («Содержит контент, созданный ИИ», место, «Реклама»…) — под всем текстом: ником и описанием, как в TikTok
+            if !post.labels.isEmpty || post.ad != nil { PostLabelsRow(labels: post.labels, ad: post.ad).padding(.top, 2) }
         }
         .shadow(color: .black.opacity(0.55), radius: 4, y: 1)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -677,13 +1896,13 @@ struct ReelPage: View {
     private var saved: Bool { bookmarks.has(post.id) }
 
     private var rail: some View {
-        VStack(spacing: 13) {
+        VStack(spacing: 5) {
             avatarButton
             railButton(count: short(post.likes), action: { if !post.likedByMe { burst += 1; Haptics.impact(.medium) }; onLike() }) {
-                StoryHeart(liked: post.likedByMe, burst: burst, size: 40, solidWhenIdle: true)
+                StoryHeart(liked: post.likedByMe, burst: burst, size: 26, solidWhenIdle: true)
             }
             railButton(count: short(post.comments), action: onComments) {
-                ReelCommentIcon().frame(width: 32, height: 30)
+                ReelCommentIcon().frame(width: 23, height: 22)
             }
             .opacity(post.commentsEnabled ? 1 : 0.4)
             .disabled(!post.commentsEnabled)
@@ -694,22 +1913,30 @@ struct ReelPage: View {
                     .fill(saved ? Color(red: 1, green: 0.8, blue: 0.2) : Color(white: 0.93))
                     .overlay(ReelBookmarkShape().stroke(saved ? Color(red: 1, green: 0.8, blue: 0.2) : Color(white: 0.93),
                                                         style: StrokeStyle(lineWidth: 2, lineJoin: .round)))
-                    .frame(width: 25, height: 31)
+                    .frame(width: 17, height: 22)
                     .scaleEffect(saved ? 1.08 : 1)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: saved)
             }
-            if !post.isMine {
-                railButton(count: short(post.reposts), action: { Haptics.impact(.light); onRepost() }) {
-                    Image(systemName: "arrow.2.squarepath").font(.system(size: 29, weight: .bold))
+            do {
+                railButton(count: short(post.reposts), tint: post.repostedByMe ? Color(red: 0.25, green: 0.88, blue: 0.62) : .white, action: {
+                    if !post.allowRepost && !post.isMine && !post.repostedByMe { Haptics.impact(.rigid); return }
+                    if post.repostedByMe { Haptics.impact(.light) } else { repostSpin += 1; Haptics.impact(.medium) }
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) { onRepost() }
+                }) {
+                    Image(systemName: "arrow.2.squarepath").font(.system(size: 21, weight: .bold))
+                        .opacity(post.allowRepost || post.isMine ? 1 : 0.35)
                         .foregroundStyle(post.repostedByMe ? Color(red: 0.25, green: 0.88, blue: 0.62) : Color(white: 0.93))
                         .scaleEffect(post.repostedByMe ? 1.08 : 1)
+                        .rotationEffect(.degrees(Double(repostSpin) * 360))
+                        .animation(.spring(response: 0.6, dampingFraction: 0.6), value: repostSpin)
                         .animation(.spring(response: 0.3, dampingFraction: 0.5), value: post.repostedByMe)
+                        .overlay { RepostRipple(trigger: repostSpin) }
                 }
             }
             railButton(count: s.t("Отправить", "Share"), action: onShare) {
                 ReelShareShape().fill(Color(white: 0.93))
                     .overlay(ReelShareShape().stroke(Color(white: 0.93), style: StrokeStyle(lineWidth: 2, lineJoin: .round)))
-                    .frame(width: 32, height: 28)
+                    .frame(width: 24, height: 21)
             }
             if !post.isMine {
                 Menu {
@@ -717,16 +1944,17 @@ struct ReelPage: View {
                         Label(s.t("Не интересует", "Not interested"), systemImage: "hand.thumbsdown")
                     }
                 } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 22, weight: .bold)).foregroundStyle(Color(white: 0.93))
+                    Image(systemName: "ellipsis").font(.system(size: 14, weight: .bold)).foregroundStyle(Color(white: 0.93))
                         .frame(width: 44, height: 30).contentShape(Rectangle())
                 }
             }
-            Button(action: onMusic) { musicDisc.frame(width: 48, height: 52).contentShape(Rectangle()) }
+            Button(action: onMusic) { musicDisc.scaleEffect(0.7).frame(width: 34, height: 36).contentShape(Rectangle()) }
                 .buttonStyle(.plain)
                 .disabled(post.music == nil)
         }
         .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
         .padding(.bottom, 2)
+        .scaleEffect(1.18, anchor: .bottomTrailing)      // значки сами стали крупнее (одна сетка 30×30) — общий масштаб меньше
     }
 
     /// Вращающийся диск в углу: обложка/значок музыки, если она есть, иначе аватарка автора
@@ -754,40 +1982,53 @@ struct ReelPage: View {
     private var avatarButton: some View {
         ZStack(alignment: .bottom) {
             Button(action: onAuthor) {
-                AvatarView(name: post.author.name, size: 52, avatarID: post.author.avatarID).clipShape(Circle())
-                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                AvatarView(name: post.author.name, size: 38, avatarID: post.author.avatarID).clipShape(Circle())
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1.2))
             }
             .buttonStyle(.plain)
-            if reel.state == "none" || reel.state == "incoming" {
+            .contextMenu {
+                if reel.state == "following" {
+                    Button(role: .destructive, action: onUnfollow) {
+                        Label(lang == .ru ? "Отписаться" : "Unfollow", systemImage: "person.badge.minus")
+                    }
+                }
+            }
+            if reel.state == "none" {
                 Button(action: onFollow) {
-                    Image(systemName: "plus").font(.system(size: 12, weight: .heavy)).foregroundStyle(.white)
-                        .frame(width: 23, height: 23).background(red, in: Circle())
+                    Image(systemName: "plus").font(.system(size: 9, weight: .heavy)).foregroundStyle(.white)
+                        .frame(width: 17, height: 17).background(red, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .offset(y: 11)
+                .offset(y: 8)
                 .transition(.scale.combined(with: .opacity))
-            } else if reel.state == "outgoing" {
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .heavy)).foregroundStyle(red)
-                    .frame(width: 23, height: 23).background(Color.white, in: Circle())
-                    .offset(y: 11)
+            } else if reel.state == "following" && showCheck {
+                Image(systemName: "checkmark").font(.system(size: 9, weight: .heavy)).foregroundStyle(red)
+                    .frame(width: 17, height: 17).background(Color.white, in: Circle())
+                    .offset(y: 8)
             }
         }
         .padding(.bottom, 10)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: reel.state)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: showCheck)
     }
 
-    private func railButton<Icon: View>(count: String, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) -> some View {
+    private func railButton<Icon: View>(count: String, tint: Color = .white, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) -> some View {
         Button(action: action) {
-            VStack(spacing: 4) {
-                icon().frame(height: 40)
-                Text(count).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+            // все кнопки одного размера: значок в квадрате 30×30, число — одним шрифтом под ним
+            VStack(spacing: 3) {
+                icon().frame(width: 30, height: 30)
+                    .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                Text(count).font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(tint)
                     .contentTransition(.numericText())
+                    .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
                     .lineLimit(1).minimumScaleFactor(0.8)
             }
-            .frame(width: 62)
+            .frame(width: 42)
+            .padding(.horizontal, 8).padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(RailPress())
+        .padding(.horizontal, -8).padding(.vertical, -6)
     }
 
     /// 1 234 → «1,2 тыс.», как в TikTok
@@ -803,18 +2044,24 @@ struct ReelPage: View {
 
     // MARK: Полоса прогресса: тонкая линия с точкой, при касании толстеет
 
-    private var progressBar: some View {
+    /// hitHeight — высота зоны перемотки: в портрете делаем её большой, чтобы «промазать» по тонкой полоске
+    /// было почти невозможно (как в TikTok). Сама полоса остаётся тонкой и стоит внизу зоны, у панели вкладок.
+    private func progressBar(hitHeight: CGFloat = 26) -> some View {
         GeometryReader { geo in
             let w = geo.size.width
             let x = max(0, min(w, w * progress))
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.28)).frame(height: scrubbing ? 5 : 2.5)
-                Capsule().fill(.white).frame(width: max(5, x), height: scrubbing ? 5 : 2.5)
-                Circle().fill(.white).frame(width: scrubbing ? 13 : 7, height: scrubbing ? 13 : 7)
-                    .shadow(color: .black.opacity(0.35), radius: 2)
-                    .offset(x: max(0, x - (scrubbing ? 6.5 : 3.5)))
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.28)).frame(height: scrubbing ? 5 : 2.5)
+                    Capsule().fill(.white).frame(width: max(5, x), height: scrubbing ? 5 : 2.5)
+                    Circle().fill(.white).frame(width: scrubbing ? 13 : 7, height: scrubbing ? 13 : 7)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                        .offset(x: max(0, x - (scrubbing ? 6.5 : 3.5)))
+                }
+                .frame(height: 13)
             }
-            .frame(height: 26)
+            .frame(height: hitHeight)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { v in
@@ -828,7 +2075,7 @@ struct ReelPage: View {
                 }
                 .onEnded { _ in scrubbing = false })
         }
-        .frame(height: 26)
+        .frame(height: hitHeight)
         .animation(.easeOut(duration: 0.15), value: scrubbing)
     }
 }
@@ -846,18 +2093,34 @@ private struct RailPress: ButtonStyle {
 
 struct TapHeart: View {
     let tilt: Double
+    var size: CGFloat = 86
     @State private var go = false
 
+    private static let sparks: [(dx: CGFloat, dy: CGFloat, s: CGFloat)] = [
+        (-0.9, -0.5, 0.22), (0.95, -0.4, 0.2), (-0.6, -1.0, 0.16), (0.55, -1.05, 0.18), (0, -1.25, 0.14), (-1.05, 0.1, 0.15), (1.0, 0.15, 0.16)
+    ]
+
     var body: some View {
-        Image(systemName: "heart.fill")
-            .font(.system(size: 86))
-            .foregroundStyle(LinearGradient(colors: [Color(red: 1, green: 0.4, blue: 0.55), Color(red: 1, green: 0.1, blue: 0.3)],
-                                            startPoint: .top, endPoint: .bottom))
-            .shadow(color: .red.opacity(0.5), radius: 14)
-            .rotationEffect(.degrees(tilt))
-            .scaleEffect(go ? 1.0 : 0.3)
-            .offset(y: go ? -50 : 0)
-            .opacity(go ? 0 : 1)
+        ZStack {
+            // маленькие сердечки разлетаются из места нажатия
+            ForEach(Array(Self.sparks.enumerated()), id: \.offset) { _, sp in
+                Image(systemName: "heart.fill")
+                    .font(.system(size: size * sp.s))
+                    .foregroundStyle(Color(red: 1, green: 0.3, blue: 0.45))
+                    .offset(x: go ? sp.dx * size * 0.9 : 0, y: go ? sp.dy * size * 0.9 : 0)
+                    .scaleEffect(go ? 1 : 0.2)
+                    .opacity(go ? 0 : 0.95)
+            }
+            Image(systemName: "heart.fill")
+                .font(.system(size: size))
+                .foregroundStyle(LinearGradient(colors: [Color(red: 1, green: 0.4, blue: 0.55), Color(red: 1, green: 0.1, blue: 0.3)],
+                                                startPoint: .top, endPoint: .bottom))
+                .shadow(color: .red.opacity(0.5), radius: 14)
+                .rotationEffect(.degrees(tilt))
+                .scaleEffect(go ? 1.0 : 0.3)
+                .offset(y: go ? -size * 0.58 : 0)
+                .opacity(go ? 0 : 1)
+        }
             .onAppear {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.55)) { go = false }
                 withAnimation(.easeOut(duration: 0.8).delay(0.12)) { go = true }
@@ -934,5 +2197,227 @@ struct ReelShareShape: Shape {
         p.addCurve(to: pt(0.62, 0.23), control1: pt(0.06, 0.46), control2: pt(0.30, 0.24))
         p.closeSubpath()
         return p
+    }
+}
+
+
+/// Анимация репоста: расходящееся кольцо и стайка стрелок вокруг кнопки
+struct RepostRipple: View {
+    let trigger: Int
+    @State private var t: CGFloat = 1
+    private let green = Color(red: 0.25, green: 0.88, blue: 0.62)
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(green, lineWidth: 1 + 3 * (1 - t))
+                .frame(width: 28, height: 28)
+                .scaleEffect(0.5 + 1.5 * t)
+                .opacity(Double(1 - t))
+            ForEach(0..<7, id: \.self) { i in
+                let angle = Double(i) / 7 * 2 * Double.pi
+                Image(systemName: "arrow.2.squarepath")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(green)
+                    .rotationEffect(.degrees(Double(i) * 51 + Double(t) * 200))
+                    .offset(x: CGFloat(cos(angle)) * 48 * t, y: CGFloat(sin(angle)) * 48 * t)
+                    .scaleEffect(1 - 0.4 * t)
+                    .opacity(Double(1 - t))
+            }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: trigger) { _, _ in
+            t = 0
+            withAnimation(.easeOut(duration: 0.75)) { t = 1 }
+        }
+    }
+}
+
+
+/// Общий режим «на весь экран» для горизонтальных шортсов
+final class LandscapeMode: ObservableObject {
+    static let shared = LandscapeMode()
+    /// Вышли из повёрнутого режима — комментарии сбоку закрываются, скорость возвращается к обычной
+    @Published var on = false { didSet { if !on { commentsOpen = false; speed = 1 } } }
+    /// Комментарии открыты рядом с видео (половина экрана — видео, половина — комментарии)
+    @Published var commentsOpen = false
+    /// Скорость в повёрнутом режиме: 1 → 1.5 → 2 → 0.5 → 1
+    @Published var speed: Float = 1
+
+    func nextSpeed() {
+        switch speed {
+        case 1: speed = 1.5
+        case 1.5: speed = 2
+        case 2: speed = 0.5
+        default: speed = 1
+        }
+    }
+
+    static func label(_ v: Float) -> String {
+        (v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)) + "×"
+    }
+}
+
+/// Живое фото (или короткое видео) в коллаже шортса: без звука и по кругу — звук коллажа идёт отдельно и не обрывается
+struct LiveLoopView: View {
+    let item: MediaItem
+    let playing: Bool
+    @State private var player: AVPlayer?
+    @State private var loop: NSObjectProtocol?
+
+    var body: some View {
+        ZStack {
+            RemoteImage(id: item.thumbID ?? item.id, fill: false, backdrop: .black)
+            if let player {
+                PlayerLayerView(player: player, gravity: .resizeAspect)
+            }
+        }
+        .onAppear {
+            guard player == nil, let url = ServerConfig.mediaURL(item.id) else { return }
+            let p = AVPlayer(url: url)
+            p.isMuted = true
+            p.actionAtItemEnd = .none
+            MediaSilence.register(p)
+            loop = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: p.currentItem,
+                                                          queue: .main) { _ in p.seek(to: .zero); p.play() }
+            player = p
+            if playing { p.play() }
+        }
+        .onChange(of: playing) { _, on in
+            if on { player?.seek(to: .zero); player?.play() } else { player?.pause() }
+        }
+        .onDisappear {
+            player?.pause()
+            if let loop { NotificationCenter.default.removeObserver(loop) }
+            loop = nil
+            player = nil
+        }
+    }
+}
+
+// MARK: - Потянуть вниз на первом ролике — обновить ленту
+
+/// Следит за оттяжкой ленты выше первого ролика (iOS 18+): дотянул до порога и отпустил — обновление
+struct ReelPullToRefresh: ViewModifier {
+    static let threshold: CGFloat = 90
+    let enabled: Bool
+    @Binding var pull: CGFloat
+    let onRefresh: () -> Void
+    @State private var armed = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                // только оттяжка над первым роликом, шагами по 4 pt: при обычном листании значение всё время 0 —
+                // экран не пересчитывается на каждом кадре прокрутки (иначе лента начинает «залипать»)
+                .onScrollGeometryChange(for: Int.self) { g in
+                    guard enabled else { return 0 }
+                    let over = -(g.contentOffset.y + g.contentInsets.top)
+                    return over > 2 ? Int(over / 4) : 0
+                } action: { _, step in
+                    let p = CGFloat(step) * 4
+                    if p != pull { pull = p }
+                    let now = p >= Self.threshold
+                    if now != armed { armed = now; if now { Haptics.select() } }     // дотянул — щелчок; вернул назад — отмена
+                }
+                .onScrollPhaseChange { old, new in
+                    // отпустили палец: дотянули до конца — обновляем ленту
+                    guard old == .interacting, new != .interacting else { return }
+                    if armed, enabled { onRefresh() }
+                    armed = false
+                }
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - Касания по видео шортса (UIKit)
+
+/// Тап, двойной тап и удержание по видео. Сделано системными распознавателями: в отличие от жестов SwiftUI они
+/// не забирают касание у ленты — свайп по видео листает шортсы, а тапы и удержание работают как раньше
+struct ReelTouchLayer: UIViewRepresentable {
+    var onTap: () -> Void
+    var onDoubleTap: (CGPoint) -> Void
+    var onHoldBegan: (CGPoint) -> Void
+    var onHoldMoved: (CGPoint) -> Void
+    var onHoldEnded: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        let double = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.double(_:)))
+        double.numberOfTapsRequired = 2
+        let single = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.single(_:)))
+        single.require(toFail: double)
+        let hold = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.hold(_:)))
+        hold.minimumPressDuration = 0.35
+        hold.allowableMovement = 10           // сдвинул палец раньше — это свайп, его забирает лента
+        for g in [double, single, hold] as [UIGestureRecognizer] {
+            g.cancelsTouchesInView = false
+            g.delegate = context.coordinator
+            v.addGestureRecognizer(g)
+        }
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ReelTouchLayer
+        init(parent: ReelTouchLayer) { self.parent = parent }
+
+        @objc func single(_ g: UITapGestureRecognizer) { parent.onTap() }
+        @objc func double(_ g: UITapGestureRecognizer) { parent.onDoubleTap(g.location(in: g.view)) }
+        @objc func hold(_ g: UILongPressGestureRecognizer) {
+            let p = g.location(in: g.view)
+            switch g.state {
+            case .began: parent.onHoldBegan(p)
+            case .changed: parent.onHoldMoved(p)
+            case .ended, .cancelled, .failed: parent.onHoldEnded()
+            default: break
+            }
+        }
+
+        // с прокруткой ленты и другими жестами — одновременно, ничего не блокируем
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+
+// MARK: - Точечки коллажа: где ты сейчас; зажал и ведёшь — листаются фото
+
+struct CollageDots: View {
+    let count: Int
+    @Binding var page: Int
+    var hitHeight: CGFloat = 40
+    @State private var holding = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            HStack(spacing: holding ? 7 : 5) {
+                ForEach(0..<max(count, 1), id: \.self) { i in
+                    Capsule().fill(Color.white.opacity(i == page ? 1 : 0.45))
+                        .frame(width: i == page ? (holding ? 20 : 14) : (holding ? 8 : 6), height: holding ? 8 : 6)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                }
+            }
+            .opacity(count > 1 ? 1 : 0)
+            .frame(width: w, height: hitHeight)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    guard count > 1 else { return }
+                    if !holding { withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { holding = true } }
+                    // вся ширина полосы делится на столько частей, сколько фото: палец над частью — это фото
+                    let i = min(count - 1, max(0, Int(v.location.x / max(w, 1) * CGFloat(count))))
+                    if i != page { withAnimation(.easeOut(duration: 0.22)) { page = i } }
+                }
+                .onEnded { _ in withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { holding = false } })
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: page)
+        }
+        .frame(height: hitHeight)
     }
 }

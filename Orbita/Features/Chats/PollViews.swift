@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Опрос внутри пузыря
 
@@ -59,6 +60,17 @@ struct PollBlock: View {
                     .buttonStyle(.plain)
                 }
             }
+            if info.quiz, showResults, let text = info.explanation, !text.isEmpty {
+                // пояснение к правильному ответу — после ответа
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lightbulb.fill").font(.system(size: 13)).foregroundStyle(.yellow)
+                    Text(text).font(.system(size: 13)).foregroundStyle(fg).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            }
             if info.mine && !info.closed {
                 Button { close() } label: {
                     Text(s.t("Завершить опрос", "Stop poll"))
@@ -78,11 +90,15 @@ struct PollBlock: View {
             PollVotersSheet(question: question, poll: info)
                 .environment(\.theme, theme).environment(\.lang, lang)
                 .presentationDetents([.medium, .large])
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 
     private var subtitle: String {
+        if info.quiz {
+            if info.closed { return s.t("Викторина завершена", "Quiz closed") }
+            return info.anonymous ? s.t("Анонимная викторина", "Anonymous quiz") : s.t("Викторина", "Quiz")
+        }
         if info.closed { return s.t("Опрос завершён", "Poll closed") }
         let kind = info.anonymous ? s.t("Анонимный опрос", "Anonymous poll") : s.t("Публичный опрос", "Public poll")
         return info.multiple ? kind + " · " + s.t("несколько ответов", "multiple answers") : kind
@@ -100,7 +116,12 @@ struct PollBlock: View {
             HStack(spacing: 8) {
                 ZStack {
                     Circle().stroke(fg2, lineWidth: 1.5).frame(width: 20, height: 20)
-                    if o.mine {
+                    if info.quiz, showResults, let correct = info.correct, o.id == correct || o.mine {
+                        // викторина: правильный — зелёная галочка, неверный выбранный — красный крестик
+                        Circle().fill(o.id == correct ? Color.green : theme.danger).frame(width: 20, height: 20)
+                        Image(systemName: o.id == correct ? "checkmark" : "xmark").font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    } else if o.mine {
                         Circle().fill(tint).frame(width: 20, height: 20)
                         Image(systemName: "checkmark").font(.system(size: 10, weight: .bold))
                             .foregroundStyle(mine ? theme.accentColor : Color.white)
@@ -131,6 +152,7 @@ struct PollBlock: View {
     }
 
     private func vote(_ o: PollOption) {
+        if info.quiz && voted { return }                       // в викторине ответ один и навсегда
         var set = Set(info.options.filter(\.mine).map(\.id))
         if info.multiple {
             if set.contains(o.id) { set.remove(o.id) } else { set.insert(o.id) }
@@ -143,7 +165,8 @@ struct PollBlock: View {
             defer { busy = false }
             do {
                 let new = try await session.extras.vote(messageID: messageID, options: Array(set).sorted())
-                info = new
+                if new.quiz, let c = new.correct { Haptics.notify(set.contains(c) ? .success : .error) }
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { info = new }
                 onChanged(new)
                 errorText = nil
             } catch {
@@ -230,6 +253,9 @@ struct PollCreateSheet: View {
     @State private var options = ["", ""]
     @State private var anonymous = true
     @State private var multiple = false
+    @State private var quiz = false
+    @State private var correct: Int?
+    @State private var explanation = ""
     @State private var sending = false
     @State private var errorText: String?
 
@@ -239,6 +265,13 @@ struct PollCreateSheet: View {
     }
     private var canSend: Bool {
         !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && cleaned.count >= 2 && !sending
+            && (!quiz || correctIndex != nil)
+    }
+    /// Номер правильного ответа среди непустых вариантов
+    private var correctIndex: Int? {
+        guard let correct, options.indices.contains(correct),
+              !options[correct].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return options[..<correct].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
     }
 
     var body: some View {
@@ -246,7 +279,7 @@ struct PollCreateSheet: View {
             HStack {
                 Button(s.cancel) { dismiss() }.foregroundStyle(theme.accentColor)
                 Spacer()
-                Text(s.t("Новый опрос", "New poll")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                Text(quiz ? s.t("Новая викторина", "New quiz") : s.t("Новый опрос", "New poll")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
                 Spacer()
                 Button { send() } label: {
                     if sending { ProgressView() } else {
@@ -269,10 +302,21 @@ struct PollCreateSheet: View {
                     VStack(spacing: 8) {
                         ForEach(options.indices, id: \.self) { i in
                             HStack(spacing: 8) {
+                                if quiz {
+                                    // викторина: отметьте правильный ответ
+                                    Button { Haptics.select(); correct = i } label: {
+                                        Image(systemName: correct == i ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 22)).foregroundStyle(correct == i ? Color.green : theme.textTertiary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                                 TextField(s.t("Вариант \(i + 1)", "Option \(i + 1)"), text: $options[i])
                                     .padding(14).card(theme, radius: 16)
                                 if options.count > 2 {
-                                    Button { options.remove(at: i) } label: {
+                                    Button {
+                                        options.remove(at: i)
+                                        if let c = correct { correct = c == i ? nil : (c > i ? c - 1 : c) }
+                                    } label: {
                                         Image(systemName: "minus.circle.fill").font(.system(size: 22))
                                             .foregroundStyle(theme.danger)
                                     }
@@ -293,12 +337,29 @@ struct PollCreateSheet: View {
                     VStack(spacing: 0) {
                         Toggle(s.t("Анонимное голосование", "Anonymous voting"), isOn: $anonymous)
                             .padding(.horizontal, 16).padding(.vertical, 10)
+                        if !quiz {
+                            Divider()
+                            Toggle(s.t("Несколько ответов", "Multiple answers"), isOn: $multiple)
+                                .padding(.horizontal, 16).padding(.vertical, 10)
+                        }
                         Divider()
-                        Toggle(s.t("Несколько ответов", "Multiple answers"), isOn: $multiple)
+                        Toggle(s.t("Режим викторины", "Quiz mode"), isOn: $quiz.animation())
                             .padding(.horizontal, 16).padding(.vertical, 10)
                     }
                     .tint(theme.accentColor)
                     .card(theme, radius: 16)
+
+                    if quiz {
+                        Text(correctIndex == nil ? s.t("Отметьте правильный ответ кружком слева от варианта.",
+                                                       "Mark the correct answer with the circle next to it.")
+                                                 : s.t("Один ответ, изменить нельзя. Правильный вариант увидят после ответа.",
+                                                       "One answer, no changes. The correct option is shown after answering."))
+                            .font(.system(size: 13)).foregroundStyle(theme.textSecondary).padding(.horizontal, 4)
+                        label(s.t("Пояснение (необязательно)", "Explanation (optional)"))
+                        TextField(s.t("Покажется после ответа", "Shown after answering"), text: $explanation, axis: .vertical)
+                            .lineLimit(1...4)
+                            .padding(14).card(theme, radius: 16)
+                    }
 
                     if let errorText {
                         Text(errorText).font(.system(size: 13)).foregroundStyle(theme.danger)
@@ -321,7 +382,9 @@ struct PollCreateSheet: View {
             do {
                 try await session.extras.sendPoll(peerID: peerID,
                                                   question: question.trimmingCharacters(in: .whitespacesAndNewlines),
-                                                  options: cleaned, multiple: multiple, anonymous: anonymous)
+                                                  options: cleaned, multiple: quiz ? false : multiple, anonymous: anonymous,
+                                                  quizCorrect: quiz ? correctIndex : nil,
+                                                  explanation: String(explanation.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)))
                 Haptics.notify(.success)
                 onSent()
                 dismiss()

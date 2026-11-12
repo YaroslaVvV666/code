@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Открыть профиль по id (общий способ для чатов, групп, участников)
 
@@ -13,7 +14,7 @@ private struct ProfileSheetModifier: ViewModifier {
             PublicProfileSheet(source: .id(route.id))
                 .environmentObject(session).environmentObject(flow)
                 .preferredColorScheme(theme.dark ? .dark : .light)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }
@@ -103,7 +104,7 @@ struct MessageInfoSheet: View {
                     AvatarView(name: e.user.name, size: 38, avatarID: e.user.avatarID).clipShape(Circle())
                     Text(e.user.name).font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                     Spacer()
-                    if showEmoji, let emoji = e.emoji { Text(emoji).font(.system(size: 20)) }
+                    if showEmoji, let emoji = e.emoji { ReactionGlyph(emoji: emoji, size: 24) }
                     Text(stamp(e.at)).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 6)

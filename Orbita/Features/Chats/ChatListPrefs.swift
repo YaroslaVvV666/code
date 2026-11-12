@@ -8,12 +8,15 @@ final class ChatListPrefs: ObservableObject {
     @Published private(set) var pinned: [String]
     /// Чаты, помеченные вручную как «новое» (кружок без числа)
     @Published private(set) var marked: Set<String>
+    /// Архивированные чаты (прячутся из списка на отдельную полку сверху)
+    @Published private(set) var archived: Set<String>
     /// Меняется при смене «без звука» у личных переписок — чтобы список перерисовался
     @Published private(set) var muteTick = 0
 
     init() {
         pinned = UserDefaults.standard.stringArray(forKey: "chats.pinned") ?? []
         marked = Set(UserDefaults.standard.stringArray(forKey: "chats.marked") ?? [])
+        archived = Set(UserDefaults.standard.stringArray(forKey: "chats.archived") ?? [])
     }
 
     func isMarked(_ id: String) -> Bool { marked.contains(id) }
@@ -42,18 +45,58 @@ final class ChatListPrefs: ObservableObject {
         else if pinned.count < 5 { pinned.insert(id, at: 0) }
         UserDefaults.standard.set(pinned, forKey: "chats.pinned")
     }
+
+    func isArchived(_ id: String) -> Bool { archived.contains(id) }
+
+    func toggleArchive(_ id: String) {
+        if archived.contains(id) {
+            archived.remove(id)
+        } else {
+            archived.insert(id)
+            // архивированный не может быть одновременно закреплён сверху
+            if let i = pinned.firstIndex(of: id) {
+                pinned.remove(at: i)
+                UserDefaults.standard.set(pinned, forKey: "chats.pinned")
+            }
+        }
+        UserDefaults.standard.set(Array(archived), forKey: "chats.archived")
+    }
 }
 
 enum ChatFolder: String, CaseIterable {
-    case all, unread, personal, groups, channels
+    case all, unread, personal, groups, channels, mentions
 
     func title(_ s: Strings) -> String {
         switch self {
         case .all: return s.t("Все", "All")
         case .unread: return s.t("Новые", "Unread")
-        case .personal: return s.t("Личные", "Personal")
+        case .personal: return s.t("Чаты", "Chats")
         case .groups: return s.t("Группы", "Groups")
         case .channels: return s.t("Каналы", "Channels")
+        case .mentions: return s.t("Упоминания", "Mentions")
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .all: return "tray.full.fill"
+        case .unread: return "envelope.badge.fill"
+        case .personal: return "person.2.fill"
+        case .groups: return "person.3.fill"
+        case .channels: return "megaphone.fill"
+        case .mentions: return "at"
+        }
+    }
+
+    /// Цвет плитки фильтра (как у папок в Telegram — у каждой свой)
+    var tint: Color {
+        switch self {
+        case .all: return Color(red: 0.35, green: 0.5, blue: 1)
+        case .unread: return Color(red: 1, green: 0.42, blue: 0.3)
+        case .personal: return Color(red: 0.2, green: 0.72, blue: 0.5)
+        case .groups: return Color(red: 0.6, green: 0.42, blue: 1)
+        case .channels: return Color(red: 1, green: 0.62, blue: 0.15)
+        case .mentions: return Color(red: 0.95, green: 0.3, blue: 0.55)
         }
     }
 
@@ -64,12 +107,108 @@ enum ChatFolder: String, CaseIterable {
         case .personal: return !chat.peer.isGroup
         case .groups: return chat.peer.isGroup && !chat.peer.isChannel
         case .channels: return chat.peer.isChannel
+        case .mentions: return chat.mentions > 0
         }
+    }
+
+    /// Что сказать про уведомления, пока выбран этот фильтр
+    func focusHint(_ s: Strings) -> String {
+        switch self {
+        case .all, .unread: return ""
+        case .personal: return s.t("Уведомления только из личных переписок", "Notifications from personal chats only")
+        case .groups: return s.t("Уведомления только из групп", "Notifications from groups only")
+        case .channels: return s.t("Уведомления только из каналов", "Notifications from channels only")
+        case .mentions: return s.t("Уведомления только когда вас упомянули", "Notifications only when you're mentioned")
+        }
+    }
+}
+
+/// Фильтры над поиском: появляются, если потянуть список вниз. Плитки со значком, названием и числом новых.
+/// Пока выбран фильтр (кроме «Все» и «Новые»), уведомления из неподходящих чатов не приходят
+struct FolderTiles: View {
+    @Binding var folder: ChatFolder
+    var counts: [ChatFolder: Int] = [:]
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Namespace private var glow
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(ChatFolder.allCases, id: \.self) { f in
+                            tile(f, s).id(f)
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 4)
+                }
+                .onAppear { proxy.scrollTo(folder, anchor: .center) }
+            }
+            if !folder.focusHint(s).isEmpty {
+                Label(folder.focusHint(s), systemImage: "bell.badge.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(folder.tint)
+                    .padding(.horizontal, 20)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: folder)
+    }
+
+    private func tile(_ f: ChatFolder, _ s: Strings) -> some View {
+        let on = folder == f
+        let n = f == .all ? (counts[.unread] ?? 0) : (counts[f] ?? 0)
+        return Button {
+            Haptics.impact(.light)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { folder = f }
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: f.icon)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(on ? f.tint : .white)
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(on ? Color.white : f.tint))
+                        .symbolEffect(.bounce, value: on)
+                    Spacer(minLength: 6)
+                    if n > 0 {
+                        Text(n > 99 ? "99+" : "\(n)")
+                            .font(.system(size: 12, weight: .bold).monospacedDigit())
+                            .foregroundStyle(on ? f.tint : .white)
+                            .padding(.horizontal, 6).frame(minWidth: 22, minHeight: 20)
+                            .background(Capsule().fill(on ? Color.white : f.tint))
+                            .contentTransition(.numericText())
+                    }
+                }
+                Text(f.title(s))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(on ? Color.white : theme.text)
+                    .lineLimit(1)
+            }
+            .padding(10)
+            .frame(width: 112, height: 78, alignment: .topLeading)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(LinearGradient(colors: [f.tint, f.tint.opacity(0.75)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .shadow(color: f.tint.opacity(0.45), radius: 10, y: 4)
+                        .matchedGeometryEffect(id: "folderGlow", in: glow)
+                } else {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.surface)
+                }
+            }
+            .scaleEffect(on ? 1.03 : 1)
+        }
+        .buttonStyle(PressStyle())
     }
 }
 
 struct FolderBar: View {
     @Binding var folder: ChatFolder
+    /// Сколько переписок с новыми сообщениями в папке — число рядом с названием (как в Telegram)
+    var counts: [ChatFolder: Int] = [:]
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
@@ -77,12 +216,26 @@ struct FolderBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(ChatFolder.allCases, id: \.self) { f in
+                    let on = folder == f
+                    let n = counts[f] ?? 0
                     Button { withAnimation(.easeInOut(duration: 0.2)) { folder = f }; Haptics.impact(.light) } label: {
-                        Text(f.title(Strings(lang: lang)))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(folder == f ? Color.white : theme.textSecondary)
-                            .padding(.horizontal, 14).frame(height: 32)
-                            .background(folder == f ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                        HStack(spacing: 6) {
+                            Text(f.title(Strings(lang: lang)))
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(on ? Color.white : theme.textSecondary)
+                            if n > 0 {
+                                Text(n > 99 ? "99+" : "\(n)")
+                                    .font(.system(size: 11, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(on ? theme.accentColor : .white)
+                                    .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                                    .background(on ? AnyShapeStyle(Color.white) : AnyShapeStyle(theme.accentColor), in: Capsule())
+                                    .contentTransition(.numericText())
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                        }
+                        .padding(.horizontal, 14).frame(height: 32)
+                        .background(on ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: n)
                     }
                     .buttonStyle(.plain)
                 }

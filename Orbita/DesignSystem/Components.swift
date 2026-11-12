@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Базовые стили
 
@@ -9,6 +10,11 @@ struct PressStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
+}
+
+/// Экраны входа на iPad: всё крупнее (логотип, текст, поля, кнопки), чтобы не было пустоты
+extension Optional where Wrapped == UserInterfaceSizeClass {
+    var authScale: CGFloat { self == .regular ? 1.3 : 1 }
 }
 
 struct ShakeEffect: GeometryEffect {
@@ -33,13 +39,21 @@ struct StaticPage<Content: View>: View {
         self.content = content()
     }
 
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
     var body: some View {
+        let wide = sizeClass == .regular
         GeometryReader { geo in
             ScrollView {
-                VStack(spacing: spacing) { content }
+                VStack(spacing: spacing * sizeClass.authScale) {
+                    // iPad: блок по центру экрана (нижний Spacer страницы делит место поровну), ширина — как у формы
+                    if wide { Spacer(minLength: 24) }
+                    content
+                }
+                    .frame(maxWidth: wide ? 620 : .infinity)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 56)
-                    .padding(.bottom, 16)
+                    .padding(.top, wide ? 40 : 56)
+                    .padding(.bottom, wide ? 36 : 16)
                     .frame(minHeight: geo.size.height, alignment: .top)
             }
             .scrollBounceBehavior(.basedOnSize)
@@ -56,19 +70,21 @@ struct PrimaryButton: View {
     var loading = false
     let action: () -> Void
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
+        let k = sizeClass.authScale
         Button(action: action) {
             ZStack {
                 Text(title).opacity(loading ? 0 : 1)
                 if loading { ProgressView().tint(.white) }
             }
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 17 * k, weight: .semibold))
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(height: 54 * k)
             .background(enabled ? AnyShapeStyle(theme.accent) : AnyShapeStyle(Color.gray.opacity(0.35)),
-                        in: RoundedRectangle(cornerRadius: 16))
+                        in: RoundedRectangle(cornerRadius: 16 * k))
             .shadow(color: enabled ? theme.accentColor.opacity(theme.glow) : .clear, radius: 16, y: 6)
         }
         .buttonStyle(PressStyle())
@@ -119,27 +135,29 @@ struct StepHeader: View {
     let subtitle: String
     @EnvironmentObject private var flow: AuthFlow
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        VStack(spacing: 12) {
+        let k = sizeClass.authScale
+        VStack(spacing: 12 * k) {
             // при открытой клавиатуре иконка прячется, чтобы всё помещалось
-            if !flow.keyboardVisible {
+            if !flow.keyboardVisible || sizeClass == .regular {
                 Image(systemName: icon)
-                    .font(.system(size: 32, weight: .light))
+                    .font(.system(size: 32 * k, weight: .light))
                     .foregroundStyle(theme.accentColor)
-                    .frame(width: 84, height: 84)
-                    .card(theme, radius: 42)
+                    .frame(width: 84 * k, height: 84 * k)
+                    .card(theme, radius: 42 * k)
                     .padding(.bottom, 6)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
 
             Text(title)
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: 26 * k, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
 
             Text(subtitle)
-                .font(.system(size: 15))
+                .font(.system(size: 15 * k))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
@@ -211,6 +229,14 @@ struct AvatarView: View {
         (Color(red: 0.34, green: 0.60, blue: 0.52), Color(red: 0.22, green: 0.42, blue: 0.38))
     ]
 
+    /// Размер декодирования — по фиксированным ступеням, а не «размер × 3». Иначе у анимированных аватарок
+    /// (орбита друзей «дышит» каждый кадр) каждый кадр получался новый ключ кэша → чтение и декодирование заново.
+    static func pixelBucket(_ size: CGFloat) -> CGFloat {
+        let want = size * 3
+        for b: CGFloat in [96, 160, 256, 384, 512, 768] where want <= b { return b }
+        return 1024
+    }
+
     private var palette: (Color, Color) {
         let h = name.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
         return Self.palettes[h % Self.palettes.count]
@@ -235,7 +261,7 @@ struct AvatarView: View {
             if let id = avatarID, let url = ServerConfig.mediaURL(id) {
                 // аватарки маленькие: декодируем сразу в нужный размер (с запасом под @3x) и держим в памяти.
                 // Буквы и цветной фон — только пока фото грузится, под готовой картинкой их нет
-                CachedImage(url: url, maxPixel: min(1024, max(160, size * 3))) { image, _ in
+                CachedImage(url: url, maxPixel: Self.pixelBucket(size), persistKey: id) { image, _ in
                     if let image {
                         Image(uiImage: image).resizable().scaledToFill()
                             .frame(width: size, height: size)
@@ -347,10 +373,12 @@ struct InputField: View {
     var keyboard: UIKeyboardType = .default
 
     @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var reveal = false
     @State private var focused = false
 
     var body: some View {
+        let k = sizeClass.authScale
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .foregroundStyle(theme.textSecondary)
@@ -368,11 +396,12 @@ struct InputField: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 56)
-        .card(theme, radius: 16)
+        .font(.system(size: 17 * k))
+        .padding(.horizontal, 16 * k)
+        .frame(height: 56 * k)
+        .card(theme, radius: 16 * k)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 16 * k)
                 .stroke(theme.accentColor.opacity(focused ? 0.8 : 0), lineWidth: 1.2)
         )
         .animation(.easeOut(duration: 0.2), value: focused)
@@ -386,8 +415,10 @@ struct NameField: View {
     @Binding var text: String
     @Environment(\.theme) private var theme
     @FocusState private var focused: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
+        let k = sizeClass.authScale
         HStack(spacing: 12) {
             Image(systemName: "person")
                 .foregroundStyle(theme.textSecondary)
@@ -400,12 +431,12 @@ struct NameField: View {
                 .foregroundStyle(theme.text)
                 .tint(theme.accentColor)
         }
-        .font(.system(size: 17))
-        .padding(.horizontal, 16)
-        .frame(height: 56)
-        .card(theme, radius: 16)
+        .font(.system(size: 17 * k))
+        .padding(.horizontal, 16 * k)
+        .frame(height: 56 * k)
+        .card(theme, radius: 16 * k)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 16 * k)
                 .stroke(theme.accentColor.opacity(focused ? 0.8 : 0), lineWidth: 1.2)
         )
         .animation(.easeOut(duration: 0.2), value: focused)
@@ -545,6 +576,7 @@ struct SettingsGroup<Content: View>: View {
 struct ToastView: View {
     let text: String
     @Environment(\.theme) private var theme
+    @State private var shown = false
 
     var body: some View {
         Text(text)
@@ -556,5 +588,136 @@ struct ToastView: View {
             .background(theme.danger.opacity(0.95), in: RoundedRectangle(cornerRadius: 14))
             .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
             .padding(.horizontal, 24)
+            // мягко выезжает сверху с лёгкой пружинкой, а не появляется рывком
+            .offset(y: shown ? 0 : -28)
+            .scaleEffect(shown ? 1 : 0.92, anchor: .top)
+            .opacity(shown ? 1 : 0)
+            .onAppear { withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { shown = true } }
+    }
+}
+
+// MARK: - Длинный текст: свёрнут до нескольких строк, «Ещё» раскрывает, «Свернуть» сворачивает обратно
+
+/// Оборачивает любой текст (обычный, со ссылками, с форматированием). Короткий показывается как есть, без кнопок;
+/// длинный — свёрнут с мягким затуханием внизу и кнопкой «Ещё»
+struct ExpandableBlock<Content: View>: View {
+    /// Высота в свёрнутом виде (примерно строки × высота строки)
+    var collapsedHeight: CGFloat
+    var tint: Color? = nil
+    @ViewBuilder var content: () -> Content
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var fullHeight: CGFloat = 0
+    @State private var open = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let needs = fullHeight > collapsedHeight + 10          // меньше строки «лишнего» — не сворачиваем
+        let folded = needs && !open
+        VStack(alignment: .leading, spacing: 4) {
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { fullHeight = g.size.height }
+                        .onChange(of: g.size.height) { _, h in fullHeight = h }
+                })
+                .frame(maxHeight: folded ? collapsedHeight : nil, alignment: .top)
+                .clipped()
+                .mask(
+                    LinearGradient(stops: [.init(color: .black, location: 0),
+                                           .init(color: .black, location: folded ? 0.62 : 1),
+                                           .init(color: folded ? .black.opacity(0.08) : .black, location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+            if needs {
+                Button {
+                    Haptics.select()
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open.toggle() }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(open ? s.t("Свернуть", "Show less") : s.t("Ещё", "Show more"))
+                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
+                            .rotationEffect(.degrees(open ? 180 : 0))
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(tint ?? theme.accentColor)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+// MARK: - Длинный текст, как в TikTok: «…ещё» серым прямо в конце последней строки
+
+/// Свёрнут до `lines` строк; в конце последней строки — серое «… ещё» (нажатие раскрывает).
+/// Раскрытый текст заканчивается серым «Свернуть». Короткий текст показывается как есть
+struct InlineMoreText<Content: View>: View {
+    var lines: Int = 6
+    /// Цвет фона под текстом — «… ещё» мягко закрывает конец последней строки
+    var background: Color
+    var moreColor: Color? = nil
+    var fontSize: CGFloat = 15
+    @ViewBuilder var content: () -> Content
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var fullHeight: CGFloat = 0
+    @State private var cutHeight: CGFloat = 0
+    @State private var open = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        let needs = fullHeight > cutHeight + 2
+        let grey = moreColor ?? theme.textTertiary
+        VStack(alignment: .leading, spacing: 4) {
+            content()
+                .lineLimit(open ? nil : lines)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in if !open { cutHeight = h } }
+                .background(alignment: .topLeading) {
+                    // полная высота — по невидимой копии без ограничения строк
+                    content().lineLimit(nil).fixedSize(horizontal: false, vertical: true).hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if needs && !open {
+                        HStack(spacing: 0) {
+                            LinearGradient(colors: [background.opacity(0), background], startPoint: .leading, endPoint: .trailing)
+                                .frame(width: 26)
+                            Text("… ").foregroundStyle(theme.text)
+                                + Text(s.t("ещё", "more")).foregroundStyle(grey).fontWeight(.semibold)
+                        }
+                        .font(.system(size: fontSize))
+                        .fixedSize()
+                        .background(alignment: .trailing) { background.padding(.leading, 26) }
+                        .padding(.top, 10).padding(.leading, 20)            // область нажатия побольше
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Haptics.select()
+                            withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open = true }
+                        }
+                        .transition(.opacity)
+                    }
+                }
+            if needs && open {
+                Button {
+                    Haptics.select()
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { open = false }
+                } label: {
+                    Text(s.t("Свернуть", "Show less"))
+                        .font(.system(size: fontSize - 1, weight: .semibold))
+                        .foregroundStyle(grey)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.opacity)
+            }
+        }
     }
 }

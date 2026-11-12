@@ -3,40 +3,111 @@ import Combine
 import LocalAuthentication
 import Security
 import CryptoKit
+import AVFoundation
+import UIKit
 
-/// Код-пароль на вход в приложение (+ Face ID / Touch ID). Хранится в связке ключей.
+/// Код-пароль на вход в приложение + Face ID / Touch ID (как в Telegram).
+///
+/// Всё хранится только на этом устройстве: код — в связке ключей (`ThisDeviceOnly`: не уходит в iCloud и на другие
+/// телефоны), настройки — в UserDefaults. Обновление приложения ничего не стирает. Переустановка — стирает: iOS
+/// сохраняет связку ключей и после удаления приложения, поэтому при первом запуске «с нуля» старый код сбрасывается,
+/// иначе человек, забывший код, не смог бы даже войти заново.
 @MainActor
 final class AppLock: ObservableObject {
     static let shared = AppLock()
 
-    @Published var locked: Bool
-    @Published private(set) var enabled: Bool
-    @Published var useBiometrics: Bool {
-        didSet { UserDefaults.standard.set(useBiometrics, forKey: "applock.bio") }
+    @Published var locked: Bool {
+        // заблокировались — все посторонние звуки (видео, голосовые, кружки) стихают; музыка играет дальше
+        didSet { if locked && !oldValue { MediaSilence.pauseAll() } }
     }
+    @Published private(set) var enabled: Bool
+    @Published private(set) var codeLength: Int
+    @Published var useBiometrics: Bool {
+        didSet { UserDefaults.standard.set(useBiometrics, forKey: Keys.bio) }
+    }
+    /// Автоблокировка: через сколько секунд в фоне (или без касаний в открытом приложении) снова просить код.
+    /// 0 — сразу при выходе; без касаний тогда — через 5 минут
+    @Published var autoLock: Int {
+        didSet { UserDefaults.standard.set(autoLock, forKey: Keys.auto) }
+    }
+    /// Слишком много неверных попыток — ввод закрыт до этого времени
+    @Published private(set) var blockedUntil: Date?
 
+    static let autoLockOptions = [0, 60, 300, 3600, 18000]
+
+    private enum Keys {
+        static let bio = "applock.bio"
+        static let auto = "applock.auto"
+        static let installed = "applock.installed"
+        static let fails = "applock.fails"
+        static let blocked = "applock.blockedUntil"
+        static let wentBackground = "applock.bgAt"
+        static let autoV2 = "applock.auto.v2"
+    }
     private static let account = "orbita.passcode"
 
+    /// Что лежит в связке ключей: соль, хэш (тысячи раундов HMAC) и длина кода
+    private struct Stored: Codable {
+        let salt: Data
+        let hash: Data
+        let length: Int
+    }
+
     init() {
-        let on = Self.read() != nil
-        enabled = on
-        locked = on
-        useBiometrics = UserDefaults.standard.object(forKey: "applock.bio") as? Bool ?? true
+        let d = UserDefaults.standard
+        // Первый запуск после установки (а не обновления): старый код из прошлой установки не действует.
+        // Признак «уже стояло» — любая наша настройка в UserDefaults (их стирает только удаление приложения)
+        if !d.bool(forKey: Keys.installed) {
+            let hadData = d.object(forKey: "lang") != nil || d.object(forKey: Keys.bio) != nil
+                || d.object(forKey: "isDark") != nil || d.object(forKey: "storySeen") != nil
+            if !hadData { Self.write(nil) }
+            d.set(true, forKey: Keys.installed)
+        }
+        let stored = Self.load()
+        enabled = stored != nil
+        locked = stored != nil
+        codeLength = stored?.length ?? 4
+        useBiometrics = d.object(forKey: Keys.bio) as? Bool ?? true
+        // по умолчанию — через 5 минут: вышел и сразу вернулся — код не спрашивается.
+        // Прежнее «сразу» (старое значение по умолчанию) один раз переводим на 5 минут
+        if !d.bool(forKey: Keys.autoV2) {
+            if (d.object(forKey: Keys.auto) as? Int ?? 0) == 0 { d.set(300, forKey: Keys.auto) }
+            d.set(true, forKey: Keys.autoV2)
+        }
+        autoLock = d.object(forKey: Keys.auto) as? Int ?? 300
+        let until = d.double(forKey: Keys.blocked)
+        blockedUntil = until > Date().timeIntervalSince1970 ? Date(timeIntervalSince1970: until) : nil
     }
 
     // MARK: Связка ключей
 
-    private static func hash(_ code: String) -> Data {
+    private static func derive(_ code: String, salt: Data) -> Data {
+        // растянутый хэш: перебор 10⁴–10⁶ кодов по украденной копии связки ключей становится долгим
+        var block = Data(HMAC<SHA256>.authenticationCode(for: Data(code.utf8), using: SymmetricKey(data: salt)))
+        for _ in 0..<20_000 {
+            block = Data(HMAC<SHA256>.authenticationCode(for: block, using: SymmetricKey(data: salt)))
+        }
+        return block
+    }
+
+    /// Старый формат (до этого обновления): просто SHA256 — продолжает работать, при следующей смене кода обновится
+    private static func legacyHash(_ code: String) -> Data {
         Data(SHA256.hash(data: Data(("orbita.salt." + code).utf8)))
     }
 
-    private static func read() -> Data? {
+    private static func readRaw() -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrAccount as String: account,
                                     kSecReturnData as String: true]
         var out: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess else { return nil }
         return out as? Data
+    }
+
+    private static func load() -> Stored? {
+        guard let raw = readRaw() else { return nil }
+        if let s = try? JSONDecoder().decode(Stored.self, from: raw) { return s }
+        return Stored(salt: Data(), hash: raw, length: 4)               // старый 4-значный код
     }
 
     private static func write(_ data: Data?) {
@@ -53,123 +124,393 @@ final class AppLock: ObservableObject {
     // MARK: Действия
 
     func setCode(_ code: String) {
-        Self.write(Self.hash(code))
+        var salt = Data(count: 16)
+        _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        let stored = Stored(salt: salt, hash: Self.derive(code, salt: salt), length: code.count)
+        if let data = try? JSONEncoder().encode(stored) { Self.write(data) }
         enabled = true
+        codeLength = code.count
+        resetFails()
     }
 
     func disable() {
         Self.write(nil)
         enabled = false
         locked = false
+        resetFails()
     }
 
-    func check(_ code: String) -> Bool { Self.read() == Self.hash(code) }
+    func check(_ code: String) -> Bool {
+        guard let s = Self.load() else { return false }
+        let ok = s.salt.isEmpty ? s.hash == Self.legacyHash(code) : s.hash == Self.derive(code, salt: s.salt)
+        if ok { resetFails() } else { registerFail() }
+        return ok
+    }
 
     func unlock(with code: String) -> Bool {
-        guard check(code) else { return false }
+        guard !isBlocked, check(code) else { return false }
         locked = false
         return true
     }
 
+    // MARK: Неверные попытки
+
+    var isBlocked: Bool { (blockedUntil ?? .distantPast) > Date() }
+
+    private func registerFail() {
+        let d = UserDefaults.standard
+        let fails = d.integer(forKey: Keys.fails) + 1
+        d.set(fails, forKey: Keys.fails)
+        // 5 ошибок — минута паузы, дальше каждая ошибка удваивает паузу (до часа)
+        guard fails >= 5 else { return }
+        let wait = min(3600, 60 * pow(2, Double(fails - 5)))
+        let until = Date().addingTimeInterval(wait)
+        blockedUntil = until
+        d.set(until.timeIntervalSince1970, forKey: Keys.blocked)
+    }
+
+    private func resetFails() {
+        UserDefaults.standard.removeObject(forKey: Keys.fails)
+        UserDefaults.standard.removeObject(forKey: Keys.blocked)
+        blockedUntil = nil
+    }
+
+    // MARK: Face ID / Touch ID
+
     var biometryName: String {
         let c = LAContext()
         _ = c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
-        return c.biometryType == .touchID ? "Touch ID" : "Face ID"
+        return c.biometryType == .touchID ? "Touch ID" : (c.biometryType == .opticID ? "Optic ID" : "Face ID")
     }
+
+    var biometryIcon: String { biometryName == "Touch ID" ? "touchid" : (biometryName == "Optic ID" ? "opticid" : "faceid") }
 
     var biometryAvailable: Bool {
-        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        let c = LAContext()
+        guard c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else { return false }
+        // Face ID без строки NSFaceIDUsageDescription в Info.plist iOS убивает приложение при первом же запросе —
+        // в такой сборке Face ID просто не предлагаем (вход по коду работает)
+        if c.biometryType == .faceID, !Self.faceIDKeyPresent { return false }
+        return true
     }
 
+    static var faceIDKeyPresent: Bool { Bundle.main.object(forInfoDictionaryKey: "NSFaceIDUsageDescription") != nil }
+
+    private var biometryRunning = false
+
     func unlockWithBiometrics() {
-        guard enabled, useBiometrics, biometryAvailable else { return }
-        LAContext().evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
-                                   localizedReason: "Orbita") { ok, _ in
-            if ok { Task { @MainActor in self.locked = false } }
+        guard enabled, locked, useBiometrics, biometryAvailable, !biometryRunning else { return }
+        biometryRunning = true
+        let context = LAContext()
+        context.localizedFallbackTitle = Strings(lang: Self.lang).t("Ввести код", "Enter passcode")
+        context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                               localizedReason: Strings(lang: Self.lang).t("Вход в Orbita", "Unlock Orbita")) { ok, _ in
+            Task { @MainActor in
+                self.biometryRunning = false
+                if ok {
+                    Haptics.notify(.success)
+                    self.resetFails()
+                    self.locked = false
+                }
+            }
         }
+    }
+
+    private static var lang: AppLanguage { AppLanguage(rawValue: UserDefaults.standard.string(forKey: "lang") ?? "") ?? .ru }
+
+    // MARK: Автоблокировка
+
+    /// Ушли в фон — запоминаем время (и при «сразу» блокируем)
+    func didEnterBackground() {
+        guard enabled, !locked else { return }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Keys.wentBackground)
+        if autoLock == 0 { locked = true }
+    }
+
+    /// Вернулись — блокируем, если в фоне пробыли дольше выбранного
+    func didBecomeActive() {
+        guard enabled else { return }
+        let at = UserDefaults.standard.double(forKey: Keys.wentBackground)
+        if !locked, at > 0, Date().timeIntervalSince1970 - at >= Double(autoLock) { locked = true }
+        UserDefaults.standard.removeObject(forKey: Keys.wentBackground)
+        if locked { unlockWithBiometrics() }
     }
 
     func lockNow() {
         guard enabled, !locked else { return }
         locked = true
     }
+
+    // MARK: Блокировка без действий
+
+    /// Последнее касание экрана или ввод текста
+    private var lastActivity = Date()
+    private var idleTask: Task<Void, Never>?
+    /// Сколько можно ничего не делать в открытом приложении: как автоблокировка, но не меньше 5 минут
+    var idleLimit: TimeInterval { TimeInterval(max(300, autoLock)) }
+
+    func touched() { lastActivity = Date() }
+
+    /// Следим за бездействием, пока приложение на экране (раз в 10 секунд — почти бесплатно)
+    func startIdleWatch() {
+        lastActivity = Date()
+        guard idleTask == nil else { return }
+        idleTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard let self else { return }
+                // во время звонка экран не блокируем
+                if self.enabled, !self.locked, !CallActivity.shared.active,
+                   Date().timeIntervalSince(self.lastActivity) >= self.idleLimit {
+                    self.locked = true
+                }
+            }
+        }
+    }
+
+    func stopIdleWatch() {
+        idleTask?.cancel()
+        idleTask = nil
+    }
+
+    static func autoLockTitle(_ seconds: Int, _ s: Strings) -> String {
+        switch seconds {
+        case 0: return s.t("Сразу", "Immediately")
+        case 60: return s.t("Через 1 мин", "After 1 min")
+        case 300: return s.t("Через 5 мин", "After 5 min")
+        case 3600: return s.t("Через 1 час", "After 1 hour")
+        default: return s.t("Через 5 часов", "After 5 hours")
+        }
+    }
 }
 
-// MARK: - Цифровая клавиатура
+// MARK: - Цифровая клавиатура (как экран блокировки iPhone)
 
 struct PasscodePad: View {
     let title: String
     var subtitle: String? = nil
+    var length = 4
+    var showsLock = false
     var showsBiometrics = false
     var biometryIcon = "faceid"
     var onBiometrics: () -> Void = {}
+    /// Слева внизу вместо Face ID (например, «Отмена»)
+    var leftTitle: String? = nil
+    var onLeft: () -> Void = {}
+    var disabledText: String? = nil
     /// Возвращает false — код не подошёл (точки трясутся)
     let onComplete: (String) -> Bool
 
     @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
     @State private var code = ""
-    @State private var shake: CGFloat = 0
+    @State private var shake: CGFloat = 0           // растёт на 1 при каждой ошибке — замок и точки трясутся
+    @State private var wrong = false
+    @State private var busy = false                 // идёт тряска: нажатия не принимаем
+
+    private var pal: PasscodePalette { PasscodePalette(theme: theme) }
+
+    private static let letters = ["", "A B C", "D E F", "G H I", "J K L", "M N O", "P Q R S", "T U V", "W X Y Z"]
 
     var body: some View {
-        VStack(spacing: 26) {
-            VStack(spacing: 8) {
-                Text(title).font(.system(size: 22, weight: .bold)).foregroundStyle(theme.text)
-                if let subtitle {
-                    Text(subtitle).font(.system(size: 14)).foregroundStyle(theme.textSecondary)
+        VStack(spacing: 0) {
+            if showsLock {
+                Image(systemName: wrong ? "lock.trianglebadge.exclamationmark.fill" : "lock.fill")
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(wrong ? AnyShapeStyle(Color(red: 1, green: 0.38, blue: 0.36)) : pal.lockStyle)
+                    .contentTransition(.symbolEffect(.replace))
+                    .modifier(LockWobble(animatableData: shake))       // замок качается из стороны в сторону
+                    .padding(.bottom, 26)
+            }
+            Text(title).font(.system(size: 21, weight: .semibold)).foregroundStyle(pal.ink)
+                .multilineTextAlignment(.center)
+            if let line = disabledText ?? subtitle {
+                Text(line).font(.system(size: 14)).foregroundStyle(disabledText != nil ? Color.red.opacity(0.9) : pal.inkSecondary)
+                    .multilineTextAlignment(.center).padding(.top, 6)
+            }
+            HStack(spacing: length > 4 ? 22 : 26) {
+                ForEach(0..<length, id: \.self) { i in
+                    Circle().fill(i < code.count ? (wrong ? Color(red: 1, green: 0.38, blue: 0.36) : pal.dot) : Color.clear)
+                        .overlay(Circle().stroke(wrong ? Color(red: 1, green: 0.38, blue: 0.36) : pal.dotStroke, lineWidth: 1.4))
+                        .frame(width: 13, height: 13)
+                        .scaleEffect(i == code.count - 1 ? 1.15 : 1)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.5), value: code.count)
                 }
             }
-            HStack(spacing: 18) {
-                ForEach(0..<4, id: \.self) { i in
-                    Circle().fill(i < code.count ? theme.accentColor : Color.clear)
-                        .overlay(Circle().stroke(theme.accentColor, lineWidth: 1.5))
-                        .frame(width: 14, height: 14)
-                }
-            }
-            .offset(x: shake)
+            .modifier(ShakeEffect(travel: 16, shakes: 4, animatableData: shake))
+            .padding(.top, 26)
+            .padding(.bottom, 46)
 
-            VStack(spacing: 14) {
-                ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]], id: \.self) { row in
-                    HStack(spacing: 22) { ForEach(row, id: \.self) { key($0) } }
-                }
-                HStack(spacing: 22) {
-                    Button { onBiometrics() } label: {
-                        Image(systemName: biometryIcon).font(.system(size: 26)).foregroundStyle(theme.accentColor)
-                            .frame(width: 74, height: 74)
+            VStack(spacing: 18) {
+                ForEach(0..<3, id: \.self) { r in
+                    HStack(spacing: 26) {
+                        ForEach(1...3, id: \.self) { c in key(String(r * 3 + c), letters: Self.letters[r * 3 + c - 1]) }
                     }
-                    .buttonStyle(.plain).opacity(showsBiometrics ? 1 : 0).disabled(!showsBiometrics)
-                    key("0")
-                    Button { if !code.isEmpty { code.removeLast() } } label: {
-                        Image(systemName: "delete.left").font(.system(size: 22)).foregroundStyle(theme.text)
-                            .frame(width: 74, height: 74)
+                }
+                HStack(spacing: 26) {
+                    Group {
+                        if let leftTitle {
+                            Button(leftTitle, action: onLeft).font(.system(size: 17)).foregroundStyle(pal.ink)
+                        } else if showsBiometrics {
+                            Button(action: onBiometrics) {
+                                Image(systemName: biometryIcon).font(.system(size: 30)).foregroundStyle(pal.ink)
+                            }
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .frame(width: 80, height: 80)
+                    key("0", letters: "")
+                    Button {
+                        guard !code.isEmpty else { return }
+                        Haptics.impact(.light)
+                        code.removeLast()
+                    } label: {
+                        Text(Strings(lang: lang).t("Удалить", "Delete")).font(.system(size: 17)).foregroundStyle(pal.ink)
+                            .frame(width: 80, height: 80)
                     }
                     .buttonStyle(.plain)
+                    .opacity(code.isEmpty ? 0 : 1)
                 }
             }
-        }
-    }
-
-    private func key(_ d: String) -> some View {
-        Button { tap(d) } label: {
-            Text(d).font(.system(size: 30, weight: .medium)).foregroundStyle(theme.text)
-                .frame(width: 74, height: 74)
-                .background(theme.surface.opacity(0.9), in: Circle())
+            .disabled(disabledText != nil)
+            .opacity(disabledText != nil ? 0.4 : 1)
         }
         .buttonStyle(.plain)
     }
 
-    private func tap(_ d: String) {
-        guard code.count < 4 else { return }
-        Haptics.impact(.light)
-        code += d
-        guard code.count == 4 else { return }
-        let entered = code
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if onComplete(entered) { code = "" } else {
-                Haptics.impact(.heavy)
-                withAnimation(.default) { shake = 12 }
-                withAnimation(.interpolatingSpring(stiffness: 600, damping: 6).delay(0.05)) { shake = 0 }
-                code = ""
+    private func key(_ d: String, letters: String) -> some View {
+        Button { tap(d) } label: {
+            VStack(spacing: -2) {
+                Text(d).font(.system(size: 36, weight: .regular)).foregroundStyle(pal.ink)
+                if !letters.isEmpty {
+                    Text(letters).font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(pal.inkSecondary)
+                }
             }
+            .frame(width: 80, height: 80)
+            .background(Circle().fill(pal.keyFill))
+            .overlay(Circle().stroke(pal.keyStroke, lineWidth: 1))
+            .contentShape(Circle())
+        }
+        .buttonStyle(PasscodeKeyStyle(pressed: pal.keyPressed))
+    }
+
+    private func tap(_ d: String) {
+        guard code.count < length, !busy else { return }
+        Haptics.impact(.light)
+        if wrong { withAnimation(.easeOut(duration: 0.2)) { wrong = false } }
+        code += d
+        guard code.count == length else { return }
+        let entered = code
+        busy = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if onComplete(entered) { code = ""; busy = false; return }
+            // неверный код: вибрация «тук-тук-тук», замок и точки трясутся красным, потом точки гаснут
+            Haptics.notify(.error)
+            for (i, t) in [0.12, 0.24, 0.36].enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + t) { Haptics.impact(i == 2 ? .medium : .heavy) }
+            }
+            withAnimation(.easeOut(duration: 0.15)) { wrong = true }
+            withAnimation(.linear(duration: 0.5)) { shake += 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                withAnimation(.easeOut(duration: 0.2)) { code = "" }
+                busy = false
+            }
+        }
+    }
+}
+
+/// Замок при неверном коде: качается вокруг верхней дужки и чуть сдвигается, затухая
+private struct LockWobble: GeometryEffect {
+    var animatableData: CGFloat
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let p = animatableData - animatableData.rounded(.down)             // 0…1 внутри текущей тряски
+        let fade = 1 - p                                                     // к концу — тише
+        let angle = sin(p * .pi * 8) * 0.32 * fade                           // ~18°
+        let dx = sin(p * .pi * 8) * 6 * fade
+        let pivot = CGPoint(x: size.width / 2, y: 0)
+        let t = CGAffineTransform(translationX: pivot.x + dx, y: pivot.y)
+            .rotated(by: angle)
+            .translatedBy(x: -pivot.x, y: -pivot.y)
+        return ProjectionTransform(t)
+    }
+}
+
+/// Нажатие клавиши: кружок светлеет, как на экране блокировки iPhone
+private struct PasscodeKeyStyle: ButtonStyle {
+    var pressed: Color = Color.white.opacity(0.35)
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(Circle().fill(configuration.isPressed ? pressed : .clear))
+            .animation(.easeOut(duration: configuration.isPressed ? 0.02 : 0.35), value: configuration.isPressed)
+    }
+}
+
+/// Цвета экрана кода из темы приложения. Тема по умолчанию (тёмная, синий акцент) — как было:
+/// чёрный фон, белые цифры. Свой цвет акцента или светлая тема — экран в её цветах.
+struct PasscodePalette {
+    let theme: Theme
+    var isDefault: Bool { theme.dark && theme.accentIndex == 0 && theme.customAccent == nil }
+    private var accent: Color { theme.accentColor }
+
+    var ink: Color { theme.dark ? .white : theme.text }
+    var inkSecondary: Color { theme.dark ? Color.white.opacity(0.65) : theme.textSecondary }
+    var dot: Color { isDefault ? .white : accent }
+    var dotStroke: Color { isDefault ? .white : (theme.dark ? accent.opacity(0.9) : accent.opacity(0.75)) }
+    var keyFill: Color {
+        if isDefault { return Color.white.opacity(0.12) }
+        return theme.dark ? accent.opacity(0.16) : Color.white.opacity(0.85)
+    }
+    var keyStroke: Color {
+        if isDefault { return accent.opacity(0.35) }
+        return accent.opacity(theme.dark ? 0.5 : 0.3)
+    }
+    var keyPressed: Color {
+        if isDefault { return Color.white.opacity(0.35) }
+        return accent.opacity(theme.dark ? 0.45 : 0.3)
+    }
+    /// Замок: белый по умолчанию, иначе — переливается цветом темы
+    var lockStyle: AnyShapeStyle {
+        isDefault ? AnyShapeStyle(Color.white) : AnyShapeStyle(theme.accent)
+    }
+}
+
+/// Фон экрана кода: по умолчанию тёмный с отсветом акцента — как на экране блокировки;
+/// со своим цветом — глубокий градиент этого цвета; в светлой теме — светлый с цветными отсветами
+struct PasscodeBackground: View {
+    @Environment(\.theme) private var theme
+    @State private var drift = false
+
+    var body: some View {
+        let pal = PasscodePalette(theme: theme)
+        let a = theme.accentColor
+        ZStack {
+            if pal.isDefault {
+                Color.black
+                RadialGradient(colors: [a.opacity(0.35), .clear], center: .bottomLeading, startRadius: 20, endRadius: 600)
+                RadialGradient(colors: [a.opacity(0.18), .clear], center: .topLeading, startRadius: 10, endRadius: 500)
+            } else if theme.dark {
+                Color.black
+                LinearGradient(colors: [a.opacity(0.38), a.opacity(0.08), .black], startPoint: .top, endPoint: .bottom)
+                RadialGradient(colors: [a.opacity(0.55), .clear], center: drift ? .bottomTrailing : .bottomLeading,
+                               startRadius: 20, endRadius: 620)
+                RadialGradient(colors: [a.opacity(0.28), .clear], center: drift ? .topLeading : .topTrailing,
+                               startRadius: 10, endRadius: 480)
+            } else {
+                theme.sheet
+                LinearGradient(colors: [a.opacity(0.22), a.opacity(0.05), .clear], startPoint: .top, endPoint: .bottom)
+                RadialGradient(colors: [a.opacity(0.30), .clear], center: drift ? .bottomTrailing : .bottomLeading,
+                               startRadius: 20, endRadius: 600)
+                RadialGradient(colors: [a.opacity(0.16), .clear], center: drift ? .topLeading : .topTrailing,
+                               startRadius: 10, endRadius: 460)
+            }
+        }
+        .ignoresSafeArea()
+        .onAppear {
+            // свои цвета: отсветы медленно переплывают — экран «живой»
+            guard !pal.isDefault else { return }
+            withAnimation(.easeInOut(duration: 9).repeatForever(autoreverses: true)) { drift = true }
         }
     }
 }
@@ -178,21 +519,59 @@ struct PasscodePad: View {
 
 struct AppLockView: View {
     @ObservedObject var lock: AppLock
-    @Environment(\.theme) private var theme
+    var onForgot: () -> Void = {}
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    private var pal: PasscodePalette { PasscodePalette(theme: theme) }
+    @State private var now = Date()
+    @State private var askForgot = false
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var s: Strings { Strings(lang: lang) }
+
+    private var waitText: String? {
+        guard let until = lock.blockedUntil, until > now else { return nil }
+        let sec = Int(until.timeIntervalSince(now).rounded(.up))
+        return sec >= 60 ? s.t("Слишком много попыток. Повторите через \(sec / 60) мин \(sec % 60) с",
+                               "Too many attempts. Try again in \(sec / 60) min \(sec % 60) s")
+                         : s.t("Слишком много попыток. Повторите через \(sec) с", "Too many attempts. Try again in \(sec) s")
+    }
 
     var body: some View {
         ZStack {
-            SpaceBackground(isDark: theme.dark, showStars: true).ignoresSafeArea()
-            Color.black.opacity(0.25).ignoresSafeArea()
-            PasscodePad(title: Strings(lang: lang).t("Введите код-пароль", "Enter passcode"),
-                        showsBiometrics: lock.useBiometrics && lock.biometryAvailable,
-                        biometryIcon: lock.biometryName == "Touch ID" ? "touchid" : "faceid",
-                        onBiometrics: { lock.unlockWithBiometrics() }) { lock.unlock(with: $0) }
+            PasscodeBackground()
+            VStack {
+                Spacer(minLength: 40)
+                PasscodePad(title: s.t("Приложение заблокировано", "Orbita is locked"),
+                            length: lock.codeLength,
+                            showsLock: true,
+                            showsBiometrics: lock.useBiometrics && lock.biometryAvailable,
+                            biometryIcon: lock.biometryIcon,
+                            onBiometrics: { lock.unlockWithBiometrics() },
+                            disabledText: waitText) { lock.unlock(with: $0) }
+                Spacer()
+                Button(s.t("Забыли код?", "Forgot passcode?")) { askForgot = true }
+                    .font(.system(size: 15)).foregroundStyle(pal.inkSecondary)
+                    .padding(.bottom, 24)
+            }
         }
+        .preferredColorScheme(theme.dark ? .dark : .light)
+        .onReceive(timer) { now = $0 }
         .onAppear {
             hideKeyboard()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { lock.unlockWithBiometrics() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { lock.unlockWithBiometrics() }
+        }
+        .confirmationDialog(s.t("Забыли код-пароль?", "Forgot your passcode?"), isPresented: $askForgot, titleVisibility: .visible) {
+            Button(s.t("Выйти из аккаунта", "Log out"), role: .destructive) {
+                lock.disable()
+                onForgot()
+            }
+            Button(s.cancel, role: .cancel) {}
+        } message: {
+            Text(s.t("Код хранится только на этом телефоне, восстановить его нельзя. Можно выйти из аккаунта и войти заново "
+                     + "по номеру — переписки останутся на сервере, а код-пароль сбросится.",
+                     "The passcode is stored only on this phone and can't be recovered. You can log out and sign in again "
+                     + "with your number — your chats stay on the server and the passcode is reset."))
         }
     }
 }
@@ -204,6 +583,7 @@ struct AppLockSettings: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var setup = false
+    @State private var change = false
     @State private var confirmOff = false
 
     private var s: Strings { Strings(lang: lang) }
@@ -213,75 +593,217 @@ struct AppLockSettings: View {
             HStack(spacing: 14) {
                 Image(systemName: "lock.rotation").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                     .frame(width: 30, height: 30).background(Color.green, in: RoundedRectangle(cornerRadius: 8))
-                Text(s.t("Код-пароль", "Passcode")).font(.system(size: 16)).foregroundStyle(theme.text)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(s.t("Код-пароль", "Passcode")).font(.system(size: 16)).foregroundStyle(theme.text)
+                    Text(s.t("Только на этом устройстве", "Only on this device")).font(.system(size: 12))
+                        .foregroundStyle(theme.textSecondary)
+                }
                 Spacer()
                 Toggle("", isOn: Binding(get: { lock.enabled }, set: { on in
                     if on { setup = true } else { confirmOff = true }
                 })).labelsHidden().tint(theme.accentColor)
             }
-            .padding(.horizontal, 14).frame(height: 52)
-            if lock.enabled && lock.biometryAvailable {
+            .padding(.horizontal, 14).frame(height: 56)
+            if lock.enabled {
+                SettingsDivider()
+                Button { change = true } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "key.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                            .frame(width: 30, height: 30).background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Сменить код-пароль", "Change passcode")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.textTertiary)
+                    }
+                    .padding(.horizontal, 14).frame(height: 52).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 SettingsDivider()
                 HStack(spacing: 14) {
-                    Image(systemName: lock.biometryName == "Touch ID" ? "touchid" : "faceid")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        .frame(width: 30, height: 30).background(Color.blue, in: RoundedRectangle(cornerRadius: 8))
-                    Text(lock.biometryName).font(.system(size: 16)).foregroundStyle(theme.text)
+                    Image(systemName: "timer").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .frame(width: 30, height: 30).background(Color.purple, in: RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(s.t("Автоблокировка", "Auto-lock")).font(.system(size: 16)).foregroundStyle(theme.text)
+                        // и после выхода, и если в открытом приложении ничего не трогать (не меньше 5 минут)
+                        Text(s.t("И без действий в приложении", "Also when idle in the app")).font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    }
                     Spacer()
-                    Toggle("", isOn: $lock.useBiometrics).labelsHidden().tint(theme.accentColor)
+                    Picker("", selection: $lock.autoLock) {
+                        ForEach(AppLock.autoLockOptions, id: \.self) { Text(AppLock.autoLockTitle($0, s)).tag($0) }
+                    }
+                    .pickerStyle(.menu).tint(theme.textSecondary)
                 }
                 .padding(.horizontal, 14).frame(height: 52)
+                if lock.biometryAvailable {
+                    SettingsDivider()
+                    HStack(spacing: 14) {
+                        Image(systemName: lock.biometryIcon)
+                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                            .frame(width: 30, height: 30).background(Color.blue, in: RoundedRectangle(cornerRadius: 8))
+                        Text(s.t("Вход по \(lock.biometryName)", "Unlock with \(lock.biometryName)")).font(.system(size: 16))
+                            .foregroundStyle(theme.text)
+                        Spacer()
+                        Toggle("", isOn: $lock.useBiometrics).labelsHidden().tint(theme.accentColor)
+                    }
+                    .padding(.horizontal, 14).frame(height: 52)
+                }
             }
         }
-        .sheet(isPresented: $setup) {
-            PasscodeSetupSheet { setup = false }
+        .fullScreenCover(isPresented: $setup) {
+            PasscodeSetupView { setup = false }
                 .environment(\.theme, theme).environment(\.lang, lang)
-                .presentationBackground(theme.sheet)
         }
-        .sheet(isPresented: $confirmOff) {
-            VStack {
-                Spacer()
-                PasscodePad(title: s.t("Введите код, чтобы выключить", "Enter passcode to turn off")) { code in
+        .fullScreenCover(isPresented: $change) {
+            PasscodeSetupView(verifyOld: true) { change = false }
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+        .fullScreenCover(isPresented: $confirmOff) {
+            ZStack {
+                PasscodeBackground()
+                PasscodePad(title: s.t("Введите код, чтобы выключить", "Enter passcode to turn off"),
+                            length: lock.codeLength, leftTitle: s.cancel, onLeft: { confirmOff = false }) { code in
                     guard lock.check(code) else { return false }
                     lock.disable(); confirmOff = false
                     return true
                 }
-                Spacer()
             }
-            .frame(maxWidth: .infinity)
+            .preferredColorScheme(theme.dark ? .dark : .light)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
         }
     }
 }
 
-struct PasscodeSetupSheet: View {
+/// Создание или смена кода: (старый код →) новый код (4 или 6 цифр) → повтор
+struct PasscodeSetupView: View {
+    var verifyOld = false
     let onDone: () -> Void
     @ObservedObject private var lock = AppLock.shared
     @Environment(\.lang) private var lang
+    @Environment(\.theme) private var theme
+    @State private var oldOK = false
     @State private var first: String?
+    @State private var length = 4
 
     var body: some View {
         let s = Strings(lang: lang)
-        VStack {
-            Spacer()
-            if let firstCode = first {
-                PasscodePad(title: s.t("Повторите код", "Repeat the code")) { code in
-                    guard code == firstCode else { return false }
-                    lock.setCode(code); onDone()
-                    return true
+        ZStack {
+            PasscodeBackground()
+            VStack {
+                Spacer()
+                if verifyOld && !oldOK {
+                    PasscodePad(title: s.t("Введите текущий код", "Enter your current passcode"), length: lock.codeLength,
+                                leftTitle: s.cancel, onLeft: onDone) { code in
+                        guard lock.check(code) else { return false }
+                        oldOK = true
+                        return true
+                    }
+                    .id("old")
+                } else if let firstCode = first {
+                    PasscodePad(title: s.t("Повторите код", "Repeat the passcode"), length: length,
+                                leftTitle: s.cancel, onLeft: onDone) { code in
+                        guard code == firstCode else {
+                            first = nil
+                            return false
+                        }
+                        lock.setCode(code)
+                        Haptics.notify(.success)
+                        onDone()
+                        return true
+                    }
+                    .id("second")
+                } else {
+                    PasscodePad(title: s.t("Придумайте код-пароль", "Create a passcode"),
+                                subtitle: s.t("Будет спрашиваться при входе в приложение на этом телефоне",
+                                              "Asked when you open the app on this phone"),
+                                length: length, leftTitle: s.cancel, onLeft: onDone) { code in
+                        first = code
+                        return true
+                    }
+                    .id("first-\(length)")
+                    Button {
+                        Haptics.select()
+                        length = length == 4 ? 6 : 4
+                    } label: {
+                        Text(length == 4 ? s.t("Код из 6 цифр", "6-digit passcode") : s.t("Код из 4 цифр", "4-digit passcode"))
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(PasscodePalette(theme: theme).ink)
+                            .padding(.horizontal, 16).frame(height: 36)
+                            .background(PasscodePalette(theme: theme).keyFill, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 22)
                 }
-                .id("second")
-            } else {
-                PasscodePad(title: s.t("Придумайте код", "Create a passcode"),
-                            subtitle: s.t("4 цифры", "4 digits")) { code in
-                    first = code
-                    return true
-                }
-                .id("first")
+                Spacer()
             }
-            Spacer()
         }
-        .frame(maxWidth: .infinity)
+        .preferredColorScheme(theme.dark ? .dark : .light)
     }
+}
+
+// MARK: - Тишина при блокировке
+
+/// Плееры видео, голосовых и кружков регистрируются здесь; при блокировке все они встают на паузу.
+/// Музыка (плеер плейлистов) сюда не входит — её блокировка не трогает, в том числе в фоне
+@MainActor
+enum MediaSilence {
+    private static let players = NSHashTable<AVPlayer>.weakObjects()
+
+    static func register(_ p: AVPlayer) { players.add(p) }
+
+    static func pauseAll() {
+        for p in players.allObjects { p.pause() }
+        VoicePlayer.shared.stop()
+        CircleFocus.shared.stop()
+    }
+}
+
+// MARK: - Касания для блокировки без действий
+
+/// Ловит любое касание в окне (не мешая самим касаниям) и сообщает AppLock, что человек что-то делает
+final class ActivityTouchRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        Task { @MainActor in AppLock.shared.touched() }
+        state = .failed
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
+/// Ставит распознаватель касаний на окно приложения; ввод текста тоже считается действием
+struct ActivityTracker: UIViewRepresentable {
+    final class Probe: UIView {
+        private var installed: UIWindow?
+        private var observers: [NSObjectProtocol] = []
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let window, installed !== window else { return }
+            installed = window
+            window.addGestureRecognizer(ActivityTouchRecognizer())
+            if observers.isEmpty {
+                for name in [UITextView.textDidChangeNotification, UITextField.textDidChangeNotification] {
+                    observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                        Task { @MainActor in AppLock.shared.touched() }
+                    })
+                }
+            }
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let v = Probe()
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {}
 }

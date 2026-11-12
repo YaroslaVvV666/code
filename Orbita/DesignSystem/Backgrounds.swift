@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Фон
 
@@ -144,8 +145,9 @@ struct SpaceBackground: View {
             if isDark && showStars { CometLayer().transition(.opacity) }
 
             // светлая: холодный off-white с еле заметным свечением
-            LinearGradient(colors: [Color(red: 0.965, green: 0.972, blue: 0.988),
-                                    Color(red: 0.925, green: 0.935, blue: 0.965)],
+            // не чисто белый: мягкий серо-голубой, глаза не режет
+            LinearGradient(colors: [Color(red: 0.905, green: 0.915, blue: 0.94),
+                                    Color(red: 0.865, green: 0.878, blue: 0.91)],
                            startPoint: .top, endPoint: .bottom)
                 .opacity(isDark ? 0 : 1)
 

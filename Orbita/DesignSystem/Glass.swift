@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Liquid Glass
 // На iOS 26 и Xcode 26 используется системное стекло (glassEffect).
@@ -15,6 +16,7 @@ private struct GlassModifier<S: Shape>: ViewModifier {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content.glassEffect(effect, in: shape)
+                .overlay(shape.stroke(theme.dark ? Color.clear : theme.stroke.opacity(0.7), lineWidth: 0.5))   // светлая тема: видно край
         } else {
             fallback(content)
         }
@@ -28,6 +30,7 @@ private struct GlassModifier<S: Shape>: ViewModifier {
     private var effect: Glass {
         var glass = Glass.regular
         if let tint { glass = glass.tint(tint) }
+        else if !theme.dark { glass = glass.tint(Color(red: 0.80, green: 0.82, blue: 0.87).opacity(0.3)) }     // светлая: не слепит
         if interactive { glass = glass.interactive() }
         return glass
     }
@@ -43,7 +46,8 @@ private struct GlassModifier<S: Shape>: ViewModifier {
                                             startPoint: .topLeading, endPoint: .bottomTrailing),
                              lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(theme.dark ? 0.28 : 0.08), radius: 14, y: 5)
+            .overlay(shape.stroke(theme.dark ? Color.clear : theme.stroke.opacity(0.6), lineWidth: 0.5))
+            .shadow(color: Color.black.opacity(theme.dark ? 0.28 : 0.11), radius: 14, y: 5)
     }
 }
 
@@ -57,7 +61,12 @@ struct CardModifier: ViewModifier {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                // светлая тема: стекло чуть затемнено — не слепит белым
+                .glassEffect(theme.dark ? .regular : .regular.tint(Color(red: 0.80, green: 0.82, blue: 0.87).opacity(0.35)),
+                             in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                // в светлой теме стекло на белом почти не видно — тонкая граница
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(theme.dark ? Color.clear : theme.stroke, lineWidth: 0.75))
                 .shadow(color: theme.shadow, radius: 10, y: 3)
         } else {
             legacy(content)
@@ -69,9 +78,9 @@ struct CardModifier: ViewModifier {
 
     private func legacy(_ content: Content) -> some View {
         content
-            .background(theme.dark ? Color.white.opacity(0.07) : Color.white, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(theme.cardFill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .stroke(LinearGradient(colors: [Color.white.opacity(theme.dark ? 0.16 : 0.9), theme.stroke],
+                .stroke(LinearGradient(colors: [Color.white.opacity(theme.dark ? 0.16 : 0.6), theme.stroke],
                                        startPoint: .top, endPoint: .bottom), lineWidth: 1))
             .shadow(color: theme.shadow, radius: 12, y: 4)
     }

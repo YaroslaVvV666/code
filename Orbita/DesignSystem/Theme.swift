@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Цвета и стили Orbita. Тёмная тема — сдержанная графитово-синяя,
 /// светлая — холодный off-white с белыми карточками и мягкими тенями.
@@ -6,6 +7,8 @@ import SwiftUI
 struct Theme {
     let dark: Bool
     var accentIndex: Int = 0
+    /// Свой цвет акцента (оформление отдельного чата: цвет моих сообщений); nil — из палитры по accentIndex
+    var customAccent: ThemeRGB? = nil
 
     static let accents: [(r: Double, g: Double, b: Double)] = [
         (0.30, 0.46, 0.92),     // синий
@@ -22,7 +25,8 @@ struct Theme {
     }
 
     private var base: (r: Double, g: Double, b: Double) {
-        Self.accents[min(max(accentIndex, 0), Self.accents.count - 1)]
+        if let c = customAccent { return (c.r, c.g, c.b) }
+        return Self.accents[min(max(accentIndex, 0), Self.accents.count - 1)]
     }
 
     private func shade(_ delta: Double) -> Color {
@@ -31,18 +35,19 @@ struct Theme {
     }
 
     // поверхности
-    var surface: Color { dark ? Color.white.opacity(0.07) : Color.white }
+    // светлая тема: поля и чипы — светло-серые, а не белые на белом
+    var surface: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.88, green: 0.89, blue: 0.915) }
     var stroke: Color {
-        dark ? Color.white.opacity(0.09) : Color(red: 0.12, green: 0.15, blue: 0.25).opacity(0.08)
+        dark ? Color.white.opacity(0.09) : Color(red: 0.12, green: 0.15, blue: 0.25).opacity(0.13)
     }
     var shadow: Color {
-        dark ? Color.clear : Color(red: 0.15, green: 0.20, blue: 0.40).opacity(0.08)
+        dark ? Color.clear : Color(red: 0.15, green: 0.20, blue: 0.40).opacity(0.11)
     }
     var bar: Color {
-        dark ? Color(red: 0.05, green: 0.06, blue: 0.095).opacity(0.97) : Color.white.opacity(0.97)
+        dark ? Color(red: 0.05, green: 0.06, blue: 0.095).opacity(0.97) : Color(red: 0.94, green: 0.947, blue: 0.965).opacity(0.97)
     }
     var sheet: Color {
-        dark ? Color(red: 0.07, green: 0.08, blue: 0.11) : Color(red: 0.97, green: 0.975, blue: 0.99)
+        dark ? Color(red: 0.07, green: 0.08, blue: 0.11) : Color(red: 0.925, green: 0.932, blue: 0.955)
     }
 
     // текст
@@ -53,7 +58,7 @@ struct Theme {
         dark ? Color.white.opacity(0.58) : Color(red: 0.38, green: 0.42, blue: 0.52)
     }
     var textTertiary: Color {
-        dark ? Color.white.opacity(0.36) : Color(red: 0.60, green: 0.64, blue: 0.72)
+        dark ? Color.white.opacity(0.36) : Color(red: 0.52, green: 0.56, blue: 0.64)
     }
 
     // акценты
@@ -65,6 +70,26 @@ struct Theme {
     var danger: Color { Color(red: 0.90, green: 0.36, blue: 0.38) }
     var like: Color { Color(red: 0.92, green: 0.30, blue: 0.40) }
     var glow: Double { dark ? 0.28 : 0.22 }
+    /// Карточки в светлой теме — не белые, а приглушённые (на белом глаза устают)
+    var cardFill: Color { dark ? Color.white.opacity(0.07) : Color(red: 0.955, green: 0.96, blue: 0.975) }
+}
+
+/// Цвет в долях 0…1 (хранится в настройках чата)
+struct ThemeRGB: Codable, Equatable, Hashable {
+    var r: Double
+    var g: Double
+    var b: Double
+    var color: Color { Color(red: r, green: g, blue: b) }
+}
+
+extension Theme {
+    /// Та же тема, но с другим акцентом
+    func withAccent(_ rgb: ThemeRGB?) -> Theme {
+        guard let rgb else { return self }
+        var t = self
+        t.customAccent = rgb
+        return t
+    }
 }
 
 private struct ThemeKey: EnvironmentKey { static let defaultValue = Theme(dark: true) }
@@ -85,5 +110,13 @@ extension View {
     /// Карточка: стекло (Liquid Glass) на iOS 26, на более старых — полупрозрачная / белая с тенью
     func card(_ theme: Theme, radius: CGFloat = 16) -> some View {
         modifier(CardModifier(theme: theme, radius: radius))
+    }
+}
+
+extension View {
+    /// Все шторки одного вида: фон темы и одинаковое скругление сверху
+    func sheetStyle(_ theme: Theme) -> some View {
+        self.presentationBackground(theme.sheet)
+            .presentationCornerRadius(28)
     }
 }

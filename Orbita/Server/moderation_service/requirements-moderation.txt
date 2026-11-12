@@ -1,0 +1,12 @@
+# Модели для проверки изображений (18+). Ставятся только на машине с сервисом моделей,
+# сам server.py остаётся на стандартной библиотеке.
+#
+# nudenet — быстрый детектор частей тела (CPU, onnxruntime). Нужен для бэкендов nudenet/both.
+nudenet>=3.4.2
+Pillow>=10.0.0
+
+# Falconsai nsfw-классификатор (ViT) через transformers + torch.
+# Нужен только для бэкендов falconsai/both. Если хватает nudenet — можно не ставить
+# и запускать с ORBITA_MOD_BACKEND=nudenet.
+transformers>=4.40.0
+torch>=2.2.0

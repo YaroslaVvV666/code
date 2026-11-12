@@ -24,27 +24,49 @@ targets:
     dependencies:
       - package: WebRTC
       - package: Lottie
+      - target: OrbitaBroadcast          # показ всего экрана и в фоне (Broadcast Upload Extension)
+    entitlements:
+      path: App/Orbita.entitlements
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: App/Orbita.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.example.orbita
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+        # иконки: основная и сменные («Оформление → Иконка приложения»)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: "AppIconOcean AppIconSunset AppIconMainX AppIconFill AppIconFillX AppIconBlue AppIconStar AppIconComet AppIconSpace AppIconNight"
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: Orbita
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, location]
         NSMicrophoneUsageDescription: Микрофон нужен для голосовых сообщений и видео-кружков.
         NSSpeechRecognitionUsageDescription: Нужно, чтобы расшифровывать голосовые сообщения в текст.
         NSCameraUsageDescription: Камера нужна для фото, видео-кружков и сканирования QR-кодов.
         NSContactsUsageDescription: Контакты нужны, чтобы найти друзей, которые уже в Orbita.
         NSPhotoLibraryUsageDescription: Доступ к фото нужен, чтобы отправлять их в чаты и публикации.
         NSPhotoLibraryAddUsageDescription: Нужно, чтобы сохранять фото и видео из чатов в галерею.
+        NSFaceIDUsageDescription: Face ID нужен, чтобы входить в Orbita без ввода кода.
+        NSLocationWhenInUseUsageDescription: Геопозиция нужна, чтобы отправлять своё местоположение и транслировать его в чат.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Чтобы трансляция геопозиции продолжалась, когда приложение свёрнуто.
         NSLocalNetworkUsageDescription: Нужно для подключения к вашему серверу Orbita в локальной сети.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         CFBundleURLTypes:
           - CFBundleURLName: orbita
             CFBundleURLSchemes: [orbita]
+  OrbitaBroadcast:
+    type: app-extension
+    platform: iOS
+    sources: [Extension/Broadcast]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.orbita.broadcast     # = идентификатор приложения + «.broadcast»
+        INFOPLIST_FILE: Extension/Broadcast/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/Broadcast/Broadcast.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES

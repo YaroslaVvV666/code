@@ -104,13 +104,40 @@ struct ProfileBackdrop: View {
                                       y: cy + sin(rad) * s.r * geo.size.width * 0.52)
                     }
                 }
+                // 32 эмодзи с масками — одним слоем: при прокрутке профиля шапка не пересобирает их по отдельности
+                .drawingGroup()
             }
         }
         .frame(height: height)
-        // нижний край плавно растворяется в фоне — без обрыва
-        .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 1 - 0.38 * Double(fade)),
+        // нижний край плавно растворяется в фоне — без обрыва (в светлой теме — длиннее, чтобы цвет не обрывался о белое)
+        .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                     .init(color: .black, location: 1 - (theme.dark || pair == nil ? 0.38 : 0.6) * Double(fade)),
                                      .init(color: fade > 0.01 ? .clear : .black, location: 1)], startPoint: .top, endPoint: .bottom))
         .allowsHitTesting(false)
+    }
+}
+
+/// Цвет профиля на всю страницу (светлая тема): вместо белого — мягкий оттенок цвета профиля сверху вниз.
+/// Шапка переходит в этот оттенок, а не в белое — без резкой границы, карточки лежат на цветном фоне
+struct ProfilePageTint: View {
+    let color: Int?
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        if let pair = ProfilePalette.pair(color), !theme.dark {
+            // вся страница залита градиентом цвета профиля (по диагонали, как сама шапка),
+            // а под шапкой — гуще, чтобы цвет из неё перетекал без границы
+            ZStack(alignment: .top) {
+                Color.white
+                LinearGradient(colors: [pair.0.opacity(0.38), pair.1.opacity(0.34), pair.0.opacity(0.26)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                LinearGradient(colors: [pair.1.opacity(0.42), pair.1.opacity(0)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 760)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .transition(.opacity)
+        }
     }
 }
 
@@ -129,6 +156,7 @@ struct ProfileStyleScreen: View {
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
 
+    @ObservedObject private var leaveGuard = LeaveGuard.shared
     @State private var color: Int?
     @State private var emoji: String?
     @State private var showEmoji = false
@@ -182,6 +210,7 @@ struct ProfileStyleScreen: View {
             PrimaryButton(title: s.t("Применить стиль", "Apply style"), enabled: changed, loading: saving) { apply() }
         }
         .padding(.horizontal, 16)
+        .padding(.bottom, 96)                 // кнопка «Применить» не прячется под нижней панелью вкладок
         .onAppear {
             guard !loaded else { return }
             loaded = true
@@ -195,22 +224,29 @@ struct ProfileStyleScreen: View {
             }
             .environment(\.theme, theme).environment(\.lang, lang)
             .presentationDetents([.medium, .large])
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
+        // предупреждение «вы не сохранили»: пока есть несохранённые изменения — помечаем экран «грязным»
+        .onChange(of: changed) { _, v in leaveGuard.dirty = v }
+        .onChange(of: leaveGuard.saveSignal) { _, _ in apply() }   // «Сохранить» в предупреждении
+        .onDisappear { LeaveGuard.shared.dirty = false }
     }
+
+    /// Высота превью — по содержимому (аватарка, имя, «в сети»), без пустой полосы до цветов
+    private static let previewHeight: CGFloat = 250
 
     private var preview: some View {
         ZStack(alignment: .top) {
-            ProfileBackdrop(color: color, emoji: emoji, height: 330)
+            ProfileBackdrop(color: color, emoji: emoji, height: Self.previewHeight)
             VStack(spacing: 6) {
                 AvatarView(name: name, size: 118, avatarID: store.profile?.avatarID).clipShape(Circle())
-                    .padding(.top, 34)
+                    .padding(.top, 28)
                 Text(name.isEmpty ? s.you : name)
                     .font(.system(size: 26, weight: .bold)).foregroundStyle(ProfilePalette.ink(color, fallback: theme.text))
                 Text(s.online).font(.system(size: 16)).foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary))
             }
         }
-        .frame(height: 330, alignment: .top)
+        .frame(height: Self.previewHeight, alignment: .top)
         .clipped()
     }
 
@@ -352,6 +388,7 @@ struct PageScrollMarker: View {
     @EnvironmentObject private var tracker: PageScrollTracker
     @Environment(\.pageTopInset) private var topInset
     var lockTop = false
+    var reportPull = false
 
     var body: some View {
         GeometryReader { g in
@@ -360,7 +397,7 @@ struct PageScrollMarker: View {
         }
         .frame(height: 0)
         .background {
-            ScrollOffsetProbe(lockTop: lockTop) { tracker.setProbe($0) }
+            ScrollOffsetProbe(lockTop: lockTop, reportPull: reportPull) { tracker.setProbe($0) }
                 .frame(width: 1, height: 1)
         }
     }
@@ -394,25 +431,32 @@ struct StickyProfileBar: View {
     let name: String
     let subtitle: String
     let color: Int?
+    /// Аватарка сжимается в маленький кружок рядом с ником (как в Telegram)
+    var avatarID: String? = nil
     var height: CGFloat = 54
-    var startAt: CGFloat = 70
+    var startAt: CGFloat = 92
     @Environment(\.theme) private var theme
     @Environment(\.pageTopInset) private var topInset
     @ObservedObject var tracker: PageScrollTracker
 
     var body: some View {
         let offset = tracker.offset
-        let appear = Double(max(0, min(1, (offset - startAt) / 45)))
+        let appear = Double(max(0, min(1, (offset - startAt) / 30)))
         ZStack {
             ProfileBarBackground(color: color, height: height + topInset)
-            VStack(spacing: 1) {
-                Text(name).font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(ProfilePalette.ink(color, fallback: theme.text)).lineLimit(1)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: 12))
-                        .foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary)).lineLimit(1)
+            HStack(spacing: 10) {
+                AvatarView(name: name, size: 34, avatarID: avatarID).clipShape(Circle())
+                    .scaleEffect(0.6 + 0.4 * appear)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(ProfilePalette.ink(color, fallback: theme.text)).lineLimit(1)
+                    if !subtitle.isEmpty {
+                        Text(subtitle).font(.system(size: 12))
+                            .foregroundStyle(ProfilePalette.inkSecondary(color, fallback: theme.textSecondary)).lineLimit(1)
+                    }
                 }
             }
+            .offset(y: CGFloat(1 - appear) * 8)              // въезжает снизу, пока большая шапка уходит вверх
             .padding(.horizontal, 60)
             .padding(.top, topInset)
         }

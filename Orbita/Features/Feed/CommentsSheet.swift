@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Комментарии: дерево ответов, как в TikTok
 
@@ -6,6 +7,15 @@ struct CommentsSheet: View {
     let post: Post
     @ObservedObject var vm: FeedViewModel
     var onClose: (() -> Void)? = nil              // задано — панель показана не системной шторкой, а поверх экрана
+    /// Задано — вместо поля ввода кнопка «Добавить комментарий…», которая открывает обычную панель
+    /// (комментарии сбоку повёрнутого видео: системная клавиатура не поворачивается вместе с ним)
+    var onWriteElsewhere: (() -> Void)? = nil
+    /// Панель поверх экрана: тянут за шапку (заголовок + фильтры) — двигаем панель; ended — отпустили
+    var onHeaderDrag: ((DragGesture.Value, Bool) -> Void)? = nil
+
+    enum Sort: String, CaseIterable { case popular, new, old }
+    @AppStorage("comments.sort") private var sortRaw = Sort.popular.rawValue
+    private var sort: Sort { Sort(rawValue: sortRaw) ?? .popular }
 
     @EnvironmentObject private var session: AppSession
     @Environment(\.dismiss) private var dismiss
@@ -42,6 +52,14 @@ struct CommentsSheet: View {
         Dictionary(grouping: comments, by: { $0.parentID }).mapValues { list in
             list.sorted { a, b in
                 if a.pinned != b.pinned { return a.pinned }
+                // верхний уровень — по выбранному фильтру; ответы всегда по порядку, как шла переписка
+                if a.parentID == nil && b.parentID == nil {
+                    switch sort {
+                    case .popular: if a.likes != b.likes { return a.likes > b.likes }; return a.createdAt > b.createdAt
+                    case .new: return a.createdAt > b.createdAt
+                    case .old: return a.createdAt < b.createdAt
+                    }
+                }
                 return a.createdAt < b.createdAt
             }
         }
@@ -75,7 +93,15 @@ struct CommentsSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            // шапка с фильтрами — большая область, за которую панель тянется вниз (закрыть) и вверх
+            VStack(spacing: 0) {
+                header
+                if comments.count > 1 { sortBar }
+            }
+            .contentShape(Rectangle())
+            .simultaneousGesture(DragGesture(minimumDistance: 6, coordinateSpace: .global)
+                .onChanged { v in onHeaderDrag?(v, false) }
+                .onEnded { v in onHeaderDrag?(v, true) })
             if comments.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "bubble.left.and.bubble.right")
@@ -109,6 +135,9 @@ struct CommentsSheet: View {
                     .padding(.bottom, 16)
                 }
                 .scrollDismissesKeyboard(.interactively)
+                // список в самом верху: потянул вниз за любое место — панель закрывается
+                .modifier(PullDownToClose(enabled: onClose != nil) { onClose?() })
+                .animation(.spring(response: 0.36, dampingFraction: 0.86), value: sortRaw)
             }
             inputBar
         }
@@ -139,6 +168,30 @@ struct CommentsSheet: View {
         .padding(.horizontal, 12)
         .padding(.top, 14)
         .padding(.bottom, 6)
+    }
+
+    /// Новые / Популярные / Старые — как в TikTok и Telegram
+    private var sortBar: some View {
+        HStack(spacing: 8) {
+            ForEach(Sort.allCases, id: \.self) { k in
+                let on = sort == k
+                Button {
+                    Haptics.select()
+                    sortRaw = k.rawValue
+                } label: {
+                    Text(k == .popular ? s.t("Популярные", "Top") : (k == .new ? s.t("Новые", "Newest") : s.t("Старые", "Oldest")))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(on ? Color.white : theme.textSecondary)
+                        .padding(.horizontal, 14).frame(height: 30)
+                        .background(on ? AnyShapeStyle(theme.accent) : AnyShapeStyle(theme.surface), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .animation(.easeOut(duration: 0.18), value: sortRaw)
     }
 
     // MARK: Строка
@@ -223,8 +276,13 @@ struct CommentsSheet: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
+    /// Длинный комментарий — 6 строк, в конце последней серое «… ещё», как в TikTok
     private func commentText(_ comment: Comment) -> some View {
+        InlineMoreText(lines: 6, background: theme.sheet) { commentBody(comment) }
+    }
+
+    @ViewBuilder
+    private func commentBody(_ comment: Comment) -> some View {
         if let name = comment.replyToName, comment.parentID != nil {
             (Text(name + " ").foregroundStyle(theme.accentColor).fontWeight(.semibold)
              + Text(Linkify.attributed(comment.text)).foregroundStyle(theme.text))
@@ -244,20 +302,20 @@ struct CommentsSheet: View {
         Button { toggleLike(comment) } label: {
             VStack(spacing: 2) {
                 Image(systemName: comment.likedByMe ? "heart.fill" : "heart")
-                    .font(.system(size: 19))
+                    .font(.system(size: 28))
                     .foregroundStyle(comment.likedByMe ? theme.like : theme.textTertiary)
                     .symbolEffect(.bounce, value: comment.likedByMe)
                 Text(comment.likes > 0 ? "\(comment.likes)" : " ")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(theme.textSecondary)
             }
-            .frame(width: 32)
+            .frame(width: 48)
         }
         .buttonStyle(.plain)
         .overlay(alignment: .topTrailing) {
             if comment.likedByAuthor {
                 Image(systemName: "heart.circle.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 16))
                     .foregroundStyle(theme.like)
                     .background(theme.sheet, in: Circle())
                     .offset(x: 4, y: -4)
@@ -303,6 +361,7 @@ struct CommentsSheet: View {
     }
 
     private func startReply(to comment: Comment) {
+        if let onWriteElsewhere { onWriteElsewhere(); return }      // сбоку повёрнутого видео — отвечаем в обычной панели
         replyTarget = comment
         inputFocused = true
     }
@@ -332,6 +391,17 @@ struct CommentsSheet: View {
                     AvatarView(name: session.profile.profile?.name ?? "", size: 34,
                                avatarID: session.profile.profile?.avatarID)
 
+                    if let onWriteElsewhere {
+                        Button(action: onWriteElsewhere) {
+                            Text(s.writeComment)
+                                .foregroundStyle(theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .frame(height: 42)
+                                .background(theme.surface, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                     TextField(s.writeComment, text: $draft)
                         .focused($inputFocused)
                         .foregroundStyle(theme.text)
@@ -350,6 +420,7 @@ struct CommentsSheet: View {
                                         in: Circle())
                     }
                     .disabled(empty)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -384,6 +455,31 @@ struct CommentsSheet: View {
                     id = comments.first { $0.id == current }?.parentID
                 }
             }
+        }
+    }
+}
+
+/// Список в самом верху, потянули вниз и отпустили — закрыть панель (iOS 18+; раньше закрывается за шапку)
+struct PullDownToClose: ViewModifier {
+    let enabled: Bool
+    let onClose: () -> Void
+    @State private var over: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *), enabled {
+            content
+                .onScrollGeometryChange(for: Int.self) { g in
+                    let o = -(g.contentOffset.y + g.contentInsets.top)
+                    return o > 2 ? Int(o / 8) : 0
+                } action: { _, step in over = CGFloat(step) * 8 }
+                .onScrollPhaseChange { old, new in
+                    if old == .interacting, new != .interacting, over > 70 {
+                        Haptics.impact(.light)
+                        onClose()
+                    }
+                }
+        } else {
+            content
         }
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Контейнер подэкрана (своя шапка со стрелкой «назад»)
 
@@ -10,8 +11,19 @@ struct ProfileSubScreen: View {
     @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @ObservedObject private var leave = LeaveGuard.shared
+    @State private var showUnsaved = false
 
     private var s: Strings { Strings(lang: lang) }
+
+    private func doLeave() {
+        leave.dirty = false
+        if let parent { session.profileRoute = parent } else { back() }
+    }
+
+    private func attemptLeave() {
+        if leave.dirty { showUnsaved = true } else { doLeave() }
+    }
 
     private var title: String {
         switch route {
@@ -49,7 +61,7 @@ struct ProfileSubScreen: View {
     /// а стрелка «назад» просто лежит поверх — без отдельной тёмной плашки
     private var wallBody: some View {
         ZStack(alignment: .topLeading) {
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content.padding(.top, TopInset.value).padding(.bottom, 24)
             }
             .coordinateSpace(name: "pageScroll")
@@ -82,7 +94,7 @@ struct ProfileSubScreen: View {
         VStack(spacing: 0) {
             HStack {
                 Button {
-                    if let parent { session.profileRoute = parent } else { back() }
+                    attemptLeave()
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .semibold))
@@ -104,7 +116,7 @@ struct ProfileSubScreen: View {
             .padding(.horizontal, 16)
             .frame(height: 54)
 
-            ScrollView {
+            ScrollView(showsIndicators: false) {
                 content
                     .padding(.top, 8)
                     .padding(.bottom, 24)
@@ -113,7 +125,15 @@ struct ProfileSubScreen: View {
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.interactively)
         }
-        .edgeSwipeBack { if let parent { session.profileRoute = parent } else { back() } }
+        .edgeSwipeBack { attemptLeave() }
+        .unsavedChangesDialog(isPresented: $showUnsaved,
+                              title: s.t("Несохранённые изменения", "Unsaved changes"),
+                              message: s.t("Вы не сохранили изменения. Применить их?",
+                                           "You have unsaved changes. Apply them?"),
+                              saveTitle: s.t("Применить", "Apply"),
+                              discardTitle: s.t("Сбросить", "Discard"),
+                              onSave: { leave.saveSignal += 1 },
+                              onDiscard: { doLeave() })
     }
 
     @ViewBuilder
@@ -328,65 +348,6 @@ struct ChoiceGroup: View {
 
 // MARK: - Конфиденциальность
 
-// MARK: - Оформление
-
-struct AppearanceScreen: View {
-    @AppStorage("isDark") private var isDark = true
-    @AppStorage("accent") private var accent = 0
-    @Environment(\.theme) private var theme
-    @Environment(\.lang) private var lang
-
-    private var s: Strings { Strings(lang: lang) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup {
-                HStack(spacing: 14) {
-                    Image(systemName: "circle.lefthalf.filled")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .frame(width: 30, height: 30)
-                        .background(Color.indigo, in: RoundedRectangle(cornerRadius: 8))
-                    Text(s.themeLabel).font(.system(size: 16)).foregroundStyle(theme.text)
-                    Spacer()
-                    ThemeToggle(isDark: $isDark)
-                }
-                .padding(.horizontal, 14)
-                .frame(height: 56)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(s.accentColor.uppercased())
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 30)
-
-                HStack(spacing: 14) {
-                    ForEach(0..<Theme.accents.count, id: \.self) { index in
-                        Button {
-                            Haptics.select()
-                            withAnimation(.easeInOut(duration: 0.25)) { accent = index }
-                        } label: {
-                            Circle()
-                                .fill(Theme.swatch(index))
-                                .frame(width: 42, height: 42)
-                                .overlay {
-                                    if accent == index {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 15, weight: .bold))
-                                            .foregroundStyle(Color.white)
-                                    }
-                                }
-                                .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
-                        }
-                        .buttonStyle(PressStyle())
-                    }
-                }
-                .padding(.horizontal, 24)
-            }
-        }
-    }
-}
 
 // MARK: - Язык
 
@@ -399,69 +360,6 @@ struct LanguageScreen: View {
         ChoiceGroup(title: Strings(lang: lang).languageTitle,
                     options: flow.availableLanguages.map { ($0.code, $0.nativeName) },
                     current: langRaw) { langRaw = $0 }
-    }
-}
-
-// MARK: - Данные и память
-
-struct DataScreen: View {
-    @AppStorage("autoplay") private var autoplay = true
-    @Environment(\.theme) private var theme
-    @Environment(\.lang) private var lang
-    @State private var cacheBytes = URLCache.shared.currentDiskUsage
-    @State private var clearing = false
-    @State private var freedBytes = 0
-
-    private var s: Strings { Strings(lang: lang) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 8) {
-                SettingsGroup {
-                    HStack(spacing: 14) {
-                        Image(systemName: "play.rectangle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(width: 30, height: 30)
-                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 8))
-                        Text(s.autoplayVideo).font(.system(size: 16)).foregroundStyle(theme.text)
-                        Spacer()
-                        Toggle("", isOn: $autoplay).labelsHidden().tint(theme.accentColor)
-                    }
-                    .padding(.horizontal, 14)
-                    .frame(height: 56)
-                }
-                Text(s.autoplayHint)
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 30)
-            }
-
-            SettingsGroup {
-                SettingsRow(icon: "photo.stack.fill", tint: .teal, title: s.cacheSize,
-                            value: ByteCountFormatter.string(fromByteCount: Int64(cacheBytes), countStyle: .file))
-                SettingsDivider()
-                Button {
-                    freedBytes = URLCache.shared.currentDiskUsage
-                    URLCache.shared.removeAllCachedResponses()
-                    cacheBytes = URLCache.shared.currentDiskUsage
-                    Haptics.impact(.soft)
-                    clearing = true
-                } label: {
-                    Text(s.clearCache)
-                        .font(.system(size: 16))
-                        .foregroundStyle(theme.danger)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle())
-            }
-        }
-        .fullScreenCover(isPresented: $clearing) {
-            CacheClearView(freedBytes: freedBytes) { clearing = false }
-                .preferredColorScheme(theme.dark ? .dark : .light)
-        }
     }
 }
 

@@ -31,7 +31,7 @@ struct FriendsTab: View {
                     section(s.t("Заявки в друзья", "Friend requests"), count: model.incoming.count) {
                         ForEach(model.incoming) { u in
                             row(u) {
-                                HStack(spacing: 8) {
+                                HStack(spacing: 6) {
                                     smallButton(s.t("Принять", "Accept"), filled: true, id: u.id) {
                                         await model.setFriend(id: u.id, add: true)
                                     }
@@ -136,6 +136,7 @@ struct FriendsTab: View {
             }
             .buttonStyle(.plain)
             trailing()
+                .layoutPriority(1)            // кнопки — целиком, а длинное имя сокращается «…»
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
@@ -149,7 +150,9 @@ struct FriendsTab: View {
                 busy.remove(id)
             }
         } label: {
+            // всегда в одну строку: не переносится на «Принят / ь», при нехватке места чуть уменьшается
             Text(title).font(.system(size: 13, weight: .semibold))
+                .lineLimit(1).minimumScaleFactor(0.75).fixedSize(horizontal: true, vertical: false)
                 .foregroundStyle(filled ? Color.white : theme.accentColor)
                 .padding(.horizontal, 12).frame(height: 32)
                 .background {

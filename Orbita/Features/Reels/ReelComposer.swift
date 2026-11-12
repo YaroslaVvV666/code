@@ -1,8 +1,11 @@
 import SwiftUI
 import PhotosUI
+import Photos
 import AVFoundation
+import Combine
+import UniformTypeIdentifiers
 
-/// Публикация шортса — отдельно от обычных постов: одно вертикальное видео (до 3 минут) и подпись
+/// Публикация шортса — отдельно от обычных постов: одно вертикальное видео (момент до 1 минуты) и подпись
 struct ReelComposerView: View {
     var onPosted: () async -> Void
 
@@ -23,12 +26,30 @@ struct ReelComposerView: View {
     @State private var errorText: String?
     @State private var tracks: [Track] = []
     @State private var music: Track?
+    @State private var cameraMusic: Track?          // музыка, выбранная на экране камеры (подставляется в редактор)
+    @State private var options = PostOptions()
     @FocusState private var focused: Bool
+    /// Коллаж: несколько фото и живых фото — в шортсах листаются вбок, как в TikTok
+    @State private var collage: [CollageItem] = []
+    @State private var collagePage = 0
+    @State private var editingPhoto: Int?           // какое фото коллажа открыто в редакторе
+
+    private struct EditIndex: Identifiable { let id: Int }
+
+    struct CollageItem: Identifiable {
+        let id = UUID()
+        var image: UIImage
+        var jpeg: Data
+        var live: URL?                 // видео живого фото (со звуком)
+    }
+
+    /// Пока видео не выбрано и не снято — показываем камеру (слева внизу — «Галерея»)
+    private var cameraVisible: Bool { prepared == nil && collage.isEmpty && editModel == nil && !preparing && !showEditor }
 
     private let maxSeconds: Double = 180
     private let maxCaption = 300
     private var s: Strings { Strings(lang: lang) }
-    private var canPost: Bool { prepared != nil && !uploading && !preparing }
+    private var canPost: Bool { (prepared != nil || !collage.isEmpty) && !uploading && !preparing }
 
     private var aspectOK: Bool {
         guard let p = prepared, p.height > 0 else { return true }
@@ -42,9 +63,18 @@ struct ReelComposerView: View {
                 header
                 ScrollView {
                     VStack(spacing: 18) {
-                        videoCard
-                        editRow
+                        if collage.isEmpty {
+                            videoCard
+                            editRow
+                        } else {
+                            collageCard
+                            collageMusicRow
+                        }
                         captionField
+                        if prepared != nil { feedPreview }
+                        PostOptionsCard(options: $options, showsRepost: true,
+                                        hashtags: PostOptionsCard.hashtags(in: caption), detail: videoDetail)
+                        ReelLabelsCard(labels: $options.labels)          // «Создано ИИ», место, «Реклама»…
                         hints
                         if let errorText {
                             Text(errorText).font(.system(size: 14)).foregroundStyle(theme.danger)
@@ -55,6 +85,15 @@ struct ReelComposerView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 publishBar
+            }
+        }
+        .overlay {
+            if cameraVisible {
+                ReelCameraView(error: errorText, onClose: { dismiss() }, onGallery: { errorText = nil; showPicker = true },
+                               onRecorded: { url in await loadRecorded(url) },
+                               onPhoto: { data in await loadPhoto(data) },
+                               music: $cameraMusic, tracks: tracks)
+                    .transition(.opacity)
             }
         }
         .preferredColorScheme(theme.dark ? .dark : .light)
@@ -71,9 +110,169 @@ struct ReelComposerView: View {
                                onClose: { showEditor = false; if prepared == nil { discard() } })
             }
         }
-        .onDisappear { if !showEditor { discard() } }
+        .fullScreenCover(item: Binding(get: { editingPhoto.map { EditIndex(id: $0) } }, set: { editingPhoto = $0?.id })) { e in
+            if collage.indices.contains(e.id) {
+                PhotoEditorView(image: collage[e.id].image, onDone: { edited in
+                    if collage.indices.contains(e.id),
+                       let data = edited.jpegData(compressionQuality: 0.9),
+                       let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let img = UIImage(data: jpeg) {
+                        collage[e.id].image = img
+                        collage[e.id].jpeg = jpeg
+                    }
+                    editingPhoto = nil
+                }, onCancel: { editingPhoto = nil })
+            }
+        }
+        .holdsMedia()
+        .onDisappear { if !showEditor && editingPhoto == nil { discard() } }
         .task {
             if let list = try? await session.socialRepo.playlist(userID: session.serverID) { tracks = list }
+        }
+    }
+
+    // MARK: Коллаж
+
+    /// Предпросмотр коллажа: листается вбок, сверху «1/5», снизу точки, у живых фото — значок LIVE
+    private var collageCard: some View {
+        let width: CGFloat = 220, height = width * 16 / 9
+        return VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                TabView(selection: $collagePage) {
+                    ForEach(Array(collage.enumerated()), id: \.element.id) { i, item in
+                        // каждое фото целиком и строго по центру кадра 9:16 — так же, как его увидят в шортсах
+                        Color.black
+                            .overlay {
+                                Image(uiImage: item.image).resizable().scaledToFit()
+                                    .frame(maxWidth: width, maxHeight: height)
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if item.live != nil {
+                                    Label("LIVE", systemImage: "livephoto").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                        .padding(.horizontal, 7).frame(height: 20).background(Color.black.opacity(0.5), in: Capsule())
+                                        .padding(8)
+                                }
+                            }
+                            .frame(width: width, height: height)
+                            .clipped()
+                            .contentShape(Rectangle())
+                            .onTapGesture { if item.live == nil { editingPhoto = i } }
+                            .tag(i)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                if collage.count > 1 {
+                    Text("\(collagePage + 1)/\(collage.count)")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                        .padding(.horizontal, 9).frame(height: 22).background(Color.black.opacity(0.5), in: Capsule())
+                        .padding(8)
+                }
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            if collage.count > 1 {
+                HStack(spacing: 5) {
+                    ForEach(0..<collage.count, id: \.self) { i in
+                        Capsule().fill(i == collagePage ? theme.accentColor : theme.textTertiary.opacity(0.5))
+                            .frame(width: i == collagePage ? 14 : 6, height: 6)
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: collagePage)
+            }
+            HStack(spacing: 10) {
+                if collage.indices.contains(collagePage), collage[collagePage].live == nil {
+                    // каждое фото коллажа можно отредактировать: обрезать, повернуть, рисовать, добавить текст
+                    Button { editingPhoto = collagePage } label: {
+                        Label(s.t("Изменить", "Edit"), systemImage: "slider.horizontal.3")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                    }
+                    .buttonStyle(PressStyle())
+                }
+                Button { showPicker = true } label: {
+                    Label(s.t("Заменить", "Replace"), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                }
+                .buttonStyle(PressStyle())
+                if collage.count > 1 {
+                    Button {
+                        let i = min(collagePage, collage.count - 1)
+                        if let u = collage[i].live { try? FileManager.default.removeItem(at: u) }
+                        withAnimation { _ = collage.remove(at: i); collagePage = max(0, min(collagePage, collage.count - 1)) }
+                    } label: {
+                        Label(s.t("Убрать", "Remove"), systemImage: "trash")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.danger)
+                            .frame(maxWidth: .infinity).frame(height: 42).card(theme, radius: 21)
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
+            .disabled(uploading)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Музыка коллажа: играет через все фото, не обрываясь. Без музыки звучит первое живое фото
+    private var collageMusicRow: some View {
+        Menu {
+            Button { music = nil } label: {
+                Label(s.t("Без музыки", "No music"), systemImage: music == nil ? "checkmark" : "speaker.slash")
+            }
+            ForEach(tracks) { t in
+                Button { music = t } label: {
+                    if music?.id == t.id { Label(t.display, systemImage: "checkmark") } else { Text(t.display) }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "music.note").foregroundStyle(theme.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(music?.display ?? s.t("Добавить музыку", "Add music"))
+                        .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(music == nil && collage.contains(where: { $0.live != nil })
+                         ? s.t("Без музыки звучит живое фото — через весь коллаж", "Without music, the live photo's sound plays across the collage")
+                         : s.t("Играет через все фото, не обрываясь", "Plays across all photos without stopping"))
+                        .font(.system(size: 12)).foregroundStyle(theme.textSecondary).lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 12)).foregroundStyle(theme.textTertiary)
+            }
+            .padding(14).card(theme, radius: 16)
+        }
+        .disabled(uploading)
+    }
+
+    /// Публикация коллажа: фото — картинками, живые фото — короткими видео со звуком (отметка live)
+    private func publishCollage() {
+        focused = false
+        uploading = true
+        errorText = nil
+        let items = collage
+        Task {
+            defer { uploading = false }
+            do {
+                var uploaded: [MediaItem] = []
+                for item in items {
+                    if let live = item.live {
+                        let prepared = try await MediaPreparer.prepare(videoFile: live)
+                        var m = try await session.feedRepo.uploadMedia(prepared)
+                        m.live = true
+                        uploaded.append(m)
+                    } else {
+                        let prepared = try MediaPreparer.prepareImage(item.jpeg)
+                        uploaded.append(try await session.feedRepo.uploadMedia(prepared))
+                    }
+                }
+                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                        media: uploaded, musicTrack: music?.id, options: options)
+                discard()
+                Haptics.notify(.success)
+                await onPosted()
+                dismiss()
+            } catch {
+                Haptics.notify(.error)
+                errorText = s.api((error as? APIError) ?? .offline)
+            }
         }
     }
 
@@ -110,6 +309,51 @@ struct ReelComposerView: View {
         }
     }
 
+    // MARK: Предпросмотр и детали
+
+    /// Технические детали ролика: размер кадра и длительность
+    private var videoDetail: String {
+        guard let p = prepared else { return "" }
+        var parts: [String] = []
+        if p.width > 0, p.height > 0 { parts.append("\(p.width)×\(p.height)") }
+        if let d = p.duration { parts.append(clock(d)) }
+        parts.append(aspectOK ? s.t("вертикальное — на весь экран", "vertical — fills the screen")
+                              : s.t("горизонтальное — с полосами", "horizontal — with bars"))
+        return parts.joined(separator: " · ")
+    }
+
+    /// Так ролик увидят в ленте «Шортс»: кадр, подпись, музыка и кнопки справа
+    private var feedPreview: some View {
+        let w: CGFloat = 150, h = w * 16 / 9
+        return VStack(spacing: 8) {
+            Text(s.t("КАК ЭТО УВИДЯТ", "HOW IT LOOKS"))
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+            ZStack(alignment: .bottomLeading) {
+                if let prepared, let image = UIImage(data: prepared.thumbnail) {
+                    Image(uiImage: image).resizable().scaledToFill().frame(width: w, height: h).clipped()
+                }
+                LinearGradient(colors: [.clear, .black.opacity(0.6)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("@" + (session.profile.profile?.username ?? session.profile.profile?.name ?? ""))
+                        .font(.system(size: 10, weight: .bold))
+                    if !caption.isEmpty { Text(caption).font(.system(size: 8)).lineLimit(2) }
+                    if let music { Label(music.display, systemImage: "music.note").font(.system(size: 7, weight: .medium)).lineLimit(1) }
+                }
+                .foregroundStyle(.white).padding(8).frame(maxWidth: w - 34, alignment: .leading)
+                VStack(spacing: 8) {
+                    Image(systemName: "heart.fill"); Image(systemName: "bubble.fill").opacity(options.commentsOff ? 0.3 : 1)
+                    Image(systemName: "bookmark.fill"); Image(systemName: "arrow.2.squarepath").opacity(options.noRepost ? 0.3 : 1)
+                }
+                .font(.system(size: 11)).foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing).padding(8)
+            }
+            .frame(width: w, height: h)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(theme.stroke, lineWidth: 1))
+        }
+    }
+
     // MARK: Части экрана
 
     private var header: some View {
@@ -125,7 +369,7 @@ struct ReelComposerView: View {
             Spacer()
             Color.clear.frame(width: 38, height: 38)
         }
-        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 10)
     }
 
     private var videoCard: some View {
@@ -154,7 +398,7 @@ struct ReelComposerView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "video.badge.plus").font(.system(size: 38, weight: .light)).foregroundStyle(theme.accentColor)
                         Text(s.t("Выбрать видео или фото", "Choose video or photos")).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
-                        Text(s.t("Видео до 3 минут или несколько фото", "Video up to 3 min, or several photos")).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                        Text(s.t("Видео (момент до 1 минуты) или несколько фото", "Video (pick up to 1 min) or several photos")).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
                     }
                 }
             }
@@ -236,13 +480,30 @@ struct ReelComposerView: View {
                 prepared = media
                 editModel = ReelEditModel(video: url)
             } else {
-                var images: [UIImage] = []
+                // фото: несколько или живые — коллаж (листается вбок), одно обычное — в редактор, как раньше
+                var list: [CollageItem] = []
                 for item in items {
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) { images.append(image) }
+                    guard let data = try? await item.loadTransferable(type: Data.self),
+                          let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) else { continue }
+                    var entry = CollageItem(image: image, jpeg: jpeg)
+                    if item.supportedContentTypes.contains(where: { $0.conforms(to: .livePhoto) }), let id = item.itemIdentifier {
+                        entry.live = await LivePhotoVideo.export(localIdentifier: id)
+                    }
+                    list.append(entry)
                 }
-                guard !images.isEmpty else { errorText = s.t("Не удалось открыть фото", "Couldn't open the photos"); return }
-                editModel = ReelEditModel(photos: images)
+                guard !list.isEmpty else { errorText = s.t("Не удалось открыть фото", "Couldn't open the photos"); return }
+                if list.count > 1 || list.contains(where: { $0.live != nil }) {
+                    collage = list
+                    collagePage = 0
+                    if music == nil, let m = cameraMusic { music = m }
+                    Haptics.impact(.light)
+                    if !options.sensitive {
+                        let thumbs = list.map(\.jpeg)
+                        Task { if await SensitiveScanner.isSensitive(imageDatas: thumbs) { options.sensitive = true } }
+                    }
+                    return
+                }
+                editModel = ReelEditModel(photos: list.map(\.image))
             }
             Haptics.impact(.light)
             showEditor = true
@@ -255,6 +516,40 @@ struct ReelComposerView: View {
         }
     }
 
+    /// Видео, снятое камерой: сжимаем, и дальше как с выбранным из галереи
+    private func loadRecorded(_ file: URL) async -> Bool {
+        errorText = nil
+        discard()
+        do {
+            let media = try await MediaPreparer.prepare(videoFile: file)
+            try? FileManager.default.removeItem(at: file)
+            guard case .video(let url) = media.source else { return false }
+            original = media
+            prepared = media
+            let em = ReelEditModel(video: url)
+            editModel = em
+            if let m = cameraMusic { await em.setMusic(m) }        // музыка, выбранная на камере
+            Haptics.impact(.light)
+            showEditor = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Фото, снятое камерой в режиме «Фото»: как одиночное фото из галереи
+    private func loadPhoto(_ data: Data) async -> Bool {
+        errorText = nil
+        discard()
+        guard let jpeg = ImageProcessing.prepare(data, maxSide: 1600), let image = UIImage(data: jpeg) else { return false }
+        let em = ReelEditModel(photos: [image])
+        editModel = em
+        if let m = cameraMusic { await em.setMusic(m) }
+        Haptics.impact(.light)
+        showEditor = true
+        return true
+    }
+
     private func editorFinished(_ media: PreparedMedia?, _ track: Track?) {
         if let old = prepared, case .video(let u) = old.source {
             var keep = false
@@ -264,9 +559,15 @@ struct ReelComposerView: View {
         prepared = media ?? original
         music = track
         showEditor = false
+        // система сама распознаёт «взрослый» контент по обложке — включаем размытие (можно выключить вручную)
+        if let thumb = prepared?.thumbnail, !options.sensitive {
+            Task { if await SensitiveScanner.isSensitive(imageDatas: [thumb]) { options.sensitive = true } }
+        }
     }
 
     private func discard() {
+        for item in collage { if let u = item.live { try? FileManager.default.removeItem(at: u) } }
+        collage = []
         if let p = prepared, case .video(let url) = p.source { try? FileManager.default.removeItem(at: url) }
         if let o = original, case .video(let url) = o.source { try? FileManager.default.removeItem(at: url) }
         editModel?.cleanup()
@@ -277,6 +578,7 @@ struct ReelComposerView: View {
     }
 
     private func publish() {
+        if !collage.isEmpty { publishCollage(); return }
         guard let media = prepared else { return }
         focused = false
         uploading = true
@@ -285,7 +587,7 @@ struct ReelComposerView: View {
             defer { uploading = false }
             do {
                 let item = try await session.feedRepo.uploadMedia(media)
-                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: item, musicTrack: music?.id)
+                _ = try await session.extras.createReel(text: caption.trimmingCharacters(in: .whitespacesAndNewlines), media: [item], musicTrack: music?.id, options: options)
                 discard()
                 Haptics.notify(.success)
                 await onPosted()
@@ -293,6 +595,25 @@ struct ReelComposerView: View {
             } catch {
                 Haptics.notify(.error)
                 errorText = s.api((error as? APIError) ?? .offline)
+            }
+        }
+    }
+}
+
+// MARK: - Видео живого фото
+
+/// Достаёт из галереи короткое видео живого фото (вместе со звуком) во временный файл
+enum LivePhotoVideo {
+    static func export(localIdentifier: String) async -> URL? {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject,
+              let resource = PHAssetResource.assetResources(for: asset).first(where: { $0.type == .pairedVideo || $0.type == .fullSizePairedVideo })
+        else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { cont in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+                cont.resume(returning: error == nil ? url : nil)
             }
         }
     }

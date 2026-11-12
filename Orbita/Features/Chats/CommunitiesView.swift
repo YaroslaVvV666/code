@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Каталог: каналы и группы (вкладка «Сообщества» и «Открытые» в новом чате)
 
@@ -13,6 +14,7 @@ struct CommunityDirectory: View {
     @State private var query = ""
     @State private var filter = 0                 // 0 — всё, 1 — каналы, 2 — группы
     @State private var found: [GroupPreview] = []
+    @State private var messageHits: [MessageHit] = []
     @State private var loaded = false
     @State private var busy: String?
     @State private var notice: String?
@@ -52,8 +54,10 @@ struct CommunityDirectory: View {
             }
             .pickerStyle(.segmented).padding(.horizontal, 16)
 
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: 0).id("communitiesTop")
                     if !myList.isEmpty {
                         header(s.t("МОИ", "MINE"))
                         ForEach(myList) { chat in myRow(chat) }
@@ -66,10 +70,20 @@ struct CommunityDirectory: View {
                             .frame(maxWidth: .infinity).padding(30)
                     }
                     ForEach(discover) { g in row(g) }
+                    if !messageHits.isEmpty {
+                        header(s.t("СООБЩЕНИЯ", "MESSAGES"))
+                        ForEach(messageHits) { hit in
+                            MessageHitRow(hit: hit, query: query) { onOpen(hit.peer) }
+                        }
+                    }
                 }
                 .padding(.bottom, 90)
             }
             .scrollIndicators(.hidden)
+            .onReceive(TabReselect.shared.publisher(.communities)) { _ in
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { proxy.scrollTo("communitiesTop", anchor: .top) }
+            }
+            }
         }
         .overlay(alignment: .bottom) {
             if let notice {
@@ -82,6 +96,17 @@ struct CommunityDirectory: View {
             if Task.isCancelled { return }
             found = (try? await session.messengerRepo.publicGroups(query: query, type: typeParam)) ?? []
             loaded = true
+            // ключевые слова в сообщениях каналов и групп
+            let raw = query.trimmingCharacters(in: .whitespaces)
+            if raw.count >= 2 {
+                let hits = (try? await session.messengerRepo.searchMessages(query: raw)) ?? []
+                if Task.isCancelled { return }
+                messageHits = hits.filter { h in
+                    h.peer.isGroup && (filter == 0 || (filter == 1) == h.peer.isChannel)
+                }
+            } else {
+                messageHits = []
+            }
         }
     }
 
@@ -109,8 +134,16 @@ struct CommunityDirectory: View {
                 }
                 Spacer()
                 if chat.mentions > 0 {
-                    Image(systemName: "at").font(.system(size: 12, weight: .heavy)).foregroundStyle(.white)
-                        .frame(width: 22, height: 22).background(theme.accent, in: Circle())
+                    HStack(spacing: 6) {
+                        Image(systemName: "at").font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.90, green: 0.28, blue: 0.17))
+                        if chat.unread > 0 {
+                            Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
+                                .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
+                                .background(chat.muted ? AnyShapeStyle(theme.textTertiary) : AnyShapeStyle(Color(red: 0.90, green: 0.28, blue: 0.17)), in: Capsule())
+                        }
+                    }
                 } else if chat.unread > 0 {
                     Text(chat.unread > 99 ? "99+" : "\(chat.unread)")
                         .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
@@ -233,6 +266,7 @@ struct CommunitiesView: View {
                 ChatScreen(route: route, session: session)
                     .environmentObject(session)
                     .environmentObject(flow)
+                    .environment(\.chatHostTab, .communities)
             }
         }
         .task { await chats.refresh() }
@@ -243,7 +277,7 @@ struct CommunitiesView: View {
             }
             .environmentObject(session).environmentObject(flow)
             .environment(\.theme, theme).environment(\.lang, lang)
-            .presentationBackground(theme.sheet)
+            .sheetStyle(theme)
         }
     }
 }
@@ -292,6 +326,7 @@ struct GroupLinkSheet: View {
                     .padding(.horizontal, 24).padding(.top, 8)
                 if preview.kind == "open" && !preview.joined {
                     Button {
+                        ChannelViewSource.openedByLink.insert(preview.id)
                         PushManager.shared.openChat = ChatRoute(peer: ChatPeer(preview: preview))
                         dismiss()
                     } label: {
@@ -358,5 +393,71 @@ struct GroupLinkSheet: View {
                 }
             } catch { errorText = s.api((error as? APIError) ?? .offline) }
         }
+    }
+}
+
+
+/// Строка найденного сообщения (общая для «Чатов» и «Сообществ»)
+struct MessageHitRow: View {
+    let hit: MessageHit
+    let query: String
+    let onOpen: () -> Void
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        // как в Telegram: аватар чата, название и время, ниже — кто написал, ещё ниже — текст, найденное слово выделено
+        Button(action: onOpen) {
+            HStack(alignment: .top, spacing: 12) {
+                AvatarView(name: hit.peer.name, size: 58, avatarID: hit.peer.avatarID).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(hit.peer.name).font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text).lineLimit(1)
+                        Spacer(minLength: 6)
+                        Text(time).font(.system(size: 14).monospacedDigit()).foregroundStyle(theme.textTertiary)
+                    }
+                    if let who = hit.mine ? Strings(lang: lang).t("Вы", "You") : hit.sender {
+                        Text(who).font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                    }
+                    highlighted
+                        .font(.system(size: 15)).lineLimit(2)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 9)
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke).frame(height: 0.5).padding(.leading, 86) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var time: String {
+        Calendar.current.isDateInToday(hit.date) ? FormatterCache.format(hit.date, "HH:mm")
+            : (Calendar.current.isDate(hit.date, equalTo: Date(), toGranularity: .year)
+               ? FormatterCache.format(hit.date, "d MMM") : FormatterCache.format(hit.date, "dd.MM.yy"))
+    }
+
+    /// Найденное слово — ярко и жирно, остальное приглушено
+    private var highlighted: Text {
+        let text = snippet
+        let q = query.trimmingCharacters(in: .whitespaces)
+        var out = Text("")
+        var rest = Substring(text)
+        while !q.isEmpty, let r = rest.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) {
+            out = out + Text(String(rest[rest.startIndex..<r.lowerBound])).foregroundColor(theme.textSecondary)
+                + Text(String(rest[r])).foregroundColor(theme.text).bold()
+            rest = rest[r.upperBound...]
+        }
+        return out + Text(String(rest)).foregroundColor(theme.textSecondary)
+    }
+
+    /// Обрезаем длинный текст вокруг найденного слова
+    private var snippet: String {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let text = hit.text
+        guard text.count > 90, let r = text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) else { return text }
+        let start = text.index(r.lowerBound, offsetBy: -30, limitedBy: text.startIndex) ?? text.startIndex
+        return (start == text.startIndex ? "" : "…") + String(text[start...].prefix(120))
     }
 }

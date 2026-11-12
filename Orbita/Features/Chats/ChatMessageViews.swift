@@ -3,6 +3,7 @@ import AVFoundation
 import QuickLook
 import UIKit
 import Combine
+import CoreMedia
 
 // MARK: - Палитра переписки
 
@@ -35,10 +36,18 @@ struct MessageMeta: View {
             if message.editedAt != nil {
                 Text(Strings(lang: lang).edited).font(.system(size: 11))
             }
-            Text(ChatTime.clock(message.createdAt)).font(.system(size: 11))
+            Text(ChatTime.clock(message.createdAt)).font(.system(size: 11).monospacedDigit())
             if message.mine {
                 if message.isPending {
+                    if message.failed {
+                        Text(Strings(lang: lang).t("Отправляется…", "Sending…")).font(.system(size: 11))
+                    }
                     SendingIndicator(color: color)
+                    if message.failed {
+                        // нет связи: сообщение уйдёт само, когда она появится
+                        Image(systemName: "exclamationmark.circle.fill").font(.system(size: 14))
+                            .symbolRenderingMode(.palette).foregroundStyle(.white, Color(red: 1, green: 0.23, blue: 0.19))
+                    }
                 } else {
                     Ticks(read: message.read, color: color)
                 }
@@ -47,11 +56,171 @@ struct MessageMeta: View {
         .foregroundStyle(color)
         .padding(.horizontal, onMedia ? 7 : 0)
         .padding(.vertical, onMedia ? 3 : 0)
-        .background(onMedia ? Color.black.opacity(0.42) : Color.clear, in: Capsule())
+        .background(onMedia ? Color.black.opacity(0.45) : Color.clear, in: Capsule())
+    }
+}
+
+/// Одно место для времени и галочек во всех пузырях: нижний правый угол, одинаковые отступы
+extension View {
+    func metaCorner<M: View>(@ViewBuilder _ meta: () -> M) -> some View {
+        overlay(alignment: .bottomTrailing) { meta().padding(.trailing, MetaInset.trailing).padding(.bottom, MetaInset.bottom) }
+    }
+}
+
+enum MetaInset {
+    static let trailing: CGFloat = 10       // внутри пузыря
+    static let bottom: CGFloat = 6
+    static let media: CGFloat = 6           // поверх фото, видео, стикера
+}
+
+// MARK: - Своя заметка к сообщению
+
+/// Экран чата открывает редактор заметки по id сообщения (из раскрытой заметки — «Изменить»)
+private struct EditMessageNoteKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var editMessageNote: ((String) -> Void)? {
+        get { self[EditMessageNoteKey.self] }
+        set { self[EditMessageNoteKey.self] = newValue }
+    }
+}
+
+/// Заметка отдельным пузырьком, чуть заезжающим на низ сообщения. Длинная обрезается;
+/// нажатие — полная версия во всплывающем окне.
+struct MessageNoteChip: View {
+    let messageID: String
+    let note: String
+
+    static let maxChars = 18
+
+    /// Длинная — первые символы и «…»; ширина предсказуема, под неё в пузыре оставляется место
+    static func short(_ note: String) -> String {
+        let line = note.replacingOccurrences(of: "\n", with: " ")
+        return line.count > maxChars ? String(line.prefix(maxChars - 1)).trimmingCharacters(in: .whitespaces) + "…" : line
+    }
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.editMessageNote) private var editNote
+    @State private var expanded = false
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "note.text").font(.system(size: 9, weight: .semibold))
+            Text(Self.short(note)).font(.system(size: 11, weight: .medium).italic()).lineLimit(1)
+        }
+        .foregroundStyle(theme.textSecondary)
+        .fixedSize()
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(theme.surface, in: Capsule())
+        .overlay(Capsule().stroke(theme.stroke, lineWidth: 0.6))
+        .shadow(color: .black.opacity(theme.dark ? 0.35 : 0.14), radius: 4, y: 1)
+        .contentShape(Capsule())
+        .onTapGesture {
+            guard editNote != nil, !MessageMenu.isOpen else { return }
+            Haptics.select()
+            expanded = true
+        }
+        .popover(isPresented: $expanded, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(Strings(lang: lang).t("Заметка · видна только вам", "Note · only you can see it"), systemImage: "lock.fill")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(theme.textSecondary)
+                ScrollView {
+                    Text(note).font(.system(size: 16)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 320)
+                .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    expanded = false
+                    let id = messageID
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { editNote?(id) }
+                } label: {
+                    Label(Strings(lang: lang).t("Изменить", "Edit"), systemImage: "pencil")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.accentColor)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .frame(width: min(320, UIScreen.main.bounds.width - 48))
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// Редактор заметки: добавить, изменить, удалить
+struct MessageNoteSheet: View {
+    let message: ChatMessage
+    var onSave: (String) -> Void
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var s: Strings { Strings(lang: lang) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button(s.t("Отмена", "Cancel")) { dismiss() }.foregroundStyle(theme.textSecondary)
+                Spacer()
+                Text(s.t("Заметка", "Note")).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
+                Spacer()
+                Button(s.t("Готово", "Done")) {
+                    Haptics.notify(.success)
+                    onSave(text); dismiss()
+                }
+                .font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.accentColor)
+            }
+            .padding(.top, 16)
+            Label(s.t("Видна только вам — собеседник её не увидит", "Only you can see it — the other person won't"),
+                  systemImage: "lock.fill")
+                .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            TextField(s.t("Текст заметки", "Note text"), text: $text, axis: .vertical)
+                .font(.system(size: 16)).foregroundStyle(theme.text)
+                .lineLimit(3...10)
+                .focused($focused)
+                .padding(12)
+                .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onChange(of: text) { _, v in if v.count > 2000 { text = String(v.prefix(2000)) } }
+            if message.note != nil {
+                Button(role: .destructive) {
+                    Haptics.impact(.light)
+                    onSave(""); dismiss()
+                } label: {
+                    Label(s.t("Удалить заметку", "Delete note"), systemImage: "trash")
+                        .font(.system(size: 15, weight: .medium)).foregroundStyle(theme.danger)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .onAppear { text = message.note ?? ""; focused = true }
     }
 }
 
 // MARK: - Строка сообщения
+
+/// Сравнение строк сообщения: только данные, без замыканий. Замыкания пишут в @State/@StateObject экрана —
+/// их хранилище общее, поэтому «старые» замыкания у пропущенной строки работают с актуальным состоянием
+extension MessageRow: Equatable {
+    nonisolated static func == (a: MessageRow, b: MessageRow) -> Bool {
+        MainActor.assumeIsolated {
+            a.message == b.message && a.isFirst == b.isFirst && a.isLast == b.isLast
+                && a.showSender == b.showSender && a.noForward == b.noForward
+                && a.interactive == b.interactive && a.pinnedMark == b.pinnedMark
+                && (a.onOpenComments == nil) == (b.onOpenComments == nil)
+                && (a.onCallBack == nil) == (b.onCallBack == nil)
+                && (a.onReact == nil) == (b.onReact == nil)
+        }
+    }
+}
 
 struct MessageRow: View {
     let message: ChatMessage
@@ -65,6 +234,8 @@ struct MessageRow: View {
     var onPlayAudio: (ChatAttachment) -> Void = { _ in }
     var showSender = false
     var noForward = false
+    var onReactionInfo: ((String) -> Void)? = nil       // зажали реакцию — кто её поставил и когда
+    var onJumpToReply: ((String) -> Void)? = nil     // нажали на цитату — перейти к исходному сообщению
     var onReact: ((String) -> Void)? = nil          // двойной тап и нажатие на «чип» реакции
     var onLongPress: (() -> Void)? = nil            // зажатие — реакции и меню
     var interactive = true
@@ -74,14 +245,30 @@ struct MessageRow: View {
     var onOpenStory: ((String) -> Void)? = nil
     var onPollChanged: ((PollInfo) -> Void)? = nil
     var onOpenComments: (() -> Void)? = nil          // канал с обсуждением: «Комментарии»
+    var onCallBack: ((Bool) -> Void)? = nil          // нажали на запись о звонке — перезвонить (true — видео)
+    var onOpenStickerPack: ((String) -> Void)? = nil  // нажали на свой стикер — шторка набора «Добавить»
+    var onOpenEntity: ((ChatEntity) -> Void)? = nil   // нажали на номер / карту / криптоадрес / @юзернейм в тексте
 
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @Environment(\.openURL) private var parentOpenURL
+    @Environment(\.onBotCommand) private var onBotCommand
+    @Environment(\.saveScope) private var saveScope
+    @AppStorage("chat.radius") private var bubbleRadius = 21.0
+    @AppStorage("chat.textSize") private var chatTextSize = 0          // 0 — системный (16)
+    @AppStorage("emoji.big") private var bigEmoji = true
+    @ObservedObject private var translator = ChatTranslator.shared
     @State private var dragX: CGFloat = 0
+    @State private var stickerPop = false        // нажали на стикер — он «пружинит»
+    @State private var longFired = false         // после зажатия (меню открылось) отпускание пальца не должно открывать фото/файл
 
     private var s: Strings { Strings(lang: lang) }
     private var colors: ChatColors { ChatColors(theme: theme) }
     private var mine: Bool { message.mine }
+    /// Касания сообщения не срабатывают: только что было зажатие или открыто меню реакций.
+    /// Палец, которым зажали, остаётся «привязан» к этой строке и после появления меню — его движения и отпускание
+    /// не должны отвечать свайпом, ставить ❤️ или открывать фото/видео/файл под размытием
+    private var blocked: Bool { longFired || MessageMenu.isOpen }
 
     private var stickerOnly: ChatAttachment? {
         guard message.attachments.count == 1, message.text.isEmpty, message.reply == nil,
@@ -94,7 +281,7 @@ struct MessageRow: View {
         return message.attachments[0]
     }
     private var emojiOnly: Bool {
-        message.attachments.isEmpty && message.reply == nil && message.storyReply == nil && message.text.isEmojiOnly
+        bigEmoji && message.attachments.isEmpty && message.reply == nil && message.storyReply == nil && message.text.isEmojiOnly
     }
     /// Одно эмодзи — крупно, два-три — поменьше
     private var emojiSize: CGFloat {
@@ -121,11 +308,13 @@ struct MessageRow: View {
         case "left": what = s.t("вышел(а) из группы", "left the group")
         case "joined": what = s.t("вступил(а) в группу", "joined the group")
         case "removed": what = s.t("исключён(а) из группы", "was removed from the group")
+        case "vc_start": what = s.t("начал(а) видеочат", "started a video chat")
+        case "vc_end": what = s.t("Видеочат завершён", "Video chat ended")
         default: what = ""
         }
         return HStack {
             Spacer(minLength: 0)
-            Text(who.isEmpty ? what : who + " " + what)
+            Text(who.isEmpty || kind == "vc_end" ? what : who + " " + what)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -144,31 +333,63 @@ struct MessageRow: View {
             if mine { Spacer(minLength: 44) }
             content
                 .offset(x: dragX)
-                .overlay(alignment: mine ? .leading : .trailing) {
-                    Image(systemName: "arrowshape.turn.up.left.circle.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(theme.accentColor)
-                        .opacity(Double(min(1, -dragX / 56)))
-                        .offset(x: mine ? -34 : 34)
-                        .scaleEffect(min(1, -dragX / 56))
+                .overlay(alignment: .trailing) {
+                    // значок ответа появляется при свайпе справа от сообщения и «наливается» акцентом при достижении порога
+                    let p = min(1, -dragX / 56)
+                    let ready = p >= 1
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(ready ? Color.white : theme.text)
+                        .frame(width: 40, height: 40)
+                        .background {
+                            if ready { Circle().fill(theme.accent) }
+                            else { Circle().fill(.ultraThinMaterial) }
+                        }
+                        .overlay(Circle().stroke(theme.stroke, lineWidth: ready ? 0 : 0.5))
+                        .scaleEffect(0.5 + 0.5 * p)
+                        .opacity(Double(p))
+                        // стоит на месте справа от сообщения, а пузырь уезжает из-под неё влево при свайпе
+                        .offset(x: -dragX - 18)
+                        .animation(.spring(response: 0.25, dampingFraction: 0.6), value: ready)
                 }
             if !mine { Spacer(minLength: 44) }
         }
         .contentShape(Rectangle())
+        // ссылки в тексте: пока открыто меню реакций (зажали сообщение), отпускание пальца на ссылке её не открывает
+        .environment(\.openURL, OpenURLAction { url in
+            if blocked { return .handled }
+            // нажали на /команду в переписке с ботом — отправляем её (как в Telegram)
+            if let cmd = BotCommandLinks.command(from: url) {
+                if let onBotCommand { Haptics.impact(.light); onBotCommand(cmd) }
+                return .handled
+            }
+            if let entity = ChatEntity(url: url) {
+                if let onOpenEntity { Haptics.impact(.light); onOpenEntity(entity) }
+                return .handled
+            }
+            parentOpenURL(url)
+            return .handled
+        })
         .simultaneousGesture(TapGesture(count: 2).onEnded {
-            if interactive, !message.isPending { onReact?("\u{2764}\u{FE0F}") }
+            if interactive, !message.isPending, !blocked { onReact?("\u{2764}\u{FE0F}") }
         })
-        .simultaneousGesture(LongPressGesture(minimumDuration: 0.32).onEnded { _ in
-            if interactive, !message.isPending, let onLongPress { Haptics.impact(.medium); onLongPress() }
-        })
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .onEnded { _ in
+                if interactive, !message.isPending, !MessageMenu.isOpen, let onLongPress {
+                    longFired = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { longFired = false }
+                    Haptics.impact(.medium); onLongPress()
+                }
+            })
         .simultaneousGesture(
             DragGesture(minimumDistance: 18)
                 .onChanged { value in
+                    guard !MessageMenu.isOpen, !VoiceScrub.active else { if dragX != 0 { dragX = 0 }; return }   // меню / перемотка голосового — свайп-ответа нет
                     guard abs(value.translation.width) > abs(value.translation.height) * 1.6 else { return }
                     dragX = max(-80, min(0, value.translation.width))
                 }
                 .onEnded { value in
-                    if dragX <= -56 {
+                    if dragX <= -56 && !MessageMenu.isOpen && !VoiceScrub.active {
                         Haptics.impact(.medium)
                         onReply()
                     }
@@ -186,8 +407,21 @@ struct MessageRow: View {
 
     private var content: some View {
         VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
-            if let info = callInfo { callBubble(info) } else { core }
+            Group {
+                if let info = callInfo { callBubble(info) } else { core }
+            }
+            .overlay(alignment: mine ? .bottomTrailing : .bottomLeading) {
+                // заметка — отдельный пузырёк, чуть заезжающий на низ сообщения (виден только вам)
+                if let note = message.note {
+                    MessageNoteChip(messageID: message.id, note: note)
+                        .offset(x: mine ? -14 : 14, y: 13)
+                }
+            }
+            .padding(.bottom, message.note != nil ? 16 : 0)      // место под выступающий пузырёк
             if !message.reactions.isEmpty { reactionChips }
+            if !message.markup.isEmpty && (!mine || message.markup.joined().allSatisfy { $0.url != nil }) {
+                BotInlineButtons(message: message).padding(.top, 1)      // бота — у собеседника; кнопки-ссылки — у обоих
+            }
         }
     }
 
@@ -217,14 +451,25 @@ struct MessageRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .glass(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture {
+            guard interactive, !blocked, let onCallBack else { return }
+            Haptics.impact(.medium)
+            onCallBack(info.video)
+        }
     }
 
     private var reactionChips: some View {
         HStack(spacing: 4) {
             ForEach(message.reactions, id: \.emoji) { r in
-                Button { if interactive { onReact?(r.emoji) } } label: {
+                Button { if interactive && !blocked { onReact?(r.emoji) } } label: {
                     HStack(spacing: 4) {
-                        AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
+                        if r.emoji.hasPrefix("u:") {
+                            CustomEmojiView(id: r.emoji, fallback: CustomEmojiStore.shared.info(r.emoji)?.emoji ?? "", size: 20,
+                                            animate: false)                          // своё эмодзи из эмодзи-пака
+                        } else {
+                            AnimatedReactionEmoji(emoji: r.emoji, mine: r.mine, count: r.count)
+                        }
                         if r.count > 1 || !r.mine {
                             Text("\(r.count)").font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(r.mine ? Color.white : theme.text)
@@ -233,12 +478,12 @@ struct MessageRow: View {
                     .padding(.horizontal, 8).frame(height: 26)
                     .background(r.mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
                     .overlay(Capsule().stroke(theme.stroke, lineWidth: r.mine ? 0 : 1))
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: MessageFrameKey.self,
-                                               value: [message.id + "|" + r.emoji: g.frame(in: .global)])
-                    })
+                    .background(MessageFrameProbe(id: message.id + "|" + r.emoji))
                 }
                 .buttonStyle(.plain)
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                    if interactive && !blocked { Haptics.impact(.medium); onReactionInfo?(r.emoji) }
+                })
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -250,17 +495,48 @@ struct MessageRow: View {
     private var core: some View {
         if let sticker = stickerOnly {
             ZStack(alignment: .bottomTrailing) {
-                StickerImage(sticker: Sticker(id: sticker.sticker ?? "", emoji: ""), size: 168)
-                MessageMeta(message: message, color: .white, onMedia: true).padding(6)
+                StickerImage(sticker: sticker.asSticker, size: 168)
+                    .scaleEffect(stickerPop ? 1.12 : 1)
+                MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // нажали — стикер пружинит, затем открывается его набор (свой, чужой или встроенный)
+                guard interactive, !blocked else { return }
+                Haptics.impact(.light)
+                withAnimation(.spring(response: 0.18, dampingFraction: 0.5)) { stickerPop = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.55)) { stickerPop = false }
+                }
+                let builtin = sticker.sticker.flatMap { id in id.hasPrefix("u:") ? nil : id.split(separator: "/").first.map(String.init) }
+                guard let pack = sticker.stickerPack ?? builtin else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { onOpenStickerPack?(pack) }
             }
         } else if let circle = circleOnly {
             CircleVideoBubble(attachment: circle, message: message)
+            } else if let big = message.bigCustomEmoji {
+            // только свои эмодзи (1–3) — крупно и анимированно, как в Telegram
+            VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    ForEach(Array(big.enumerated()), id: \.offset) { _, id in
+                        CustomEmojiView(id: id, fallback: CustomEmojiStore.shared.info(id)?.emoji ?? "",
+                                        size: big.count == 1 ? 120 : 84, animate: true)
+                            .onTapGesture { if interactive && !blocked { EmojiPackPresenter.shared.open(emojiID: id) } }
+                    }
+                }
+                MessageMeta(message: message, color: .white, onMedia: true)
+            }
             } else if emojiOnly {
             VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
                 let value = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if value.count == 1 {
-                    // одно эмодзи — анимированное: 5 секунд крутится, по нажатию снова
-                    TimedLottieEmoji(emoji: value, size: emojiSize * 1.25)
+                if value.count == 1 && !interactive {
+                    // копия сообщения (предпросмотр чата по зажатию, баннер, меню реакций): анимация тут не играет —
+                    // готовая картинка, без живой Lottie-сцены внутри всплывающей карточки (из-за неё предпросмотр падал)
+                    StillEmoji(emoji: value, size: emojiSize * 1.25)
+                } else if value.count == 1 {
+                    // одно эмодзи — анимированное. Только что отправили или пришло при открытом чате — один круг анимации; старые — по нажатию
+                    let fresh = message.isPending || Date().timeIntervalSince(message.createdAt) < 20
+                    TimedLottieEmoji(emoji: value, size: emojiSize * 1.25, playOnceKey: fresh ? message.key : nil)
                 } else {
                     Text(value).font(.system(size: emojiSize))
                 }
@@ -268,13 +544,16 @@ struct MessageRow: View {
             }
         } else {
             bubble
+                // капсула / секрет только что открылись — сообщение проявляется из размытия с искрами (один раз)
+                .modifier(RevealOnOpen(id: message.id, active: message.lock?.open == true && !message.sealed && !mine))
         }
     }
 
     // MARK: Пузырь
 
     private var shape: UnevenRoundedRectangle {
-        let big: CGFloat = 21, small: CGFloat = 6, join: CGFloat = 7
+        // «Углы блоков с сообщениями» (Оформление): 0…21
+        let big = CGFloat(bubbleRadius), small = min(6, big), join = min(7, big)
         return UnevenRoundedRectangle(
             topLeadingRadius: mine ? big : (isFirst ? big : join),
             bottomLeadingRadius: mine ? big : (isLast ? small : join),
@@ -286,19 +565,38 @@ struct MessageRow: View {
     private var hasText: Bool { !message.text.isEmpty }
     private var onlyMedia: Bool { hasText == false && mediaItems.count == message.attachments.count && !mediaItems.isEmpty }
 
+    /// Одна обычная геопозиция без текста (не трансляция): карта на весь пузырь, время поверх карты — как в Telegram
+    private var placeOnly: Bool {
+        !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
+            && message.attachments[0].kind == .location && message.attachments[0].geo?.isLive == false
+    }
+
     /// Одно голосовое без текста: время кладётся в ту же строку, что и длительность, без отдельной пустой строки
     private var voiceOnly: Bool {
         !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
             && message.attachments[0].kind == .voice
     }
 
+    /// Один файл или трек без текста: время кладётся в угол блока, без отдельной строки снизу
+    private var fileOnly: Bool {
+        !hasText && message.poll == nil && mediaItems.isEmpty && message.attachments.count == 1
+            && (message.attachments[0].kind == .file || message.attachments[0].kind == .audio)
+    }
+
     private var bubble: some View {
         let textColor = mine ? colors.outgoingText : colors.incomingText
         let secondary = mine ? colors.outgoingSecondary : colors.incomingSecondary
-        // место под время/галочки/просмотры: оценка ширины в «узких пробелах» (по 8 пт), чтобы не оставалось лишнего отступа
-        let metaWidth: CGFloat = 32 + (mine ? 16 : 0) + (message.editedAt != nil ? 44 : 0)
-            + (message.views.map { 6 + CGFloat($0 >= 1000 ? 4 : String($0).count) * 5 } ?? 0) + 10
-        let filler = String(repeating: "\u{2002}", count: Int((metaWidth / 8).rounded(.up)))
+        // место под время/галочки/просмотры: ширина самой метки + небольшой гарантированный зазор между текстом и временем.
+        // Короткому сообщению не добавляем лишнего, длинному — время не наезжает на текст.
+        let metaGap: CGFloat = 10                              // обязательный зазор «текст ↔ время»
+        let metaWidth: CGFloat = 24 + (mine ? 14 : 0) + (message.editedAt != nil ? 44 : 0)
+            + (message.views.map { v -> CGFloat in
+                // глаз + число + «·» + три зазора; число считаем так же, как рисует MessageMeta
+                let text = v >= 1000 ? String(format: "%.1fK", Double(v) / 1000) : "\(v)"
+                return 30 + CGFloat(text.count) * 6.8
+            } ?? 0) + metaGap
+        // figure space (U+2007) неразрывный и шириной с цифру (~9.1 пт на 16): хвост не «висит» и время не наезжает
+        let filler = String(repeating: "\u{2007}", count: Int((metaWidth / 9.1).rounded(.up)))
 
         return VStack(alignment: .leading, spacing: 0) {
             if showSender, !mine, isFirst, let sender = message.sender {
@@ -308,10 +606,11 @@ struct MessageRow: View {
                     .lineLimit(1)
                     .padding(.horizontal, 11)
                     .padding(.top, 6)
-                    .onTapGesture { onOpenProfile?(sender.id) }
+                    .onTapGesture { if !blocked { onOpenProfile?(sender.id) } }
             }
-            if let fwd = message.forwarded {
+            if let fwd = message.forwarded, !fwd.name.isEmpty {
                 Button {
+                    if blocked { return }
                     if let post = fwd.postID { onOpenPost?(post) } else if let id = fwd.id { onOpenProfile?(id) }
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
@@ -326,8 +625,23 @@ struct MessageRow: View {
                 }
                 .buttonStyle(.plain)
             }
+            if let imp = message.imported { ImportedBadge(info: imp, mine: mine) }        // перенесено из Telegram / WhatsApp
+            if let chain = message.chain { PhotoChainBlock(message: message, chain: chain, mine: mine) }   // фото-цепочка
+            if let list = message.checklist {                                                             // список с галочками
+                ChecklistBlock(message: message, list: list, mine: mine)     // время — общей строкой внизу
+            }
+            // капсула времени / секрет на месте: у получателя — запечатано, у отправителя и после открытия — пометка
+            if let lock = message.lock {
+                if message.sealed {
+                    LockedBubble(message: message, lock: lock, mine: mine)
+                    HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
+                        .padding(.horizontal, 11).padding(.bottom, 6)
+                } else {
+                    LockBadge(lock: lock, mine: mine)
+                }
+            }
             if let story = message.storyReply {
-                Button { Haptics.impact(.light); onOpenStory?(story.id) } label: {
+                Button { if !blocked { Haptics.impact(.light); onOpenStory?(story.id) } } label: {
                 HStack(spacing: 8) {
                     Capsule().fill(mine ? Color.white.opacity(0.85) : theme.accentColor).frame(width: 3)
                     ZStack {
@@ -360,6 +674,8 @@ struct MessageRow: View {
             }
             if let reply = message.reply {
                 ReplyQuote(reply: reply, mine: mine)
+                    .contentShape(Rectangle())
+                    .onTapGesture { if !blocked { Haptics.impact(.light); onJumpToReply?(reply.id) } }
                     .padding(.horizontal, 10)
                     .padding(.top, 7)
                     .padding(.bottom, 2)
@@ -370,85 +686,176 @@ struct MessageRow: View {
                     .padding(.horizontal, 11).padding(.top, 8).padding(.bottom, 4)
                 MessageMeta(message: message, color: secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal, 11).padding(.bottom, 5)
+                    .padding(.trailing, MetaInset.trailing).padding(.bottom, MetaInset.bottom)
             }
 
-            if !mediaItems.isEmpty {
+            if message.isArticle {
+                // статья: блоки по порядку — заголовки, текст, цитаты, медиа там, где их поставили
+                let mediaEnd = ArticleBody.endsWithMedia(message.blocks)
+                ArticleBody(blocks: message.blocks, mine: mine, pending: message.isPending, textColor: textColor,
+                            secondary: secondary, messageID: message.id, blocked: blocked,
+                            onOpenMedia: { a in if let item = a.mediaItem { onOpenMedia([item], 0) } },
+                            onOpenFile: onOpenFile, onPlayAudio: onPlayAudio,
+                            mediaMeta: mediaEnd ? AnyView(MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media)) : nil)
+                    .padding(.top, message.reply == nil ? 0 : 6)
+                    .padding(.bottom, mediaEnd ? 0 : 4)
+                if !mediaEnd {
+                    HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
+                        .padding(.trailing, MetaInset.trailing)
+                        .padding(.bottom, MetaInset.bottom)
+                }
+            }
+
+            if let pid = message.forwarded?.postID, mediaItems.count == 1, mediaItems[0].kind == .video {
+                // присланный шортс или видео из поста: вертикальная карточка целиком (без обрезки), как в TikTok
+                SharedVideoCard(attachment: mediaItems[0], author: message.forwarded?.name ?? "", pending: message.isPending) {
+                    if blocked { return }
+                    if let open = onOpenPost { open(pid) } else if let item = mediaItems[0].mediaItem { onOpenMedia([item], 0) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
+                }
+                .padding(.top, message.reply == nil ? 0 : 6)
+            } else if !mediaItems.isEmpty {
                 MediaBlock(items: mediaItems, pending: message.isPending) { index in
+                    // присланный шортс: нажатие открывает ленту шортсов на этом видео (как в TikTok)
+                    if blocked { return }
+                    if let pid = message.forwarded?.postID, mediaItems.first?.mediaItem?.kind == .video, let open = onOpenPost {
+                        open(pid); return
+                    }
                     let items = mediaItems.compactMap(\.mediaItem)
                     if !items.isEmpty { onOpenMedia(items, min(index, items.count - 1)) }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(6) }
+                    if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
+                }
+                // «Сохранять в Фото» для этого вида чатов: входящее фото/видео один раз кладётся в галерею
+                .onAppear {
+                    if !mine, !message.isPending { IncomingSaver.consider(messageID: message.id, attachments: mediaItems, scope: saveScope) }
                 }
                 .padding(.top, message.reply == nil ? 0 : 6)
             }
 
             ForEach(message.attachments.filter { $0.kind == .voice || $0.kind == .file || $0.kind == .circle
-                                                  || $0.kind == .sticker || $0.kind == .audio }) { a in
+                                                  || $0.kind == .sticker || $0.kind == .audio || $0.kind == .location
+                                                  || $0.kind == .contact }) { a in
                 Group {
                     switch a.kind {
-                    case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly)
-                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { onPlayAudio(a) }
+                    case .voice: VoiceBlock(attachment: a, mine: mine, pending: message.isPending, metaSpace: voiceOnly,
+                                            messageID: message.isPending ? nil : message.id)
+                    case .audio: AudioBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onPlayAudio(a) } }
                     case .file:
                         if a.isMusic {
-                            AudioBlock(attachment: a, mine: mine) { onPlayAudio(a) }
+                            AudioBlock(attachment: a, mine: mine) { if !blocked { onPlayAudio(a) } }
                         } else {
-                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { onOpenFile(a) }
+                            FileBlock(attachment: a, mine: mine, pending: message.isPending) { if !blocked { onOpenFile(a) } }
                         }
                     case .circle: CircleVideoBubble(attachment: a, message: message, size: 180)
-                    default: StickerImage(sticker: Sticker(id: a.sticker ?? "", emoji: ""), size: 120)
+                    case .location:
+                        if let geo = a.geo {
+                            LocationBlock(geo: geo, messageID: message.id, mine: mine, pending: message.isPending, bare: placeOnly)
+                                .allowsHitTesting(!blocked)
+                                .overlay(alignment: .bottomTrailing) {
+                                    if placeOnly { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
+                                }
+                        }
+                    case .contact:
+                        ContactCard(attachment: a, mine: mine) { id in if !blocked { onOpenProfile?(id) } }
+                    default: StickerImage(sticker: a.asSticker, size: 120)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-                .padding(.bottom, hasText ? 0 : 6)
-                .overlay(alignment: .bottomTrailing) {
-                    if voiceOnly && a.kind == .voice {
-                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 6)
+                .padding(.horizontal, placeOnly ? 0 : 10)
+                .padding(.top, placeOnly ? 0 : 8)
+                .padding(.bottom, placeOnly ? 0 : (hasText ? 0 : (fileOnly ? 4 : 6)))
+                .metaCorner {
+                    if (voiceOnly && a.kind == .voice) || fileOnly {
+                        MessageMeta(message: message, color: secondary)
                     }
                 }
             }
 
-            if hasText && message.poll == nil {
-                RichInlineText(text: message.text, entities: message.entities, size: 16,
-                               color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler)
+            if message.isArticle {
+                EmptyView()
+            } else if hasText && message.poll == nil && message.chain == nil && message.checklist == nil {
+                // перевод прямо в пузыре: «Показать оригинал» в меню возвращает текст
+                let translated = translator.translation(message.id)
+                if translated != nil {
+                    Label(s.t("Перевод", "Translated"), systemImage: "character.bubble")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.accentColor)
+                        .padding(.horizontal, 11).padding(.top, 6)
+                        .transition(.opacity)
+                }
+                RichInlineText(text: translated ?? message.text, entities: translated == nil ? message.entities : [],
+                               size: chatTextSize > 0 ? CGFloat(chatTextSize) : 16,
+                               color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler,
+                               detect: interactive)
+                    .animation(.easeInOut(duration: 0.25), value: translated)
                     .padding(.horizontal, 11)
                     .padding(.top, mediaItems.isEmpty && message.attachments.isEmpty && message.reply == nil ? 7 : 6)
                     .padding(.bottom, 7)
-                    .overlay(alignment: .bottomTrailing) {
-                        MessageMeta(message: message, color: secondary).padding(.trailing, 10).padding(.bottom, 5)
-                    }
-            } else if !onlyMedia && message.poll == nil && !voiceOnly {
+                    .metaCorner { MessageMeta(message: message, color: secondary) }
+            } else if !onlyMedia && message.poll == nil && !voiceOnly && !fileOnly && !placeOnly {
                 HStack { Spacer(minLength: 0); MessageMeta(message: message, color: secondary) }
-                    .padding(.horizontal, 11)
-                    .padding(.bottom, 5)
+                    .padding(.trailing, MetaInset.trailing)
+                    .padding(.bottom, MetaInset.bottom)
+            }
+
+            if hasText, !message.isArticle, message.poll == nil, mediaItems.isEmpty, let link = LinkPreviewCard.firstURL(in: message.text) {
+                LinkPreviewCard(url: link, mine: mine)
             }
 
             if let n = message.comments, !message.isPending, let open = onOpenComments {
-                Button(action: open) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "bubble.left").font(.system(size: 14, weight: .semibold))
-                        Text(n == 0 ? s.t("Оставить комментарий", "Leave a comment")
-                                    : s.t("Комментарии: \(n)", "\(n) comments"))
-                            .font(.system(size: 15, weight: .semibold))
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(theme.accentColor)
-                    .padding(.horizontal, 12).frame(height: 38)
-                    .frame(minWidth: 210, alignment: .leading)
-                    .background(theme.accentColor.opacity(0.10))
-                }
-                .buttonStyle(.plain)
+                commentsBar(n, open: open)
             }
         }
         .frame(minWidth: 56, alignment: .leading)
         .background(mine ? AnyShapeStyle(theme.accent) : AnyShapeStyle(colors.incoming), in: shape)
         .clipShape(shape)
-        .overlay(shape.stroke(mine ? Color.clear : (theme.dark ? Color.white.opacity(0.04) : Color.black.opacity(0.06)), lineWidth: 1))
-        .shadow(color: mine ? theme.accentColor.opacity(theme.dark ? 0.25 : 0.22) : Color.black.opacity(theme.dark ? 0 : 0.06),
-                radius: mine ? 6 : 2, y: mine ? 2 : 1)
+        .overlay(shape.stroke(mine ? Color.clear : (theme.dark ? Color.white.opacity(0.04) : Color.black.opacity(0.08)), lineWidth: 0.75))
+        .shadow(color: mine ? theme.accentColor.opacity(theme.dark ? 0.25 : 0.18) : Color.black.opacity(theme.dark ? 0 : 0.08),
+                radius: mine ? 6 : 3, y: mine ? 2 : 1)
+    }
+
+    /// Низ поста канала, как в Telegram: аватарки последних комментаторов, «9 комментариев» и стрелка
+    private func commentsBar(_ n: Int, open: @escaping () -> Void) -> some View {
+        let tint: Color = mine ? .white : theme.accentColor
+        let ring: Color = mine ? theme.accentColor : colors.incoming
+        return Button {
+            guard !blocked else { return }
+            Haptics.select()
+            open()
+        } label: {
+            HStack(spacing: 10) {
+                if message.commenters.isEmpty {
+                    Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 17))
+                        .frame(width: 30, height: 30)
+                } else {
+                    HStack(spacing: -10) {
+                        ForEach(Array(message.commenters.prefix(3).enumerated()), id: \.element.id) { i, p in
+                            AvatarView(name: p.name, size: 30, avatarID: p.avatarID)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(ring, lineWidth: 2))
+                                .zIndex(Double(3 - i))
+                        }
+                    }
+                }
+                Text(n == 0 ? s.t("Прокомментировать", "Leave a comment") : CommentWord.count(n, lang: lang))
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 12).frame(height: 48)
+            .frame(minWidth: 240, alignment: .leading)
+            .overlay(alignment: .top) {
+                Rectangle().fill(mine ? Color.white.opacity(0.22) : (theme.dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)))
+                    .frame(height: 0.5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func senderColor(_ id: String) -> Color {
@@ -510,70 +917,165 @@ struct ReplyQuote: View {
 struct MediaBlock: View {
     let items: [ChatAttachment]
     var pending = false
+    /// Своя ширина (статья: фото на всю ширину сообщения, от края до края); nil — обычная ширина альбома
+    var fullWidth: CGFloat? = nil
     let onOpen: (Int) -> Void
 
-    private let width: CGFloat = 262
+    /// Ширина альбома — как у Telegram, около трёх четвертей экрана
+    private var width: CGFloat { fullWidth ?? min(300, UIScreen.main.bounds.width * 0.76) }
     private let gap: CGFloat = 2
     @AppStorage("autoplay") private var autoplay = true
+    @AppStorage("autoplay.gif") private var autoplayGIF = true
     @State private var frames = FrameBoxes()
+
+    private func asp(_ i: Int) -> CGFloat {
+        let a = CGFloat(items[i].aspect)
+        return a > 0 ? min(1.8, max(0.55, a)) : 1
+    }
+
+    /// Разбивка на ряды после первых «больших» ячеек: по три в ряд, без одиноких хвостов
+    private func rows(_ ids: [Int]) -> [[Int]] {
+        var out: [[Int]] = []
+        var rest = ids
+        while !rest.isEmpty {
+            if rest.count == 4 { out.append(Array(rest.prefix(2))); out.append(Array(rest.suffix(2))); break }
+            let n = min(3, rest.count)
+            out.append(Array(rest.prefix(n)))
+            rest.removeFirst(n)
+        }
+        return out
+    }
+
+    private func more(_ i: Int, last: Bool) -> some View {
+        cell(items[i], index: i)
+            .overlay {
+                if last, items.count > 10 {
+                    Color.black.opacity(0.5)
+                    Text("+\(items.count - 10)").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
+                }
+            }
+    }
+
+    private func rowView(_ ids: [Int], height: CGFloat? = nil) -> some View {
+        let w = (width - gap * CGFloat(ids.count - 1)) / CGFloat(ids.count)
+        let h = height ?? w * (ids.count == 1 ? 0.7 : (ids.count == 2 ? 0.9 : 1))
+        return HStack(spacing: gap) {
+            ForEach(ids, id: \.self) { i in
+                more(i, last: i == 9).frame(width: w, height: h)
+            }
+        }
+    }
 
     var body: some View {
         Group {
             switch items.count {
             case 1:
-                let a = items[0]
-                let aspect = min(1.5, max(0.65, a.aspect))
-                cell(a, index: 0).frame(width: width, height: width / aspect)
+                if fullWidth != nil, items[0].kind == .photo, items[0].aspect > 0 {
+                    // статья: фото во всю ширину. Узкое (уже 4:5) — целиком по центру, на всю высоту блока,
+                    // а по бокам — то же фото, увеличенное и размытое (как в Telegram)
+                    let real = CGFloat(items[0].aspect)
+                    let shown = min(1.9, max(0.8, real))
+                    cell(items[0], index: 0, fit: real < shown - 0.01).frame(width: width, height: width / shown)
+                } else {
+                    let aspect = min(1.5, max(0.5625, CGFloat(items[0].aspect)))      // вертикальное 9:16 — целиком, без обрезки
+                    cell(items[0], index: 0).frame(width: width, height: width / aspect)
+                }
             case 2:
-                HStack(spacing: gap) {
-                    cell(items[0], index: 0).frame(width: (width - gap) / 2, height: 190)
-                    cell(items[1], index: 1).frame(width: (width - gap) / 2, height: 190)
+                if asp(0) > 1.25 && asp(1) > 1.25 {
+                    // две горизонтальные — друг под другом
+                    VStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: width, height: min(width * 0.72, width / asp(0)))
+                        cell(items[1], index: 1).frame(width: width, height: min(width * 0.72, width / asp(1)))
+                    }
+                } else {
+                    let w = (width - gap) / 2
+                    let h = w / min(1.0, max(0.62, (asp(0) + asp(1)) / 2))
+                    HStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: w, height: h)
+                        cell(items[1], index: 1).frame(width: w, height: h)
+                    }
                 }
             case 3:
-                VStack(spacing: gap) {
-                    cell(items[0], index: 0).frame(width: width, height: 170)
+                if asp(0) >= 0.95 {
+                    VStack(spacing: gap) {
+                        cell(items[0], index: 0).frame(width: width, height: min(width * 0.78, width / min(1.6, asp(0))))
+                        let w = (width - gap) / 2
+                        let h = w / min(1.2, max(0.8, (asp(1) + asp(2)) / 2))
+                        HStack(spacing: gap) {
+                            cell(items[1], index: 1).frame(width: w, height: h)
+                            cell(items[2], index: 2).frame(width: w, height: h)
+                        }
+                    }
+                } else {
+                    // вертикальное первое: слева большое, справа два друг под другом
+                    let total = width * 1.15
+                    let left = width * 0.64
+                    let right = width - left - gap
                     HStack(spacing: gap) {
-                        cell(items[1], index: 1).frame(width: (width - gap) / 2, height: 126)
-                        cell(items[2], index: 2).frame(width: (width - gap) / 2, height: 126)
+                        cell(items[0], index: 0).frame(width: left, height: total)
+                        VStack(spacing: gap) {
+                            cell(items[1], index: 1).frame(width: right, height: (total - gap) / 2)
+                            cell(items[2], index: 2).frame(width: right, height: (total - gap) / 2)
+                        }
                     }
                 }
             default:
-                let side = (width - gap) / 2
+                let shown = Array(0..<min(items.count, 10))
                 VStack(spacing: gap) {
-                    HStack(spacing: gap) {
-                        cell(items[0], index: 0).frame(width: side, height: side)
-                        cell(items[1], index: 1).frame(width: side, height: side)
-                    }
-                    HStack(spacing: gap) {
-                        cell(items[2], index: 2).frame(width: side, height: side)
-                        cell(items[3], index: 3).frame(width: side, height: side)
-                            .overlay {
-                                if items.count > 4 {
-                                    Color.black.opacity(0.5)
-                                    Text("+\(items.count - 4)").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
-                                }
-                            }
+                    if items.count == 4 {
+                        // одна большая сверху, три маленьких под ней
+                        cell(items[0], index: 0).frame(width: width, height: width / min(1.5, max(1.0, asp(0))))
+                        rowView([1, 2, 3])
+                    } else {
+                        rowView([0, 1], height: (width - gap) / 2 * 1.05)
+                        ForEach(Array(rows(Array(shown.dropFirst(2))).enumerated()), id: \.offset) { _, ids in
+                            rowView(ids)
+                        }
                     }
                 }
             }
         }
+        .clipped()          // картинка не должна вылезать за свой кадр и налезать на подпись под ней
     }
 
-    private func cell(_ a: ChatAttachment, index: Int) -> some View {
+    private func cell(_ a: ChatAttachment, index: Int, fit: Bool = false) -> some View {
         ZStack {
-            if let data = a.localPreview, let image = UIImage(data: data) {
+            if fit {
+                // фото уже блока: само — целиком по центру, по бокам — оно же, увеличенное и размытое
+                if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
+                    Color.clear.overlay { Image(uiImage: image).resizable().scaledToFill().blur(radius: 28).overlay(Color.black.opacity(0.18)) }
+                        .clipped()
+                    Image(uiImage: image).resizable().scaledToFit()
+                } else if let id = a.mediaID ?? a.thumbID {
+                    Color.clear.overlay { RemoteImage(id: id, maxPixel: 300).blur(radius: 28).overlay(Color.black.opacity(0.18)) }
+                        .clipped()
+                    RemoteImage(id: id, fill: false, backdrop: .clear)
+                }
+            } else if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
                 Image(uiImage: image).resizable().scaledToFill()
+            } else if a.kind == .photo, !pending, let id = a.mediaID ?? a.thumbID {
+                GatedRemoteImage(id: id)                 // автозагрузка фото по этой сети выключена — кнопка «скачать»
             } else if let id = a.thumbID ?? a.mediaID {
                 RemoteImage(id: id)
             } else {
                 Color.gray.opacity(0.3)
             }
-            // автовоспроизведение без звука, как в Telegram (настройка «Автовоспроизведение видео»)
-            if a.kind == .video, autoplay, !pending, a.size <= 40 * 1024 * 1024, let video = a.mediaItem {
+            // автовоспроизведение без звука, как в Telegram («Автовоспроизведение: Видео / GIF» в «Данных и памяти»);
+            // по сети, где автозагрузка видео выключена, само не играет (не тратит трафик), если видео ещё не на телефоне
+            if a.kind == .video, a.gif ? autoplayGIF : autoplay, !pending, a.gif || a.size <= 40 * 1024 * 1024, let video = a.mediaItem,
+               DataPrefs.autoNow(.video) || a.mediaID.flatMap({ MediaFileCache.shared.cached($0) }) != nil {
                 InlineVideo(item: video).allowsHitTesting(false)
             }
-            if a.kind == .video {
-                if !(autoplay && !pending) {
+            if a.kind == .video && a.gif {
+                Text("GIF")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.black.opacity(0.45), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(6)
+            } else if a.kind == .video {
+                if !(autoplay && !pending && (DataPrefs.autoNow(.video) || a.mediaID.flatMap({ MediaFileCache.shared.cached($0) }) != nil)) {
                     Image(systemName: "play.fill")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(.white)
@@ -581,7 +1083,7 @@ struct MediaBlock: View {
                         .background(Color.black.opacity(0.45), in: Circle())
                 }
                 if a.duration > 0 {
-                    Text(mmss(Int(a.duration)))
+                    Text(mmss(Int(a.duration.rounded())))
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -591,15 +1093,28 @@ struct MediaBlock: View {
                 }
             }
             if pending { Color.black.opacity(0.25); TransferRing(progress: nil, icon: "arrow.up", size: 40) }
+            if a.kind == .video, !pending, let id = a.mediaID {
+                MediaCacheBadge(mediaID: id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(6)
+            }
         }
         .clipped()
+        .onAppear {
+            // видео сразу сохраняется на телефон — потом смотрится и без сети (как в Telegram)
+            // очень большие (больше 100 МБ) сами не качаются — сохранятся, когда их откроют
+            if a.kind == .video, !pending, let id = a.mediaID, a.size <= 100 * 1024 * 1024, !NetworkState.shared.offline,
+               DataPrefs.autoNow(.video) {
+                MediaFileCache.shared.prefetch(id)
+            }
+        }
         .background(FrameProbe(box: frames.box(index)))
         .contentShape(Rectangle())
         .onTapGesture {
             guard !pending else { return }
             // запоминаем, откуда «вылетает» фото, и какая картинка там сейчас видна
             var image: UIImage?
-            if let data = a.localPreview { image = UIImage(data: data) }
+            if let data = a.localPreview { image = PreviewThumbs.image(data, maxPixel: 900) }
             else if let id = a.thumbID ?? a.mediaID, let url = ServerConfig.mediaURL(id) { image = ImageCache.shared.cached(url, maxPixel: 1280) }
             HeroSource.shared.set(id: a.mediaID, rect: frames.box(index).rect, image: image)
             onOpen(index)
@@ -614,24 +1129,172 @@ struct VoiceBlock: View {
     let mine: Bool
     var pending = false
     var metaSpace = false           // время сообщения лежит поверх нижнего правого угла
+    var messageID: String? = nil    // нужен сгорающему голосовому (открыть один раз)
 
     @ObservedObject private var player = VoicePlayer.shared
     @ObservedObject private var transcriber = VoiceTranscriber.shared
+    @EnvironmentObject private var session: AppSession
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
+    @State private var burnt = false            // прослушали сейчас — сгорело, не дожидаясь обновления с сервера
+    @State private var opening = false
 
-    private var playerID: String { attachment.mediaID ?? attachment.id }
+    private var playerID: String {
+        attachment.once ? "once:" + (messageID ?? attachment.id) : (attachment.mediaID ?? attachment.id)
+    }
+    /// Сгорающее, которое получатель слушает через «открыть один раз»
+    private var onceIncoming: Bool { attachment.once && !mine }
+    private var consumed: Bool { attachment.consumed || burnt }
     private var isCurrent: Bool { player.isCurrent(playerID) }
     private var playing: Bool { isCurrent && player.isPlaying }
-    private var progress: Double { isCurrent ? player.progress : 0 }
+    /// Только у играющего голосового часы настоящие; остальные пузыри подписаны на «вечно стоящие» и не перерисовываются
+    private var clock: PlaybackClock { isCurrent ? player.clock : .idle }
+    private var onceBadge: some View {
+        Text("1")
+            .font(.system(size: 10, weight: .heavy))
+            .foregroundStyle(mine ? theme.accentColor : .white)
+            .frame(width: 17, height: 17)
+            .background(Circle().fill(mine ? Color.white : theme.accentColor))
+            .overlay(Circle().stroke(mine ? theme.accentColor : Color.white, lineWidth: 1.5))
+    }
+
+    /// Уже прослушано: вместо плеера — «сгоревшее» голосовое
+    private func burntRow(tint: Color) -> some View {
+        let s = Strings(lang: lang)
+        return HStack(spacing: 10) {
+            Image(systemName: "flame.fill")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(mine ? theme.accentColor : .white)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(mine ? Color.white.opacity(0.9) : theme.accentColor.opacity(0.85)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(s.t("Голосовое сообщение", "Voice message"))
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(mine ? Color.white : theme.text)
+                Text((mine ? s.t("Прослушано", "Listened") : s.t("Прослушано один раз", "Played once"))
+                     + (attachment.duration > 0 ? " · " + mmss(Int(safe: attachment.duration)) : ""))
+                    .font(.system(size: 12)).foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textSecondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, metaSpace ? 14 : 0)
+    }
+
+    /// Сгорающее: у отправителя — обычное прослушивание; у получателя — файл выдаётся один раз и сгорает после
+    private func playOnce() {
+        if isCurrent {
+            if player.isPlaying { player.pause() } else if player.playingOnce { player.resumeOnce() } else { player.resume() }
+            return
+        }
+        if mine, let mediaID = attachment.mediaID {
+            player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
+            return
+        }
+        guard let messageID, !opening, !consumed else { return }
+        guard !UIScreen.main.isCaptured else {
+            Haptics.notify(.warning)
+            AppToast.show(Strings(lang: lang).t("Выключите запись экрана, чтобы прослушать", "Stop screen recording to listen"))
+            return
+        }
+        opening = true
+        let repo = session.messengerRepo
+        Task {
+            defer { opening = false }
+            do {
+                let mid = try await repo.onceOpen(messageID: messageID)
+                Haptics.impact(.light)
+                let ok = player.playOnce(id: playerID, mediaID: mid, duration: attachment.duration) {
+                    withAnimation(.easeOut(duration: 0.3)) { burnt = true }
+                    Task { await repo.onceDone(messageID: messageID) }
+                }
+                if !ok {
+                    withAnimation { burnt = true }
+                    Task { await repo.onceDone(messageID: messageID) }
+                }
+            } catch {
+                withAnimation { burnt = true }          // уже прослушано (на другом устройстве) или файла нет
+            }
+        }
+    }
+
+    /// Палец ведёт по волне — перемотка
+    @State private var scrubbing = false
+    @State private var lastTick = -1
+
+    /// Перемотка пальцем по волне (как в Telegram): ведёшь — звук перескакивает, отпустил — играет с этого места.
+    /// Не играющее голосовое включается сразу с нужного места
+    private var scrubArea: some View {
+        GeometryReader { g in
+            Color.clear
+                .contentShape(Rectangle().inset(by: -10))
+                .gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { v in
+                            guard !pending, !MessageMenu.isOpen, let mediaID = attachment.mediaID else { return }
+                            // вертикальный жест — это прокрутка переписки, не перемотка
+                            if !scrubbing && abs(v.translation.height) > abs(v.translation.width) { return }
+                            let f = max(0, min(1, v.location.x / max(1, g.size.width)))
+                            if !scrubbing {
+                                scrubbing = true
+                                VoiceScrub.active = true
+                                Haptics.select()
+                                if !isCurrent {
+                                    player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { player.seek(toFraction: f) }
+                                    return
+                                }
+                            }
+                            guard isCurrent else { return }
+                            player.seek(toFraction: f)
+                            let tick = Int(f * 20)                        // лёгкие щелчки по ходу, как у колёсика
+                            if tick != lastTick { lastTick = tick; Haptics.impact(.light) }
+                        }
+                        .onEnded { v in
+                            guard scrubbing else { return }
+                            let f = max(0, min(1, v.location.x / max(1, g.size.width)))
+                            if isCurrent {
+                                player.seek(toFraction: f)
+                                if !player.isPlaying { player.resume() }
+                            }
+                            scrubbing = false
+                            lastTick = -1
+                            DispatchQueue.main.async { VoiceScrub.active = false }
+                        }
+                )
+                .onTapGesture { loc in
+                    // нажатие по волне у играющего голосового — прыжок в это место
+                    guard isCurrent, !pending else { return }
+                    Haptics.select()
+                    player.seek(toFraction: max(0, min(1, loc.x / max(1, g.size.width))))
+                }
+        }
+    }
 
     var body: some View {
         let tint = mine ? Color.white : theme.accentColor
         VStack(alignment: .leading, spacing: 6) {
-            playerRow(tint: tint)
-            transcript(tint: tint)
+            if attachment.once && consumed && !(isCurrent && player.playingOnce) {
+                burntRow(tint: tint)
+            } else {
+                playerRow(tint: tint)
+                if attachment.once && isCurrent && player.captureBlocked {
+                    Label(Strings(lang: lang).t("Пауза: идёт запись экрана", "Paused: screen is being recorded"),
+                          systemImage: "record.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(mine ? Color.white : theme.danger)
+                }
+                if !attachment.once { transcript(tint: tint) }
+            }
         }
         .frame(width: 218, alignment: .leading)
+        .onChange(of: player.captureBlocked) { _, blocked in
+            if blocked && !isCurrent && onceIncoming { Haptics.notify(.warning) }
+        }
+        .onAppear {
+            // голосовое сохраняется на телефон — слушается и без сети
+            if let id = attachment.mediaID, !NetworkState.shared.offline, DataPrefs.autoNow(.voice) {
+                MediaFileCache.shared.prefetch(id, fallback: "m4a")
+            }
+        }
     }
 
     @ViewBuilder
@@ -660,12 +1323,15 @@ struct VoiceBlock: View {
     private func playerRow(tint: Color) -> some View {
         HStack(spacing: 10) {
             Button {
+                // зажали голосовое ради реакций — отпускание пальца не должно его включать
+                guard !MessageMenu.isOpen else { return }
+                if attachment.once { playOnce(); return }
                 guard let mediaID = attachment.mediaID else { return }
                 player.toggle(id: playerID, mediaID: mediaID, duration: attachment.duration)
             } label: {
                 ZStack {
                     Circle().fill(mine ? Color.white : theme.accentColor)
-                    if pending {
+                    if pending || opening {
                         SpinnerRing(size: 24, lineWidth: 2.2, color: mine ? theme.accentColor : .white)
                     } else {
                         Image(systemName: playing ? "pause.fill" : "play.fill")
@@ -674,27 +1340,46 @@ struct VoiceBlock: View {
                     }
                 }
                 .frame(width: 40, height: 40)
+                .overlay(alignment: .bottomTrailing) {
+                    // сгорающее — значок «1» на кнопке, как в Telegram
+                    if attachment.once { onceBadge.offset(x: 4, y: 4) }
+                }
             }
             .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 3) {
-                Waveform(samples: attachment.waveform, progress: progress, active: tint,
-                         inactive: tint.opacity(mine ? 0.42 : 0.28))
+                LiveWaveform(clock: clock, samples: attachment.waveform, active: tint,
+                             inactive: tint.opacity(mine ? 0.42 : 0.28))
                     .frame(maxWidth: .infinity)
                     .frame(height: 20)
+                    .scaleEffect(y: scrubbing ? 1.25 : 1, anchor: .center)
+                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: scrubbing)
+                    .overlay { scrubArea }
                 HStack(spacing: 6) {
-                    let shown = isCurrent && progress > 0 ? attachment.duration * progress : attachment.duration
-                    Text(mmss(Int(shown.rounded(.down))))
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(mine ? Color.white.opacity(0.8) : theme.textTertiary)
-                    if isCurrent && player.rate != 1 {
-                        Text(player.rate == 1.5 ? "1.5×" : "2×")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(mine ? theme.accentColor : Color.white)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(mine ? Color.white : theme.accentColor, in: Capsule())
+                    LiveVoiceTime(clock: clock, duration: attachment.duration,
+                                  color: mine ? Color.white.opacity(0.8) : theme.textTertiary)
+                    if isCurrent {
+                        // скорость прямо в пузыре: 1× → 1.5× → 2×, запоминается для всех голосовых
+                        Button {
+                            Haptics.select()
+                            player.cycleRate()
+                        } label: {
+                            Text(player.rate == 1 ? "1×" : (player.rate == 1.5 ? "1.5×" : "2×"))
+                                .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                .foregroundStyle(mine ? theme.accentColor : Color.white)
+                                .padding(.horizontal, 6).frame(height: 16)
+                                .background(mine ? Color.white : theme.accentColor, in: Capsule())
+                                .padding(6).contentShape(Rectangle()).padding(-6)
+                        }
+                        .buttonStyle(.plain)
+                        .transition(.scale.combined(with: .opacity))
                     }
-                    if !pending, let id = attachment.mediaID {
+                    if attachment.once && mine && attachment.listened > 0 {
+                        Label("\(attachment.listened)", systemImage: "ear")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.85))
+                    }
+                    if !pending, !attachment.once, let id = attachment.mediaID {
                         Button {
                             Haptics.impact(.light)
                             withAnimation(.easeOut(duration: 0.2)) { transcriber.toggle(mediaID: id, lang: lang) }
@@ -709,6 +1394,36 @@ struct VoiceBlock: View {
                 }
             }
         }
+    }
+}
+
+/// Идёт перемотка голосового пальцем — свайп «ответить» по пузырю в это время не срабатывает
+@MainActor
+enum VoiceScrub { static var active = false }
+
+/// Волна, подписанная на часы плеера: на каждом тике перерисовывается только она
+struct LiveWaveform: View {
+    @ObservedObject var clock: PlaybackClock
+    let samples: [Int]
+    let active: Color
+    let inactive: Color
+
+    var body: some View {
+        Waveform(samples: samples, progress: clock.value, active: active, inactive: inactive)
+    }
+}
+
+/// Время голосового: у играющего — сколько прошло, у остальных — длительность
+struct LiveVoiceTime: View {
+    @ObservedObject var clock: PlaybackClock
+    let duration: Double
+    let color: Color
+
+    var body: some View {
+        let shown = clock.value > 0 ? duration * clock.value : duration
+        Text(mmss(Int(shown.rounded(.down))))
+            .font(.system(size: 12).monospacedDigit())
+            .foregroundStyle(color)
     }
 }
 
@@ -751,53 +1466,105 @@ struct FileBlock: View {
     @ObservedObject private var downloads = DownloadCenter.shared
     private var dl: Double? { attachment.mediaID.flatMap { downloads.progress[$0] } }
 
+    /// «7,2 Кб», «1,4 Мб» — как в Telegram
     private var sizeText: String {
-        attachment.size > 0 ? ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file) : ""
+        let n = Double(attachment.size)
+        guard n > 0 else { return "" }
+        func f(_ v: Double, _ unit: String) -> String {
+            let r = (v * 10).rounded() / 10
+            let t = r == r.rounded() ? String(Int(r)) : String(format: "%.1f", r).replacingOccurrences(of: ".", with: ",")
+            return t + " " + unit
+        }
+        if n < 1024 { return "\(Int(n)) Б" }
+        if n < 1024 * 1024 { return f(n / 1024, "Кб") }
+        if n < 1024 * 1024 * 1024 { return f(n / 1024 / 1024, "Мб") }
+        return f(n / 1024 / 1024 / 1024, "Гб")
     }
+
+    private var ext: String {
+        let name = attachment.name ?? ""
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
+        let e = String(name[name.index(after: dot)...])
+        return e.count <= 5 ? e.uppercased() : ""
+    }
+
+    private var fg: Color { mine ? Color.white : theme.text }
+    private var sub: Color { mine ? Color.white.opacity(0.72) : theme.textTertiary }
+    private var disc: Color { mine ? Color.white : theme.accentColor }
+    private var onDisc: Color { mine ? theme.accentColor : Color.white }
 
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 11) {
+            HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(mine ? Color.white : theme.accentColor)
+                    Circle().fill(disc)
                     if pending {
-                        TransferRing(progress: nil, icon: "arrow.up", size: 42, tint: mine ? theme.accentColor : .white,
-                                     track: (mine ? theme.accentColor : Color.white).opacity(0.25))
+                        TransferRing(progress: nil, icon: "arrow.up", size: 52, tint: onDisc, track: onDisc.opacity(0.25))
                     } else if let p = dl {
-                        TransferRing(progress: p, icon: "xmark", size: 42, tint: mine ? theme.accentColor : .white,
-                                     track: (mine ? theme.accentColor : Color.white).opacity(0.25))
+                        TransferRing(progress: p, icon: "xmark", size: 52, tint: onDisc, track: onDisc.opacity(0.25))
                     } else {
-                        Image(systemName: "doc.fill").font(.system(size: 19))
-                            .foregroundStyle(mine ? theme.accentColor : Color.white)
+                        Image(systemName: "doc.fill").font(.system(size: 23, weight: .regular))
+                            .foregroundStyle(onDisc)
                     }
                 }
-                .frame(width: 42, height: 42)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(attachment.name ?? "Файл")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(mine ? Color.white : theme.text)
+                .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(SafeFileName.display(attachment.name ?? "Файл"))
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(fg)
                         .lineLimit(2)
+                        .truncationMode(.middle)
                         .multilineTextAlignment(.leading)
-                    if let p = dl {
-                        Text("\(Int(p * 100))% · \(sizeText)").font(.system(size: 12).monospacedDigit())
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
-                    } else if pending {
-                        Text("\(sizeText)").font(.system(size: 12))
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
-                    } else if !sizeText.isEmpty {
-                        Text(sizeText).font(.system(size: 12))
-                            .foregroundStyle(mine ? Color.white.opacity(0.75) : theme.textTertiary)
+                    Group {
+                        if let p = dl {
+                            Text("\(Int(p * 100))% · \(sizeText)").monospacedDigit()
+                        } else if pending {
+                            Text(sizeText.isEmpty ? "Отправка…" : "Отправка · \(sizeText)")
+                        } else {
+                            Text([sizeText, ext].filter { !$0.isEmpty }.joined(separator: " · "))
+                        }
                     }
+                    .font(.system(size: 14))
+                    .foregroundStyle(sub)
+                    .lineLimit(1)
+                    .padding(.trailing, 44)       // под время сообщения
                 }
                 Spacer(minLength: 0)
             }
-            .frame(width: 210)
+            .frame(width: 244)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onAppear {
+            // автозагрузка файлов («Данные и память»): небольшие файлы сами ложатся на телефон и потом открываются без сети
+            guard !mine, !pending, let id = attachment.mediaID, attachment.size > 0, attachment.size <= DataPrefs.fileLimit,
+                  !NetworkState.shared.offline, DataPrefs.autoNow(.file) else { return }
+            let e = ((attachment.name ?? "") as NSString).pathExtension.lowercased()
+            MediaFileCache.shared.prefetch(id, fallback: e.isEmpty ? "bin" : e)
+        }
     }
 }
 
 // MARK: - «Кружок»: круглое видеосообщение
+
+/// Какой кружок играет сейчас: он один на всё приложение (голосовые, музыка и другие кружки при этом молчат)
+@MainActor
+final class CircleFocus: ObservableObject {
+    static let shared = CircleFocus()
+    @Published var current: CirclePlayback?
+    func stop() { current?.stop() }
+
+    /// Плеер кружка живёт здесь, а не во вью: следующий кружок может включиться сам, даже если он ещё не на экране
+    private var pool: [String: CirclePlayback] = [:]
+    func playback(for key: String) -> CirclePlayback {
+        if let p = pool[key] { return p }
+        if pool.count > 40 { pool = pool.filter { $0.value.player != nil } }
+        let p = CirclePlayback()
+        pool[key] = p
+        return p
+    }
+}
 
 @MainActor
 final class CirclePlayback: ObservableObject {
@@ -805,18 +1572,31 @@ final class CirclePlayback: ObservableObject {
     @Published private(set) var started = false
     @Published private(set) var progress = 0.0
     private(set) var player: AVPlayer?
+    private(set) var duration = 0.0
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
 
+    private var rate: Float { VoicePlayer.shared.rate }
+
+    /// Включить с начала, если не играет (автопереход от предыдущего голосового или кружка)
+    func start(mediaID: String, duration: Double) {
+        if !isPlaying { toggle(mediaID: mediaID, duration: duration) }
+    }
+
     func toggle(mediaID: String, duration: Double) {
         if player == nil {
-            guard let url = ServerConfig.mediaURL(mediaID) else { return }
+            guard let url = MediaFileCache.shared.playableURL(mediaID) else { return }      // скачан — с телефона, без сети тоже
+            // одновременно звучит что-то одно
+            CircleFocus.shared.current?.stop()
             VoicePlayer.shared.stop()
+            VoicePlayer.shared.onStart?()
+            self.duration = duration
             try? AVAudioSession.sharedInstance().setCategory(.playback)
             AudioSessionGate.willActivate()
             try? AVAudioSession.sharedInstance().setActive(true)
             let item = AVPlayerItem(url: url)
             let p = AVPlayer(playerItem: item)
+            MediaSilence.register(p)               // при блокировке — пауза
             player = p
             observer = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] time in
                 Task { @MainActor in
@@ -827,23 +1607,45 @@ final class CirclePlayback: ObservableObject {
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
                                                                  queue: .main) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self else { return }
-                    self.player?.seek(to: .zero)
-                    self.isPlaying = false
-                    self.started = false
-                    self.progress = 0
+                    self?.stop()
+                    VoicePlayer.shared.playNext(after: mediaID)          // досмотрели — следующее голосовое или кружок
                 }
             }
+            CircleFocus.shared.current = self
         }
         guard let player else { return }
         if isPlaying {
             player.pause()
             isPlaying = false
         } else {
-            player.play()
+            player.rate = rate
             isPlaying = true
             started = true
+            SoundHint.shared.checkOnPlay()                           // нулевая громкость — подскажем прибавить
         }
+    }
+
+    func resume() { guard let player else { return }; player.rate = rate; isPlaying = true; started = true }
+    func pause() { player?.pause(); isPlaying = false }
+    func applyRate() { if isPlaying { player?.rate = rate } }
+
+    func seek(toFraction f: Double) {
+        let fraction = max(0, min(1, f))
+        progress = fraction
+        player?.seek(to: CMTime(seconds: fraction * duration, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func stop() {
+        if let observer, let player { player.removeTimeObserver(observer) }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        observer = nil
+        endObserver = nil
+        player?.pause()
+        player = nil
+        isPlaying = false
+        started = false
+        progress = 0
+        if CircleFocus.shared.current === self { CircleFocus.shared.current = nil }
     }
 
     deinit {
@@ -856,22 +1658,42 @@ struct CircleVideoBubble: View {
     let message: ChatMessage
     var size: CGFloat = 214
 
-    @StateObject private var playback = CirclePlayback()
+    var body: some View {
+        CircleVideoContent(attachment: attachment, message: message, size: size,
+                           playback: CircleFocus.shared.playback(for: attachment.mediaID ?? attachment.id))
+    }
+}
+
+private struct CircleVideoContent: View {
+    let attachment: ChatAttachment
+    let message: ChatMessage
+    var size: CGFloat
+
+    @ObservedObject var playback: CirclePlayback
+    @Environment(\.mediaFrozen) private var frozen
+    /// Пока кружок смотрят, он вырастает (как в Telegram)
+    private var shown: CGFloat { playback.started ? max(size, min(300, UIScreen.main.bounds.width - 70)) : size }
     @Environment(\.theme) private var theme
     @Environment(\.lang) private var lang
     @State private var callToast = false
 
     var body: some View {
         ZStack {
-            if let data = attachment.localPreview, let image = UIImage(data: data) {
+            if let data = attachment.localPreview, let image = PreviewThumbs.image(data, maxPixel: 600) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if let id = attachment.thumbID {
                 RemoteImage(id: id)
             } else {
                 theme.surface
             }
+            Color.clear.onAppear {
+                // кружок сохраняется на телефон — смотрится и без сети
+                if let id = attachment.mediaID, !message.isPending, !NetworkState.shared.offline, DataPrefs.autoNow(.video) {
+                    MediaFileCache.shared.prefetch(id)
+                }
+            }
 
-            if playback.started, let player = playback.player {
+            if playback.started, let player = playback.player, !frozen {
                 PlayerLayerView(player: player)
             }
 
@@ -886,8 +1708,9 @@ struct CircleVideoBubble: View {
                     .background(Color.black.opacity(0.4), in: Circle())
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: shown, height: shown)
         .clipShape(Circle())
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: playback.started)
         .overlay(Circle().trim(from: 0, to: playback.progress).stroke(theme.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
             .rotationEffect(.degrees(-90)).padding(2))
         .overlay(alignment: .bottomLeading) {
@@ -904,7 +1727,8 @@ struct CircleVideoBubble: View {
         .overlay { if callToast { Text(CallGate.message(lang)).font(.system(size: 12, weight: .semibold)).multilineTextAlignment(.center).foregroundStyle(.white).padding(10).background(Color.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 12)).padding(14) } }
         .contentShape(Circle())
         .onTapGesture {
-            guard !message.isPending, let id = attachment.mediaID else { return }
+            // зажали кружок ради реакций — отпускание пальца не должно его включать
+            guard !MessageMenu.isOpen, !message.isPending, let id = attachment.mediaID else { return }
             if CallGate.busy {
                 callToast = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { callToast = false }
@@ -948,19 +1772,766 @@ struct QuickLookView: UIViewControllerRepresentable {
 enum FileDownloader {
     /// Скачивает файл из сообщения во временную папку под его настоящим именем
     static func download(mediaID: String, name: String) async -> URL? {
-        guard let remote = ServerConfig.mediaURL(mediaID) else { return nil }
+        let ext = (name as NSString).pathExtension.lowercased()
+        // берём с телефона, если уже скачан (автозагрузка файлов), иначе качаем в кэш — второй раз открывается без сети
+        guard let cachedURL = await MediaFileCache.shared.download(mediaID, fallback: ext.isEmpty ? "bin" : ext) else { return nil }
         do {
-            await MainActor.run { DownloadCenter.shared.set(mediaID, 0) }
-            defer { Task { @MainActor in DownloadCenter.shared.set(mediaID, nil) } }
-            let (temp, _) = try await URLSession.shared.download(from: remote, delegate: DownloadProgressDelegate(id: mediaID))
+            let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.copyItem(at: cachedURL, to: temp)
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let safe = name.replacingOccurrences(of: "/", with: "_")
-            let target = folder.appendingPathComponent(safe.isEmpty ? "file" : safe)
+            // имя пришло от отправителя: никаких «../», невидимых символов и подмены расширения
+            let target = folder.appendingPathComponent(SafeFileName.clean(name))
+            guard SafeFileName.isInside(target, folder) else { return nil }
             try FileManager.default.moveItem(at: temp, to: target)
             return target
         } catch {
             return nil
         }
+    }
+}
+
+
+// MARK: - Удаление: сообщение рассыпается на частицы, как в Telegram
+
+extension View {
+    /// Пока сообщение рассыпается, сама строка скрыта: частицы рисует MessageDust в своём окне поверх чата
+    func dustDissolve(active: Bool) -> some View { opacity(active ? 0 : 1) }
+}
+
+/// Сообщение рассыпается на частицы своих же цветов — как «материя» в Telegram.
+/// Снимок экрана на месте сообщения → сообщение прячется → второй снимок: где пиксели отличаются, там и было
+/// сообщение (обои и пустое место вокруг пузыря не рассыпаются). Частицы летят в отдельном прозрачном окне,
+/// поэтому строку сразу убирают из списка и соседние сообщения съезжают, пока пыль ещё в воздухе
+@MainActor
+enum MessageDust {
+    private static var window: UIWindow?
+
+    private final class PassThroughWindow: UIWindow {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+    }
+
+    private static var host: UIWindow? {
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        return windows.first { $0.isKeyWindow && !($0 is PassThroughWindow) }
+            ?? windows.first { $0.windowLevel == .normal && !($0 is PassThroughWindow) }
+    }
+
+    /// `frames` — где сообщения стоят на экране; `hide` прячет их (строки перестают рисоваться)
+    static func burst(_ frames: [CGRect], hide: () -> Void) async {
+        guard let host, let scene = host.windowScene else { hide(); return }
+        let rects = frames.map { $0.intersection(host.bounds) }.filter { !$0.isNull && $0.width > 4 && $0.height > 4 }
+        guard !rects.isEmpty else { hide(); return }
+        let scale = min(host.screen.scale, 2)
+        let before = rects.map { (sharp: snapshot(host, $0, scale: scale), small: snapshot(host, $0, scale: 1)) }
+        let overlay = window ?? {
+            let w = PassThroughWindow(windowScene: scene)
+            w.windowLevel = host.windowLevel + 1
+            w.backgroundColor = .clear
+            w.isUserInteractionEnabled = false
+            w.isHidden = false
+            window = w
+            return w
+        }()
+        // сначала поверх кладём неподвижный снимок — подмены не видно, пока строка прячется
+        let views = zip(rects, before).map { rect, shot -> DustView in
+            let v = DustView(rect: rect, image: shot.sharp)
+            overlay.addSubview(v)
+            return v
+        }
+        hide()
+        try? await Task.sleep(nanoseconds: 60_000_000)          // SwiftUI успевает перерисовать список без строки
+        for (i, rect) in rects.enumerated() {
+            views[i].start(with: before[i].small, without: snapshot(host, rect, scale: 1)) { finished(views[i]) }
+        }
+    }
+
+    private static func finished(_ view: UIView) {
+        view.removeFromSuperview()
+        if window?.subviews.isEmpty == true {
+            window?.isHidden = true
+            window = nil
+        }
+    }
+
+    private static func snapshot(_ window: UIWindow, _ rect: CGRect, scale: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(bounds: rect, format: format).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+    }
+}
+
+/// Частицы одного сообщения: рисуются раз в кадр (CADisplayLink), до ~4000 штук
+private final class DustView: UIView {
+    static let pad: CGFloat = 150                       // частицы разлетаются за края сообщения
+
+    private struct Particle {
+        let x: CGFloat, y: CGFloat                      // где была в сообщении (pt от его угла)
+        let vx: CGFloat, vy: CGFloat
+        let delay: Double, life: Double
+        let size: CGFloat
+        let color: CGColor
+        let wave: Double                                // положение на «волне» разрушения, 0…1
+        let phase: CGFloat                              // покачивание в полёте — у каждой своё
+    }
+
+    private var image: UIImage
+    private let contentRect: CGRect
+    private var particles: [Particle] = []
+    private var link: CADisplayLink?
+    private var startTime: CFTimeInterval = 0
+    private var endTime: Double = 0
+    private var onDone: (() -> Void)?
+    /// За сколько волна проходит всё сообщение (слева сверху → вправо вниз)
+    private let sweep: Double = 0.62
+
+    init(rect: CGRect, image: UIImage) {
+        self.image = image
+        contentRect = CGRect(x: Self.pad, y: Self.pad, width: rect.width, height: rect.height)
+        super.init(frame: rect.insetBy(dx: -Self.pad, dy: -Self.pad))
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        layer.contentsScale = min(UIScreen.main.scale, 2)
+        setNeedsDisplay()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Волна: левый край отрывается первым, верх чуть раньше низа
+    private static func wave(_ nx: CGFloat, _ ny: CGFloat) -> Double { Double(0.8 * nx + 0.2 * ny) }
+
+    func start(with before: UIImage, without after: UIImage, done: @escaping () -> Void) {
+        onDone = done
+        guard let a = before.cgImage, let b = after.cgImage, let pa = Self.pixels(a), let pb = Self.pixels(b, width: a.width, height: a.height) else {
+            done(); return
+        }
+        let w = a.width, h = a.height
+        // где сообщение: пиксели, которые изменились, когда его спрятали
+        var mask = [Bool](repeating: false, count: w * h)
+        var count = 0
+        for i in 0..<(w * h) {
+            let o = i * 4
+            let d = abs(Int(pa[o]) - Int(pb[o])) + abs(Int(pa[o + 1]) - Int(pb[o + 1])) + abs(Int(pa[o + 2]) - Int(pb[o + 2]))
+            if d > 18 { mask[i] = true; count += 1 }
+        }
+        guard count > 0 else { done(); return }
+        // частицы: клетки 2 pt и крупнее, если сообщение большое; цвет — средний цвет сообщения в клетке
+        let cell = max(2, Int((Double(count) / 4000).squareRoot().rounded(.up)))
+        let sx = contentRect.width / CGFloat(w), sy = contentRect.height / CGFloat(h)
+        var list: [Particle] = []
+        list.reserveCapacity(min(6000, count / (cell * cell) + 16))
+        var y0 = 0
+        while y0 < h {
+            var x0 = 0
+            while x0 < w {
+                var n = 0, r = 0, g = 0, bl = 0, al = 0
+                for y in y0..<min(h, y0 + cell) {
+                    for x in x0..<min(w, x0 + cell) where mask[y * w + x] {
+                        let o = (y * w + x) * 4
+                        r += Int(pa[o]); g += Int(pa[o + 1]); bl += Int(pa[o + 2]); al += Int(pa[o + 3]); n += 1
+                    }
+                }
+                if n * 3 >= cell * cell {
+                    let alpha = CGFloat(al) / CGFloat(n * 255)
+                    let k = alpha > 0 ? 1 / (CGFloat(n) * 255 * alpha) : 0      // пиксели снимка — с умноженной прозрачностью
+                    let color = CGColor(srgbRed: CGFloat(r) * k, green: CGFloat(g) * k, blue: CGFloat(bl) * k, alpha: alpha)
+                    let px = (CGFloat(x0) + CGFloat(cell) / 2) * sx, py = (CGFloat(y0) + CGFloat(cell) / 2) * sy
+                    let wv = Self.wave(px / contentRect.width, py / contentRect.height)
+                    let r1 = CGFloat.random(in: 0...1), r2 = CGFloat.random(in: 0...1)
+                    list.append(Particle(x: px, y: py,
+                                         vx: -20 + 115 * r1 * r1,              // в основном вправо, часть — влево
+                                         vy: -(20 + 80 * r2),                  // и вверх
+                                         delay: sweep * (0.85 * wv + 0.15 * Double.random(in: 0...1)),
+                                         life: Double.random(in: 0.75...1.25),
+                                         size: CGFloat(cell) * sx * CGFloat.random(in: 0.8...1.15),
+                                         color: color, wave: wv, phase: CGFloat.random(in: 0...(2 * .pi))))
+                }
+                x0 += cell
+            }
+            y0 += cell
+        }
+        particles = list
+        endTime = (list.map { $0.delay + $0.life }.max() ?? 0) + 0.05
+        image = Self.masked(image, mask: mask, width: w, height: h)
+        startTime = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)     // на 120 Гц — плавнее
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func tick() {
+        if CACurrentMediaTime() - startTime > endTime {
+            link?.invalidate()
+            link = nil
+            onDone?()
+            onDone = nil
+            return
+        }
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        guard link != nil else { image.draw(in: contentRect); return }       // ещё не рассыпается — неподвижный снимок
+        let t = CACurrentMediaTime() - startTime
+        // нетронутая часть: всё, до чего волна точно не дошла, рисуется самим снимком (чётко, без «пикселей»)
+        let front = t / (0.85 * sweep)
+        if front < 1 {
+            let w = contentRect.width
+            let topX = CGFloat(front / 0.8) * w, bottomX = CGFloat((front - 0.2) / 0.8) * w
+            ctx.saveGState()
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: contentRect.minX + max(0, topX), y: contentRect.minY - 1))
+            ctx.addLine(to: CGPoint(x: contentRect.maxX + 1, y: contentRect.minY - 1))
+            ctx.addLine(to: CGPoint(x: contentRect.maxX + 1, y: contentRect.maxY + 1))
+            ctx.addLine(to: CGPoint(x: contentRect.minX + max(0, bottomX), y: contentRect.maxY + 1))
+            ctx.closePath()
+            ctx.clip()
+            image.draw(in: contentRect)
+            ctx.restoreGState()
+        }
+        for p in particles {
+            if t < p.delay {
+                // на волне, но ещё не оторвалась — стоит на месте
+                guard p.wave < front else { continue }
+                ctx.setAlpha(1)
+                ctx.setFillColor(p.color)
+                ctx.fill(CGRect(x: contentRect.minX + p.x - p.size / 2, y: contentRect.minY + p.y - p.size / 2, width: p.size, height: p.size))
+                continue
+            }
+            let age = t - p.delay
+            guard age < p.life else { continue }
+            let k = age / p.life
+            let a = CGFloat(age)
+            // отрывается мягко: сначала почти на месте, потом разгоняется ветром вправо-вверх (без рывка на старте)
+            let go = a * a / (a + 0.22)
+            let sway = sin(a * 7 + p.phase) * 3 * min(1, a * 4)
+            let x = contentRect.minX + p.x + p.vx * go + 50 * go * go + sway
+            let y = contentRect.minY + p.y + p.vy * go - 32 * go * go
+            // чуть «вспухает» в момент отрыва, потом плавно уменьшается и тает
+            let d = p.size * CGFloat((1 + 0.18 * sin(min(1, k * 5) * .pi)) * (1 - 0.6 * k))
+            let fade = max(0, min(1, (k - 0.3) / 0.7))
+            ctx.setAlpha(CGFloat(1 - fade * fade * (3 - 2 * fade)))
+            ctx.setFillColor(p.color)
+            ctx.fill(CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d))
+        }
+    }
+
+    /// RGBA, 8 бит на канал, с умноженной прозрачностью — в заданном размере
+    private static func pixels(_ image: CGImage, width: Int? = nil, height: Int? = nil) -> [UInt8]? {
+        let w = width ?? image.width, h = height ?? image.height
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ok: Bool = data.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? data : nil
+    }
+
+    /// Чёткий снимок, в котором оставлено только сообщение (без обоев вокруг пузыря)
+    private static func masked(_ image: UIImage, mask: [Bool], width: Int, height: Int) -> UIImage {
+        var alpha = mask.map { $0 ? UInt8(255) : 0 }
+        guard let provider = CGDataProvider(data: Data(bytes: &alpha, count: alpha.count) as CFData),
+              let maskImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                      provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return image }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { r in
+            let ctx = r.cgContext
+            let rect = CGRect(origin: .zero, size: image.size)
+            // маска в CGContext перевёрнута относительно UIKit
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: rect.height)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.clip(to: rect, mask: maskImage)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: 0, y: -rect.height)
+            image.draw(in: rect)
+            ctx.restoreGState()
+        }
+    }
+}
+
+/// Уголок превью видео: идёт скачивание на телефон — кольцо прогресса; нет сети и видео не скачано — значок «скачать»
+struct MediaCacheBadge: View {
+    let mediaID: String
+    @ObservedObject private var downloads = DownloadCenter.shared
+    @ObservedObject private var network = NetworkState.shared
+
+    var body: some View {
+        if let p = downloads.progress[mediaID] {
+            TransferRing(progress: p, icon: "arrow.down", size: 26)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+        } else if network.offline, MediaFileCache.shared.cached(mediaID) == nil {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+        }
+    }
+}
+
+extension ChatAttachment {
+    /// Стикер из вложения: встроенный — по id, свой — с файлом (картинка или анимированное видео)
+    var asSticker: Sticker {
+        Sticker(id: sticker ?? "", emoji: "", mediaID: mediaID, animated: (mime ?? "").hasPrefix("video"), packID: stickerPack)
+    }
+}
+
+/// Свой стикерпак: что внутри, «Добавить набор» / «Убрать набор»
+struct StickerPackSheet: View {
+    let packID: String
+    let repo: MessengerRepository
+    var onChanged: () -> Void = {}
+    var onSend: ((Sticker) -> Void)? = nil
+
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @State private var pack: CustomStickerPack?
+    @State private var failed = false
+    @State private var busy = false
+
+    private var s: Strings { Strings(lang: lang) }
+    /// Встроенный набор (есть у всех, убрать нельзя)
+    private var builtin: Bool { !packID.hasPrefix("u:") }
+
+    @State private var preview: Sticker?            // нажали на стикер — показать крупно с меню
+    @State private var showCreator = false
+    @State private var editSticker: Sticker?        // «Изменить стикер» — полноэкранный редактор
+
+    var body: some View {
+        ZStack {
+            // меню «…» и любые нажатия в шторке не должны возвращать фокус полю ввода под ней
+            Color.clear.frame(width: 0, height: 0).onAppear { hideKeyboard() }
+            if let pack {
+                VStack(spacing: 0) {
+                    header(pack)
+                    ScrollView {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                            ForEach(pack.pack.stickers) { st in
+                                Button {
+                                    Haptics.impact(.light)
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { preview = st }
+                                } label: {
+                                    StickerImage(sticker: st, size: 74).frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12).padding(.top, 6)
+                        .padding(.bottom, 90)       // под плавающую кнопку
+                    }
+                }
+                // красивая плавающая кнопка снизу: «Добавить N стикеров» / «Убрать набор» (у встроенных наборов её нет)
+                if !builtin {
+                    VStack {
+                        Spacer()
+                        addButton(pack)
+                    }
+                }
+            } else if failed {
+                Text(s.t("Не удалось загрузить набор", "Couldn't load the pack"))
+                    .font(.system(size: 15)).foregroundStyle(theme.textSecondary).frame(maxHeight: .infinity)
+            } else {
+                ProgressView().frame(maxHeight: .infinity)
+            }
+
+            if let st = preview {
+                stickerPreview(st)
+            }
+        }
+        .task {
+            do { pack = try await repo.stickerPack(id: packID) } catch { failed = true }
+        }
+        .sheet(isPresented: $showCreator) {
+            StickerCreatorSheet(onChanged: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .sheetStyle(theme)
+        }
+        .fullScreenCover(item: $editSticker) { st in
+            StickerEditorView(sticker: st, packID: packID, repo: repo,
+                              packs: pack.map { [$0.pack] } ?? [],
+                              onSaved: { Task { pack = try? await repo.stickerPack(id: packID); onChanged() } },
+                              onClose: { editSticker = nil })
+                .environment(\.theme, theme).environment(\.lang, lang)
+        }
+    }
+
+    // MARK: Шапка
+
+    private func header(_ pack: CustomStickerPack) -> some View {
+        ZStack {
+            VStack(spacing: 2) {
+                Text(pack.pack.title).font(.system(size: 17, weight: .bold)).foregroundStyle(theme.accentColor)
+                    .lineLimit(1)
+                Text(countTitle(pack.pack.stickers.count) + (builtin ? s.t(" · встроенный", " · built-in") : ""))
+                    .font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, 64)
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(width: 34, height: 34).background(theme.surface, in: Circle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                if pack.mine {
+                    Menu {
+                        Button { showCreator = true } label: { Label(s.t("Изменить набор", "Edit pack"), systemImage: "pencil") }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text)
+                            .frame(width: 34, height: 34).background(theme.surface, in: Circle())
+                    }
+                } else {
+                    Color.clear.frame(width: 34, height: 34)
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 8)
+    }
+
+    /// «N стикеров» с правильным склонением
+    private func countTitle(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "стикеров" : (m10 == 1 ? "стикер" : (m10 >= 2 && m10 <= 4 ? "стикера" : "стикеров"))
+            return "\(n) \(word)"
+        }
+        return "\(n) sticker\(n == 1 ? "" : "s")"
+    }
+
+    /// «Добавить N стикеров» с правильным склонением
+    private func addTitle(_ n: Int) -> String {
+        if lang == .ru {
+            let m100 = n % 100, m10 = n % 10
+            let word = (m100 >= 11 && m100 <= 14) ? "стикеров" : (m10 == 1 ? "стикер" : (m10 >= 2 && m10 <= 4 ? "стикера" : "стикеров"))
+            return "Добавить \(n) \(word)"
+        }
+        return "Add \(n) sticker\(n == 1 ? "" : "s")"
+    }
+
+    private func addButton(_ pack: CustomStickerPack) -> some View {
+        let n = pack.pack.stickers.count
+        return Button { toggle() } label: {
+            Group {
+                if busy { ProgressView().tint(.white) }
+                else if pack.installed {
+                    Text(s.t("Убрать набор", "Remove pack")).font(.system(size: 17, weight: .semibold))
+                } else {
+                    Text(addTitle(n)).font(.system(size: 17, weight: .semibold))
+                }
+            }
+            .foregroundStyle(pack.installed ? theme.danger : Color.white)
+            .frame(maxWidth: .infinity).frame(height: 52)
+            .background(pack.installed ? AnyShapeStyle(theme.danger.opacity(0.14)) : AnyShapeStyle(theme.accent),
+                        in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        }
+        .buttonStyle(PressStyle()).disabled(busy)
+        .padding(.horizontal, 16).padding(.bottom, 14)
+        .animation(.easeOut(duration: 0.2), value: pack.installed)
+    }
+
+    // MARK: Предпросмотр стикера с меню (как в Telegram)
+
+    private func stickerPreview(_ st: Sticker) -> some View {
+        let fav = FavoriteStickers.contains(st)
+        return ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+                .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { preview = nil } }
+            VStack(spacing: 22) {
+                StickerImage(sticker: st, size: 200)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                VStack(spacing: 0) {
+                    if onSend != nil {
+                        menuRow("arrow.up", s.t("Отправить стикер", "Send sticker")) {
+                            onSend?(st); dismiss()
+                        }
+                        menuDivider
+                    }
+                    menuRow(fav ? "bookmark.slash" : "bookmark",
+                            fav ? s.t("Убрать из избранных", "Remove from favorites") : s.t("Добавить в избранные", "Add to favorites")) {
+                        FavoriteStickers.toggle(st); Haptics.impact(.light)
+                        withAnimation(.easeOut(duration: 0.15)) { preview = nil }
+                    }
+                    if pack?.mine == true, !st.animated {
+                        menuDivider
+                        menuRow("pencil", s.t("Изменить стикер", "Edit sticker")) {
+                            preview = nil; editSticker = st
+                        }
+                    }
+                }
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frame(maxWidth: 300)
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+
+    private func menuRow(_ icon: String, _ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: { Haptics.select(); action() }) {
+            HStack(spacing: 16) {
+                Image(systemName: icon).font(.system(size: 18)).frame(width: 24)
+                Text(title).font(.system(size: 17))
+                Spacer()
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 18).frame(height: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var menuDivider: some View { Divider().opacity(0.5).padding(.leading, 56) }
+
+    private func toggle() {
+        guard let current = pack else { return }
+        busy = true
+        Task {
+            if let updated = try? await repo.setStickerPack(id: packID, installed: !current.installed) {
+                pack = updated
+                Haptics.notify(.success)
+                onChanged()
+            } else {
+                Haptics.notify(.error)
+            }
+            busy = false
+        }
+    }
+}
+
+
+/// Карточка того, что нажали в тексте: номер (страна и аккаунт, если человек разрешил находить себя по номеру),
+/// карта (платёжная система и банк), криптоадрес (сеть) или @юзернейм
+struct EntityInfoSheet: View {
+    let entity: ChatEntity
+    var onOpenProfile: (String) -> Void = { _ in }
+
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @State private var account: UserProfile?
+    @State private var searching = false
+    @State private var copied = false
+
+    private var s: Strings { Strings(lang: lang) }
+
+    private var title: String {
+        switch entity.kind {
+        case .phone: return "+" + ChatEntityInfo.international(entity.value)
+        case .card: return ChatEntityInfo.grouped(entity.value)
+        case .crypto, .username: return entity.value
+        }
+    }
+
+    private var subtitle: String {
+        switch entity.kind {
+        case .phone: return ChatEntityInfo.phone(entity.value, lang: lang)
+        case .card: return ChatEntityInfo.card(entity.value, lang: lang)
+        case .crypto: return s.t("Криптоадрес · ", "Crypto address · ") + ChatEntityInfo.crypto(entity.value).network
+        case .username: return s.t("Имя пользователя", "Username")
+        }
+    }
+
+    private var icon: String {
+        switch entity.kind {
+        case .phone: return "phone.fill"
+        case .card: return "creditcard.fill"
+        case .crypto: return "bitcoinsign.circle.fill"
+        case .username: return "at"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 54, height: 54).background(theme.accent, in: Circle())
+                .padding(.top, 22)
+            VStack(spacing: 4) {
+                Text(title).font(.system(size: entity.kind == .crypto ? 15 : 20, weight: .bold, design: entity.kind == .crypto ? .monospaced : .default))
+                    .foregroundStyle(theme.text).multilineTextAlignment(.center).textSelection(.enabled)
+                Text(subtitle).font(.system(size: 14)).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 20)
+
+            if entity.kind == .phone || entity.kind == .username { accountCard }
+
+            VStack(spacing: 0) {
+                switch entity.kind {
+                case .phone:
+                    if let tel = URL(string: "tel:+" + ChatEntityInfo.international(entity.value)) {
+                        action("phone", s.t("Позвонить", "Call")) { dismiss(); openURL(tel) }
+                    }
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать номер", "Copy number")) { copy(title) }
+                case .card:
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать номер карты", "Copy card number")) { copy(entity.value) }
+                case .crypto:
+                    if let explorer = ChatEntityInfo.crypto(entity.value).explorer {
+                        action("safari", s.t("Открыть в обозревателе", "Open in explorer")) { dismiss(); openURL(explorer) }
+                    }
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать адрес", "Copy address")) { copy(entity.value) }
+                case .username:
+                    action("doc.on.doc", copied ? s.t("Скопировано", "Copied") : s.t("Скопировать", "Copy")) { copy(entity.value) }
+                }
+            }
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 16)
+            Spacer(minLength: 0)
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: account?.id)
+        .task { await find() }
+    }
+
+    @ViewBuilder private var accountCard: some View {
+        if let account {
+            HStack(spacing: 12) {
+                AvatarView(name: account.name, size: 46, avatarID: account.avatarID)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.name).font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(account.username.map { "@" + $0 } ?? s.t("в Orbita", "on Orbita"))
+                        .font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    Haptics.impact(.light)
+                    let peer = ChatPeer(id: account.id, name: account.name, username: account.username, avatarID: account.avatarID)
+                    dismiss()
+                    PushManager.shared.openChat = ChatRoute(peer: peer)
+                } label: {
+                    Text(s.t("Написать", "Message")).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 14).frame(height: 34).background(theme.accent, in: Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+            .padding(12)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture { let id = account.id; dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onOpenProfile(id) } }
+            .padding(.horizontal, 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        } else if searching {
+            ProgressView().frame(height: 70)
+        } else if entity.kind == .username {
+            Text(s.t("Такого пользователя нет", "No such user")).font(.system(size: 13)).foregroundStyle(theme.textTertiary)
+        }
+    }
+
+    private func action(_ systemImage: String, _ title: String, _ run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage).font(.system(size: 17)).foregroundStyle(theme.accentColor).frame(width: 24)
+                Text(title).font(.system(size: 16)).foregroundStyle(theme.text)
+                Spacer()
+            }
+            .padding(.horizontal, 14).frame(height: 48).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func copy(_ text: String) {
+        UIPasteboard.general.string = text
+        Haptics.notify(.success)
+        withAnimation(.easeOut(duration: 0.15)) { copied = true }
+    }
+
+    /// Аккаунт по номеру ищется только у тех, кто не запретил находить себя по номеру (проверяет сервер)
+    private func find() async {
+        guard entity.kind == .phone || entity.kind == .username else { return }
+        searching = true
+        defer { searching = false }
+        let found: UserProfile?
+        if entity.kind == .phone {
+            found = try? await session.profileRepo.lookup(phone: "+" + ChatEntityInfo.international(entity.value))
+        } else {
+            found = try? await session.profileRepo.lookup(username: String(entity.value.drop(while: { $0 == "@" })))
+        }
+        account = found
+    }
+}
+
+// MARK: - Присланный шортс / видео из поста
+
+/// Вертикальная карточка видео из поста или шортса: кадр в своих пропорциях (9:16 — целиком), значок «Шортс»,
+/// длительность внизу слева, по центру — кнопка воспроизведения; без звука крутится превью, нажатие — открыть
+struct SharedVideoCard: View {
+    let attachment: ChatAttachment
+    let author: String
+    var pending = false
+    let onOpen: () -> Void
+
+    @AppStorage("autoplay") private var autoplay = true
+    @Environment(\.lang) private var lang
+
+    private var width: CGFloat { min(230, UIScreen.main.bounds.width * 0.6) }
+    private var height: CGFloat {
+        let a = attachment.aspect > 0 ? CGFloat(attachment.aspect) : 9.0 / 16.0
+        return min(width / max(0.5625, min(1.8, a)), width * 16 / 9)
+    }
+    private var vertical: Bool { attachment.aspect > 0 && attachment.aspect < 0.8 }
+
+    var body: some View {
+        Button(action: onOpen) {
+            ZStack {
+                if let id = attachment.thumbID ?? attachment.mediaID {
+                    RemoteImage(id: id)
+                } else {
+                    Color.black
+                }
+                if autoplay, !pending, let item = attachment.mediaItem {
+                    InlineVideo(item: item).allowsHitTesting(false)
+                }
+                LinearGradient(colors: [.black.opacity(0.35), .clear, .clear, .black.opacity(0.55)],
+                               startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+                Image(systemName: "play.fill")
+                    .font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 50, height: 50)
+                    .background(.black.opacity(0.4), in: Circle())
+                VStack {
+                    HStack(spacing: 5) {
+                        Image(systemName: vertical ? "play.rectangle.on.rectangle.fill" : "play.rectangle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(vertical ? Strings(lang: lang).t("Шортс", "Short") : Strings(lang: lang).t("Видео", "Video"))
+                            .font(.system(size: 12, weight: .semibold))
+                        if !author.isEmpty {
+                            Text("· " + author).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.top, 9)
+                    Spacer()
+                    HStack {
+                        if attachment.duration > 0 {
+                            Text(mmss(Int(attachment.duration.rounded())))
+                                .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(.black.opacity(0.45), in: Capsule())
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                }
+                if pending { Color.black.opacity(0.25) }
+            }
+            .frame(width: width, height: height)
+            .clipped()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
     }
 }

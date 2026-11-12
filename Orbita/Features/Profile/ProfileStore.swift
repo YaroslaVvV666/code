@@ -14,13 +14,62 @@ final class ProfileStore: ObservableObject {
     }
 
     func load() async {
+        // сразу — сохранённый профиль (аватарка, имя, статус видны и без интернета), свежий приходит следом
+        if profile == nil, let cached = repo.cachedProfile() { profile = cached }
         do {
             profile = try await repo.load()
             loadError = nil
         } catch {
             loadError = (error as? APIError) ?? .offline
         }
+        // свою аватарку (и все её фото) закачиваем в постоянный кэш — показывается без интернета даже после перезапуска
+        if let p = profile {
+            let ids = ([p.avatarID] + p.avatars.map(\.mediaID)).compactMap { $0 }.filter { !$0.isEmpty }
+            // первые фото прогреваем в память заранее: тяжёлое декодирование идёт в фоне при входе в приложение,
+            // поэтому при открытии «Профиля» картинки уже готовы — без рывка. Остальные — просто в дисковый кэш.
+            for id in ids.prefix(3) {
+                guard let url = ServerConfig.mediaURL(id) else { continue }
+                Task.detached(priority: .userInitiated) { _ = await ImageCache.shared.load(url, maxPixel: 1280, persistKey: id) }
+            }
+            for id in ids.dropFirst(3) { Task.detached(priority: .utility) { await AvatarStore.pin(id) } }
+            // лучшие друзья с орбиты: их аватарки и цвет свечения — в постоянный кэш, чтобы без интернета орбита
+            // кружилась вокруг аватарки так же, как с ним
+            let friends = Array(p.orbit.prefix(8))
+            Task.detached(priority: .utility) {
+                for f in friends {
+                    if let id = f.avatarID { await AvatarStore.pin(id) }
+                    _ = await OrbitTone.load(f)
+                }
+            }
+        }
     }
+
+    /// Эмодзи-статус: рядом с ником появляется сразу, сервер — следом. Не получилось — возвращаем прежний
+    /// «Чем я занят»: видно сразу, сервер — следом; nil — убрать
+    func setActivity(_ value: (emoji: String, text: String, hours: Double)?) async -> Bool {
+        do {
+            if let value {
+                profile?.activity = try await repo.setActivity(emoji: value.emoji, text: value.text, hours: value.hours)
+            } else {
+                try await repo.clearActivity()
+                profile?.activity = nil
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func setStatusEmoji(_ emoji: String) {
+        let old = profile?.statusEmoji
+        profile?.statusEmoji = emoji.isEmpty ? nil : emoji
+        Task {
+            if await update(ProfilePatch(statusEmoji: emoji)) != nil { profile?.statusEmoji = old }
+        }
+    }
+
+    /// Без интернета фото профиля не меняются: показываем то, что сохранено, а правки — когда связь вернётся
+    private var offline: Bool { NetworkState.shared.offline }
 
     /// nil — всё прошло успешно
     @discardableResult
@@ -38,6 +87,7 @@ final class ProfileStore: ObservableObject {
     /// Обрезает фото до квадрата, загружает и добавляет в начало галереи
     @discardableResult
     func addPhoto(from data: Data) async -> APIError? {
+        guard !offline else { return .offline }
         guard let jpeg = ImageProcessing.avatar(data) else { return .invalidResponse }
         do {
             let id = try await repo.uploadAvatar(jpeg)
@@ -50,6 +100,7 @@ final class ProfileStore: ObservableObject {
 
     @discardableResult
     func removePhoto(_ id: String) async -> APIError? {
+        guard !offline else { return .offline }
         do {
             profile = try await repo.deleteAvatar(id: id)
             return nil
@@ -60,6 +111,7 @@ final class ProfileStore: ObservableObject {
 
     @discardableResult
     func reorderPhotos(_ ids: [String]) async -> APIError? {
+        guard !offline else { return .offline }
         do {
             profile = try await repo.reorderAvatars(ids)
             return nil
@@ -79,17 +131,33 @@ final class DevicesStore: ObservableObject {
     @Published private(set) var sessions: [DeviceSession] = []
     @Published private(set) var loaded = false
     @Published var error: APIError?
+    /// «Автоматически завершать сеансы, если сеанс неактивен» — дней
+    @Published private(set) var ttlDays = 180
 
     private let repo: ProfileRepository
 
     init(repo: ProfileRepository) { self.repo = repo }
+
+    func setTTL(_ days: Int) async {
+        let before = ttlDays
+        ttlDays = days
+        do {
+            try await repo.setSessionTTL(days: days)
+            await load()
+        } catch {
+            ttlDays = before
+            self.error = (error as? APIError) ?? .offline
+        }
+    }
 
     var current: DeviceSession? { sessions.first { $0.isCurrent } }
     var others: [DeviceSession] { sessions.filter { !$0.isCurrent } }
 
     func load() async {
         do {
-            sessions = try await repo.sessions()
+            let r = try await repo.sessionList()
+            sessions = r.sessions
+            ttlDays = r.ttlDays
             error = nil
         } catch {
             self.error = (error as? APIError) ?? .offline

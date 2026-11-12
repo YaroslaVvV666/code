@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 /// Возвращает свайп «назад» от левого края, даже когда системная кнопка «назад» скрыта (как в Telegram)
 extension UINavigationController: UIGestureRecognizerDelegate {

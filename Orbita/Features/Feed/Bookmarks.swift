@@ -13,6 +13,22 @@ final class BookmarkStore: ObservableObject {
 
     func has(_ id: String) -> Bool { ids.contains(id) }
 
+    /// Сервер знает закладки со всех устройств: берём их, свои ещё не отправленные — не теряем
+    func adopt(server: [String]) {
+        var merged = server
+        for id in ids where !merged.contains(id) { merged.append(id) }
+        guard merged != ids else { return }
+        ids = merged
+        UserDefaults.standard.set(ids, forKey: "bookmarks.posts")
+    }
+
+    /// Пост удалён или недоступен — убираем из закладок без запроса на сервер
+    func forget(_ gone: [String]) {
+        guard !gone.isEmpty else { return }
+        ids.removeAll { gone.contains($0) }
+        UserDefaults.standard.set(ids, forKey: "bookmarks.posts")
+    }
+
     func toggle(_ id: String) {
         let nowSaved: Bool
         if let i = ids.firstIndex(of: id) { ids.remove(at: i); nowSaved = false } else { ids.insert(id, at: 0); nowSaved = true }
@@ -60,14 +76,33 @@ struct BookmarksSheet: View {
             Spacer(minLength: 0)
         }
         .task {
-            var out: [Post] = []
-            for id in store.ids { if let p = try? await session.feedRepo.post(id: id) { out.append(p) } }
-            posts = out; loading = false
+            // сразу — то, что уже загружено в ленте (без ожидания сети)
+            let local = store.ids.compactMap { id in vm.posts.first { $0.id == id } }
+            if !local.isEmpty { posts = local; loading = false }
+            // всё сохранённое — одним запросом с сервера (там закладки со всех устройств)
+            if let list = await session.extras.savedPosts() {
+                store.adopt(server: list.map(\.id))
+                var out = list
+                // сохранённое на этом телефоне, но ещё не дошедшее до сервера — догружаем по одному
+                for id in store.ids where !out.contains(where: { $0.id == id }) {
+                    if let p = vm.posts.first(where: { $0.id == id }) { out.append(p) }
+                    else if let p = try? await session.feedRepo.post(id: id) { out.append(p) }
+                }
+                posts = out.sorted { a, b in (store.ids.firstIndex(of: a.id) ?? .max) < (store.ids.firstIndex(of: b.id) ?? .max) }
+            } else {
+                var out: [Post] = []
+                for id in store.ids {
+                    if let p = vm.posts.first(where: { $0.id == id }) { out.append(p) }
+                    else if let p = try? await session.feedRepo.post(id: id) { out.append(p) }
+                }
+                if !out.isEmpty || posts.isEmpty { posts = out }
+            }
+            loading = false
         }
         .sheet(item: $commentsPost) { post in
             CommentsSheet(post: post, vm: vm)
                 .environmentObject(session).environmentObject(flow)
-                .presentationBackground(theme.sheet)
+                .sheetStyle(theme)
         }
     }
 }

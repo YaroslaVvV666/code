@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Очистка кэша: мусор по орбите втягивается в планету, счётчик идёт до 100%
 struct CacheClearView: View {

@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Изменить профиль (как в Telegram)
 
@@ -33,9 +34,17 @@ struct EditProfileView: View {
     @State private var saving = false
     @State private var errorText: String?
     @State private var showBirthday = false
+    @State private var showAudience = false          // пол и город (видно только вам)
+    @State private var showUnsaved = false
 
     private var s: Strings { Strings(lang: lang) }
     private var profile: UserProfile? { store.profile }
+
+    private var audienceText: String {
+        let g = profile?.gender == "m" ? s.t("Мужской", "Male") : (profile?.gender == "f" ? s.t("Женский", "Female") : nil)
+        let parts = [g, profile?.city].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? s.t("Не указаны", "Not set") : parts.joined(separator: ", ")
+    }
 
     private var firstClean: String { Validator.normalizeName(first) }
     private var lastClean: String { Validator.normalizeName(last) }
@@ -86,7 +95,7 @@ struct EditProfileView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(s.cancel) { dismiss() }
+                    Button(s.cancel) { if changed && valid { showUnsaved = true } else { dismiss() } }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: save) {
@@ -113,6 +122,17 @@ struct EditProfileView: View {
             if new.count > 70 { bio = String(new.prefix(70)) }
         }
         .onDisappear(perform: commitOrder)
+        .sheet(isPresented: $showAudience) {
+            AudienceInfoSheet(gender: profile?.gender, city: profile?.city) { g, c in
+                var patch = ProfilePatch()
+                patch.gender = g
+                patch.city = c
+                return await store.update(patch) == nil
+            }
+            .environment(\.theme, theme).environment(\.lang, lang)
+            .presentationDetents([.medium])
+            .sheetStyle(theme)
+        }
         .sheet(isPresented: $showBirthday) {
             BirthdaySheet(value: $birthday)
                 .preferredColorScheme(theme.dark ? .dark : .light)
@@ -127,6 +147,14 @@ struct EditProfileView: View {
             }
             Button(s.cancel, role: .cancel) { photoToDelete = nil }
         }
+        .unsavedChangesDialog(isPresented: $showUnsaved,
+                              title: s.t("Несохранённые изменения", "Unsaved changes"),
+                              message: s.t("Вы не сохранили изменения. Применить их?",
+                                           "You have unsaved changes. Apply them?"),
+                              saveTitle: s.t("Применить", "Apply"),
+                              discardTitle: s.t("Сбросить", "Discard"),
+                              onSave: { save() },
+                              onDiscard: { dismiss() })
     }
 
     // MARK: Фото
@@ -329,6 +357,11 @@ struct EditProfileView: View {
                 SettingsRow(icon: "gift.fill", tint: .pink, title: s.birthday,
                             value: s.birthdayText(birthday) ?? s.addBirthday, showsChevron: true) {
                     showBirthday = true
+                }
+                SettingsDivider()
+                SettingsRow(icon: "person.crop.circle.badge.questionmark", tint: .indigo, title: s.t("Пол и город", "Gender & city"),
+                            value: audienceText, showsChevron: true) {
+                    showAudience = true
                 }
                 SettingsDivider()
                 SettingsRow(icon: "phone.fill", tint: .green, title: s.phoneLabel,
@@ -672,5 +705,56 @@ struct ChangePhoneScreen: View {
         }
         .onDisappear { flow.cancelPhoneChange() }
         .animation(.easeOut(duration: 0.2), value: flow.error)
+    }
+}
+
+
+/// Пол и город: видны только вам — по ним продвигаемые шортсы показываются подходящей аудитории
+struct AudienceInfoSheet: View {
+    let gender: String?
+    let city: String?
+    let onSave: (String, String) async -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @Environment(\.lang) private var lang
+    @State private var g = ""
+    @State private var c = ""
+    @State private var saving = false
+
+    var body: some View {
+        let s = Strings(lang: lang)
+        NavigationStack {
+            Form {
+                Section {
+                    Picker(s.t("Пол", "Gender"), selection: $g) {
+                        Text(s.t("Не указан", "Not set")).tag("")
+                        Text(s.t("Мужской", "Male")).tag("m")
+                        Text(s.t("Женский", "Female")).tag("f")
+                    }
+                    TextField(s.t("Город", "City"), text: $c)
+                        .textInputAutocapitalization(.words)
+                } footer: {
+                    Text(s.t("Видно только вам. Помогает показывать вам интересные ролики рядом.",
+                             "Only you can see this. Helps show you relevant videos nearby."))
+                }
+            }
+            .navigationTitle(s.t("Пол и город", "Gender & city"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button(s.cancel) { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(s.t("Готово", "Done")) {
+                        saving = true
+                        Task {
+                            if await onSave(g, c.trimmingCharacters(in: .whitespaces)) { dismiss() }
+                            saving = false
+                        }
+                    }
+                    .disabled(saving)
+                }
+            }
+            .onAppear { g = gender ?? ""; c = city ?? "" }
+        }
     }
 }

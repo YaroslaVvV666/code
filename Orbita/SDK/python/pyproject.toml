@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbitagram"
+version = "1.0.0"
+description = "Асинхронная библиотека для ботов мессенджера Orbita (в духе aiogram)"
+readme = "README_Orbitagram.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+classifiers = [
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Chat",
+]
+
+[tool.setuptools]
+packages = ["orbitagram"]

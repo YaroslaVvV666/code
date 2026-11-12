@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Изменение профиля: заполняются только те поля, которые нужно поменять
 struct ProfilePatch {
@@ -15,6 +16,8 @@ struct ProfilePatch {
     var styleEmoji: String?
     var resetStyle = false
     var statusEmoji: String?        // "" — убрать
+    var gender: String?             // "m" | "f" | "" — не указан
+    var city: String?               // "" — убрать
 
     var body: Data {
         var object: [String: Any] = [:]
@@ -26,6 +29,8 @@ struct ProfilePatch {
         if let phoneVisibility { object["phone_visibility"] = phoneVisibility }
         if let phone { object["phone"] = phone }
         if let statusEmoji { object["status_emoji"] = statusEmoji }
+        if let gender { object["gender"] = gender.isEmpty ? NSNull() as Any : gender as Any }
+        if let city { object["city"] = city }
         if let commentsPolicy { object["comments_policy"] = commentsPolicy }
         if let privacy { object["privacy"] = privacy }
         if resetStyle {
@@ -44,24 +49,49 @@ enum UsernameStatus: Equatable {
 
 protocol ProfileRepository: Sendable {
     func load() async throws -> UserProfile
+    /// Свой профиль из сохранённой на телефоне копии — виден и без интернета (вместе с аватаркой)
+    func cachedProfile() -> UserProfile?
     func update(_ patch: ProfilePatch) async throws -> UserProfile
+    /// «Чем я занят» на hours часов; nil — убрать
+    func setActivity(emoji: String, text: String, hours: Double) async throws -> UserActivity?
+    func clearActivity() async throws
     func uploadAvatar(_ jpeg: Data) async throws -> String
     func addAvatar(mediaID: String) async throws -> UserProfile
     func deleteAvatar(id: String) async throws -> UserProfile
     func reorderAvatars(_ ids: [String]) async throws -> UserProfile
     func profile(id: String) async throws -> UserProfile
     func lookup(username: String) async throws -> UserProfile
+    func lookup(phone: String) async throws -> UserProfile
     func searchUsers(prefix: String) async throws -> [UserProfile]
     func friends(userID: String) async throws -> [FriendUser]
     func friendRequests() async throws -> (incoming: [FriendUser], outgoing: [FriendUser])
     func setFriend(userID: String, add: Bool) async throws -> String
     func sessions() async throws -> [DeviceSession]
+    func sessionList() async throws -> (sessions: [DeviceSession], ttlDays: Int)
+    func setSessionTTL(days: Int) async throws
     func terminateSession(id: String) async throws
     func terminateOtherSessions() async throws
     func loginRequest(qrID: String) async throws -> LoginRequestInfo
     func approveLogin(qrID: String, phone: String) async throws
     func usernameStatus(_ username: String) async throws -> UsernameStatus
     func deleteAccount() async throws
+}
+
+private struct OrbitDTO: Decodable {
+    let id: String
+    let name: String
+    let avatar: String?
+    let activity: ActivityDTO?
+}
+
+struct ActivityDTO: Decodable {
+    let emoji: String
+    let text: String
+    let until: Double
+    var model: UserActivity? {
+        let a = UserActivity(emoji: emoji, text: text, until: Date(timeIntervalSince1970: until))
+        return a.active ? a : nil
+    }
 }
 
 private struct AvatarDTO: Decodable {
@@ -103,7 +133,18 @@ private struct ProfileDTO: Decodable {
     let statusEmoji: String?
     let friendState: String?
     let friendsCount: Int?
+    let followersCount: Int?
+    let following: Bool?
     let requestsCount: Int?
+    let listening: Bool?
+    let orbit: [OrbitDTO]?
+    let bot: Bool?
+    let monthlyUsers: Int?
+    let activity: ActivityDTO?
+    let botOwned: Bool?
+    let gender: String?
+    let city: String?
+    let numId: Int?
 
     var model: UserProfile {
         UserProfile(id: id, name: name, username: username, bio: bio, avatarID: avatar, phone: phone,
@@ -116,8 +157,12 @@ private struct ProfileDTO: Decodable {
                     blockedByMe: blockedByMe ?? false, blockedMe: blockedMe ?? false,
                     contactName: contactName, isContact: isContact ?? false,
                     styleColor: style?.color, styleEmoji: style?.emoji,
-                    friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, requestsCount: requestsCount,
-                    statusEmoji: statusEmoji)
+                    friendState: friendState ?? "none", friendsCount: friendsCount ?? 0, followersCount: followersCount, following: following ?? false,
+                    requestsCount: requestsCount, statusEmoji: statusEmoji, listening: listening ?? false,
+                    orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar, activity: $0.activity?.model) },
+                    activity: activity?.model,
+                    isBot: bot ?? false, botOwned: botOwned ?? false, monthlyUsers: monthlyUsers,
+                    gender: gender, city: city, numID: numId)
     }
 }
 
@@ -153,7 +198,7 @@ private struct FriendStateDTO: Decodable { let state: String }
 
 private struct UserListDTO: Decodable { let users: [ProfileDTO] }
 
-private struct SessionListDTO: Decodable { let sessions: [SessionDTO] }
+private struct SessionListDTO: Decodable { let sessions: [SessionDTO]; let ttl_days: Int? }
 
 private struct LoginRequestDTO: Decodable {
     let device: String
@@ -171,7 +216,22 @@ struct RemoteProfileRepository: ProfileRepository {
     let api: ServerAPI
 
     func load() async throws -> UserProfile {
-        try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/me")).model
+        try decodeAPI(ProfileDTO.self, from: try await api.requestCached("/v1/me")).model
+    }
+
+    func cachedProfile() -> UserProfile? {
+        api.cachedResponse("/v1/me").flatMap { try? decodeAPI(ProfileDTO.self, from: $0).model }
+    }
+
+    func setActivity(emoji: String, text: String, hours: Double) async throws -> UserActivity? {
+        struct R: Decodable { let activity: ActivityDTO }
+        let data = try await api.request("PUT", "/v1/me/activity",
+                                         body: ServerAPI.json(["emoji": emoji, "text": text, "hours": hours]))
+        return try decodeAPI(R.self, from: data).activity.model
+    }
+
+    func clearActivity() async throws {
+        _ = try await api.request("DELETE", "/v1/me/activity")
     }
 
     func update(_ patch: ProfilePatch) async throws -> UserProfile {
@@ -217,6 +277,10 @@ struct RemoteProfileRepository: ProfileRepository {
         try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/lookup", query: ["u": username])).model
     }
 
+    func lookup(phone: String) async throws -> UserProfile {
+        try decodeAPI(ProfileDTO.self, from: try await api.request("GET", "/v1/lookup_phone", query: ["p": phone])).model
+    }
+
     func searchUsers(prefix: String) async throws -> [UserProfile] {
         try decodeAPI(UserListDTO.self, from: try await api.request("GET", "/v1/search/users", query: ["q": prefix])).users.map(\.model)
     }
@@ -236,6 +300,15 @@ struct RemoteProfileRepository: ProfileRepository {
 
     func sessions() async throws -> [DeviceSession] {
         try decodeAPI(SessionListDTO.self, from: try await api.request("GET", "/v1/sessions")).sessions.map(\.model)
+    }
+
+    func sessionList() async throws -> (sessions: [DeviceSession], ttlDays: Int) {
+        let dto = try decodeAPI(SessionListDTO.self, from: try await api.request("GET", "/v1/sessions"))
+        return (dto.sessions.map(\.model), dto.ttl_days ?? 180)
+    }
+
+    func setSessionTTL(days: Int) async throws {
+        _ = try await api.request("PUT", "/v1/sessions/ttl", body: ServerAPI.json(["days": days]))
     }
 
     func terminateSession(id: String) async throws {
@@ -262,7 +335,8 @@ struct TrackDTO: Decodable {
     let title: String
     let artist: String
     let duration: Double
-    var model: Track { Track(id: id, mediaID: media, title: title, artist: artist, duration: duration) }
+    let cover: String?
+    var model: Track { Track(id: id, mediaID: media, title: title, artist: artist, duration: duration, cover: cover) }
 }
 
 extension PrivacySettings {
@@ -275,7 +349,7 @@ extension PrivacySettings {
     }
 
     var serverDict: [String: String] {
-        ["phone", "last_seen", "photos", "bio", "birthday", "music", "wall", "calls", "forwards", "invites", "comments", "find"]
+        ["phone", "last_seen", "photos", "bio", "birthday", "music", "wall", "calls", "forwards", "invites", "comments", "find", "followers", "orbit"]
             .reduce(into: [:]) { $0[$1] = self[$1] }
     }
 }

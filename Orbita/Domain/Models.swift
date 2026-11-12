@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Язык
 
@@ -77,6 +78,7 @@ enum AuthError: Error, Equatable {
     case wrongPassword(attemptsLeft: Int)
     case locked(retryAfter: Int)
     case deliveryFailed
+    case otpNotConfigured          // сервер отвечает, но запущен без SMS и без ORBITA_OTP_DEV=1
     case unknown
 }
 
@@ -100,6 +102,7 @@ struct MediaItem: Identifiable, Equatable {
     let height: Int
     let duration: Double?
     let thumbID: String?            // обложка видео
+    var live = false                // живое фото: короткое видео со звуком (в коллаже шортса)
 
     var aspect: Double { (width > 0 && height > 0) ? Double(width) / Double(height) : 1 }
     var artIndex: Int { Int(id.dropFirst(4)) ?? 0 }
@@ -111,6 +114,11 @@ struct TextEntity: Codable, Equatable {
     var offset: Int
     var length: Int
     var url: String? = nil
+}
+
+extension Post {
+    /// Шортс-коллаж: несколько фото/живых фото, листается вбок (как фото-посты в TikTok)
+    var isCollage: Bool { media.count > 1 || media.first?.kind == .image || media.first?.live == true }
 }
 
 struct Post: Identifiable, Equatable {
@@ -125,12 +133,75 @@ struct Post: Identifiable, Equatable {
     var likedByMe: Bool
     let isMine: Bool
     let commentsEnabled: Bool
+    var views = 0                    // просмотры (в сетке шортсов, как в TikTok)
     var editedAt: Date? = nil
     var saves = 0                    // сколько человек сохранили в избранное
     var savedByMe = false            // сохранено ли мной (по данным сервера)
     var reposts = 0                  // сколько человек сделали репост
     var repostedByMe = false
     var music: PostMusic? = nil      // музыка шортса (из плейлиста автора)
+    var isRepost = false             // это репост-копия чужого шортса на странице репостнувшего
+    var allowRepost = true           // автор разрешил репосты
+    var sensitive = false            // 18+/чувствительный контент — медиа под размытием
+    var repostFriends: [Author] = [] // кто из друзей сделал репост (до 8)
+    var duet: DuetRef? = nil          // дуэт: снято рядом с этим шортсом
+    var origin: Author? = nil        // у репост-копии — автор оригинала
+    var labels: [PostLabel] = []     // пометки над ником: «Создано ИИ», место, «Реклама»…
+    var ad: PostAd? = nil            // модератор признал продвижение рекламой: пометка и данные рекламодателя
+    /// Создатель ролика: у репоста — автор оригинала, иначе автор
+    var creator: Author { origin ?? author }
+}
+
+/// Реклама по закону: пометка «Реклама», рекламодатель, ИНН и токен erid
+struct PostAd: Equatable, Hashable, Codable {
+    let name: String
+    let inn: String
+    let erid: String?
+}
+
+/// Пометка шортса (как в TikTok): видна над ником автора
+struct PostLabel: Equatable, Hashable, Codable {
+    enum Kind: String, Codable { case ai, place, ad, custom }
+    var kind: Kind
+    var text: String? = nil
+
+    var icon: String {
+        switch kind {
+        case .ai: return "sparkles"
+        case .place: return "mappin.and.ellipse"
+        case .ad: return "megaphone.fill"
+        case .custom: return "tag.fill"
+        }
+    }
+
+    func title(_ s: Strings) -> String {
+        switch kind {
+        case .ai: return s.t("Содержит контент, созданный ИИ", "Contains AI-generated content")
+        case .ad: return s.t("Реклама", "Ad")
+        case .place, .custom: return text ?? ""
+        }
+    }
+
+    var json: [String: Any] {
+        var d: [String: Any] = ["kind": kind.rawValue]
+        if let text, !text.isEmpty { d["text"] = text }
+        return d
+    }
+}
+
+/// Параметры публикации, которые выбирает автор
+struct PostOptions: Equatable {
+    var commentsOff = false          // выключить комментарии
+    var noRepost = false             // запретить репосты (для шортсов)
+    var wallOnly = false             // запись на своей стене: видна в профиле, в ленту публикаций не попадает
+    var sensitive = false            // 18+/чувствительный контент — показывается с размытием
+    var labels: [PostLabel] = []     // шортс: пометки над ником
+}
+
+/// С чьим шортсом снят дуэт
+struct DuetRef: Equatable {
+    let postID: String
+    let author: Author
 }
 
 struct PostMusic: Equatable, Identifiable {
@@ -168,6 +239,22 @@ struct AvatarPhoto: Identifiable, Equatable, Hashable {
     let createdAt: Date
 }
 
+struct OrbitFriend: Equatable, Identifiable {
+    let id: String
+    let name: String
+    let avatarID: String?
+    var activity: UserActivity? = nil
+}
+
+/// «Чем я занят»: 🎧 Слушаю музыку, 🏋️ В зале… — на 15 минут – 24 часа
+struct UserActivity: Equatable, Hashable {
+    var emoji: String
+    var text: String
+    var until: Date
+    var active: Bool { until > Date() }
+    var line: String { emoji + " " + text }
+}
+
 struct UserProfile: Equatable {
     let id: String
     var name: String                // имя и фамилия через пробел
@@ -195,8 +282,19 @@ struct UserProfile: Equatable {
     var styleEmoji: String? = nil       // фоновый эмодзи
     var friendState: String = "none"    // none | friends | outgoing | incoming
     var friendsCount: Int = 0
+    var followersCount: Int? = nil      // nil — скрыто настройками приватности
+    var following: Bool = false
     var requestsCount: Int? = nil       // входящие заявки (только у своего профиля)
     var statusEmoji: String? = nil      // эмодзи-статус рядом с именем
+    var listening: Bool = false         // человек прямо сейчас слушает музыку
+    var orbit: [OrbitFriend] = []       // лучшие друзья (если человек это включил)
+    var activity: UserActivity? = nil   // «чем я занят» — пока не истёк
+    var isBot: Bool = false             // бот: вместо «был(а) в сети» — ничего или «N пользователей в месяц»
+    var botOwned = false                // это мой бот: могу публиковать от его имени
+    var monthlyUsers: Int? = nil        // у бота: сколько пишут за месяц (только если владелец разрешил и их 10 000+)
+    var gender: String? = nil           // свой профиль: «m» / «f» — видно только себе (аудитория продвижения)
+    var city: String? = nil             // свой профиль: город — видно только себе
+    var numID: Int? = nil               // постоянный числовой ID, как в Telegram (по нему находит поддержка)
     /// Имя с эмодзи-статусом (для шапок профиля)
     var displayName: String { statusEmoji.flatMap { $0.isEmpty ? nil : name + " " + $0 } ?? name }
 }
@@ -236,6 +334,8 @@ struct PrivacySettings: Equatable {
     var invites = "all"
     var comments = "all"
     var find = "all"
+    var followers = "all"
+    var orbit = "nobody"          // «all» — лучшие друзья кружат вокруг аватарки
 
     /// Поле сервера → значение
     subscript(key: String) -> String {
@@ -252,6 +352,8 @@ struct PrivacySettings: Equatable {
             case "forwards": return forwards
             case "invites": return invites
             case "find": return find
+            case "followers": return followers
+            case "orbit": return orbit
             default: return comments
             }
         }
@@ -268,6 +370,8 @@ struct PrivacySettings: Equatable {
             case "forwards": forwards = newValue
             case "invites": invites = newValue
             case "find": find = newValue
+            case "followers": followers = newValue
+            case "orbit": orbit = newValue
             default: comments = newValue
             }
         }
@@ -318,6 +422,7 @@ enum DeepLink: Identifiable, Equatable {
     case server(String)             // orbita://server?url=http://192.168.1.20:8080
     case post(String)               // orbita://post/<id>  или  http://сервер/p/<id>
     case group(String)              // orbita://group/<code>  или  http://сервер/g/<code>
+    case phone(String)              // orbita://phone/+7981…  — номер телефона из текста сообщения
 
     var id: String {
         switch self {
@@ -327,6 +432,7 @@ enum DeepLink: Identifiable, Equatable {
         case .server(let v):   return "server:" + v
         case .post(let v):     return "post:" + v
         case .group(let v):    return "group:" + v
+        case .phone(let v):    return "ph:" + v
         }
     }
 
@@ -336,6 +442,16 @@ enum DeepLink: Identifiable, Equatable {
     }
 
     init?(url: URL) {
+        guard let link = DeepLink(parsing: url) else { return nil }
+        // ссылка на бота с параметром запуска (…/u/somebot?start=abc): откроется сразу переписка, «Старт» отправит «/start abc»
+        if case .username(let name) = link,
+           let start = BotStartParam.clean(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "start" }?.value) {
+            BotStartLinks.set(username: name, param: start)
+        }
+        self = link
+    }
+
+    private init?(parsing url: URL) {
         // http(s)://адрес-вашего-сервера/p/<id> — ссылка, которой делятся в мессенджерах
         if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
             let parts = url.pathComponents.filter { $0 != "/" }
@@ -380,6 +496,9 @@ enum DeepLink: Identifiable, Equatable {
         case "group":
             guard tail.range(of: "^[A-Za-z0-9_]{5,32}$", options: .regularExpression) != nil else { return nil }
             self = .group(tail)
+        case "phone":
+            guard tail.range(of: "^\\+?\\d{7,15}$", options: .regularExpression) != nil else { return nil }
+            self = .phone(tail)
         case "id":
             guard tail.range(of: "^[A-Za-z0-9\\-]{8,64}$", options: .regularExpression) != nil else { return nil }
             self = .userID(tail)
@@ -415,6 +534,7 @@ struct PreparedMedia: Identifiable {
     let height: Int
     let duration: Double?
     let thumbnail: Data             // JPEG-миниатюра для предпросмотра и обложки
+    var gif = false                 // видео без звука, отправляется как GIF: у получателя крутится по кругу
 
     var isVideo: Bool { if case .video = source { return true }; return false }
 }

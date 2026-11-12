@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Тексты редактирования профиля, фотографий, устройств и QR-кодов
 extension Strings {

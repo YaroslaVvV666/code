@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 /// Название и версия устройства для списка сеансов
 enum DeviceInfo {
@@ -41,10 +42,22 @@ enum DeviceInfo {
         return "Orbita iOS \(version)"
     }
 
-    static var fields: [String: String] { ["device": model, "system": system, "app": app] }
+    /// Постоянный номер этой установки (в связке ключей — переживает обновления приложения).
+    /// По нему сервер узнаёт, что заходит тот же телефон, и не шлёт «Вход с нового устройства»
+    static let installID: String = {
+        let account = "device.install_id"
+        if let data = Keychain.read(account).data, let id = String(data: data, encoding: .utf8), !id.isEmpty { return id }
+        let id = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
+        Keychain.write(Data(id.utf8), account: account)
+        return id
+    }()
+
+    static var fields: [String: String] { ["device": model, "system": system, "app": app, "device_id": installID] }
 }
 
 extension Notification.Name {
     /// Сервер больше не признаёт этот сеанс (его завершили с другого устройства)
     static let orbitaSessionRevoked = Notification.Name("orbita.sessionRevoked")
+    /// Началось видео со звуком: музыка встаёт на паузу
+    static let orbitaVideoWithSound = Notification.Name("orbita.videoWithSound")
 }
