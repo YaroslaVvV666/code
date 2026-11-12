@@ -59,6 +59,7 @@ struct MainTabView: View {
     @State private var openedAuthor: AuthorRoute?
     @State private var barHeight: CGFloat = 70
     @State private var newLogin: DeviceSession?
+    @State private var crashReport: String?
     @State private var chatsMounted = false
 
     init(userID: String, userName: String) {
@@ -198,6 +199,27 @@ struct MainTabView: View {
             guard scenePhase == .active else { return }
             await session.devices.load()
             checkNewLogins()
+        }
+        // в прошлый раз приложение вылетело — предлагаем отправить отчёт в поддержку (@support)
+        .task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            crashReport = CrashReporter.shared.reportText()
+        }
+        .alert(s.t("Orbita неожиданно закрылась", "Orbita closed unexpectedly"),
+               isPresented: Binding(get: { crashReport != nil }, set: { if !$0 { crashReport = nil } })) {
+            Button(s.t("Отправить в поддержку", "Send to support")) {
+                guard let text = crashReport else { return }
+                Task {
+                    if (try? await session.messengerRepo.send(peerID: SupportBot.id, text: text, replyTo: nil)) != nil {
+                        CrashReporter.shared.clear()
+                        AppToast.show(s.t("Отчёт отправлен — спасибо!", "Report sent — thank you!"), icon: "checkmark.circle.fill")
+                    }
+                }
+            }
+            Button(s.t("Не отправлять", "Don't send"), role: .cancel) { CrashReporter.shared.clear() }
+        } message: {
+            Text(s.t("Отправить отчёт о сбое в поддержку? В нём только модель телефона, версия приложения и технические данные — без ваших сообщений.",
+                     "Send a crash report to support? It only has your phone model, app version and technical data — no messages."))
         }
         .alert(s.t("Новый вход в аккаунт", "New sign-in"), isPresented: Binding(get: { newLogin != nil }, set: { if !$0 { newLogin = nil } })) {
             Button(s.t("Это я", "It's me"), role: .cancel) {}
