@@ -164,6 +164,7 @@ struct ChatInputBar: View {
         .fullScreenCover(item: $editingDraft) { draft in
             if case .media(let m) = draft.source, case .image(let data) = m.source, let image = UIImage(data: data) {
                 PhotoEditorView(image: image, onDone: { edited in
+                    IncomingSaver.saveEdited(edited)            // «Сохранять изменённые фото»
                     if let jpeg = edited.jpegData(compressionQuality: 0.9),
                        let media = try? MediaPreparer.prepareImage(jpeg),
                        let i = drafts.firstIndex(where: { $0.id == draft.id }) {

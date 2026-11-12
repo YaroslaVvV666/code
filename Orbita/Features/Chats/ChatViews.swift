@@ -1301,6 +1301,7 @@ struct ChatScreen: View {
                     .environment(\.botCommandLinks, model.isBot)
                     .environment(\.onBotCommand, model.isBot ? { [model] cmd in model.sendCommand(cmd) } : nil)
                     .environment(\.onBotButton, { [model, lang] m, b in model.pressBotButton(m, b, lang: lang) })
+                    .environment(\.saveScope, model.peer.isChannel ? .channels : (model.peer.isGroup ? .groups : .privateChats))
             }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 6) {

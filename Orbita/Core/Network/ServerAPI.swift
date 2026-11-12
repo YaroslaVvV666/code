@@ -346,6 +346,14 @@ actor ServerAPI {
             case nil:              result = try await URLSession.shared.data(for: req)
             }
             let (data, response) = result
+            // учёт трафика: загрузки файлов — к медиа, остальное — сообщения и ленты
+            let headers = (req.allHTTPHeaderFields ?? [:]).reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count + 4 }
+            switch upload {
+            case .data(let d)?: NetUsage.add(.files, sent: d.count)
+            case .file(let u)?: NetUsage.add(.files, sent: (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            case nil: break
+            }
+            NetUsage.add(.messages, sent: headers + (req.httpBody?.count ?? 0), received: data.count + 200)
             guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
             switch http.statusCode {
             case 304:

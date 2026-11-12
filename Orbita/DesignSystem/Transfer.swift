@@ -102,7 +102,8 @@ final class MediaFileCache: @unchecked Sendable {
     private static let extensions = ["mp4", "mov", "m4v", "m4a", "mp3", "aac", "wav", "caf"]
 
     private let lock = NSLock()
-    private var hits: [String: URL] = [:]                       // уже найденные на диске — без лишних обращений к файлам
+    private var hits: [String: URL] = [:]
+    private var fileIndex: [String: String]?                    // имя без расширения → файл в папке (для файлов не-медиа)                       // уже найденные на диске — без лишних обращений к файлам
     private var inflight: [String: Task<URL?, Never>] = [:]     // одно и то же видео качается один раз
 
     private static func base(_ id: String) -> String {
@@ -118,6 +119,24 @@ final class MediaFileCache: @unchecked Sendable {
         let b = Self.base(id)
         for ext in Self.extensions {
             let url = Self.dir.appendingPathComponent(b + "." + ext)
+            if FileManager.default.fileExists(atPath: url.path) {
+                lock.withLock { hits[id] = url }
+                return url
+            }
+        }
+        // файлы (pdf, zip…) лежат под своим расширением: ищем по оглавлению папки (читается один раз)
+        let other: String? = lock.withLock {
+            if fileIndex == nil {
+                var idx: [String: String] = [:]
+                for name in (try? FileManager.default.contentsOfDirectory(atPath: Self.dir.path)) ?? [] {
+                    idx[(name as NSString).deletingPathExtension] = name
+                }
+                fileIndex = idx
+            }
+            return fileIndex?[b]
+        }
+        if let other {
+            let url = Self.dir.appendingPathComponent(other)
             if FileManager.default.fileExists(atPath: url.path) {
                 lock.withLock { hits[id] = url }
                 return url
@@ -191,6 +210,10 @@ final class MediaFileCache: @unchecked Sendable {
             let target = dir.appendingPathComponent(base(id) + "." + ext)
             try? FileManager.default.removeItem(at: target)
             try FileManager.default.moveItem(at: temp, to: target)
+            // учёт трафика: видео / голосовые и музыка / файлы
+            let size = (try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let cat: NetCategory = ["mp4", "mov", "m4v"].contains(ext) ? .videos : (["m4a", "mp3", "aac", "wav", "caf"].contains(ext) ? .voice : .files)
+            NetUsage.add(cat, received: size)
             return target
         } catch {
             return nil
@@ -203,9 +226,12 @@ final class MediaFileCache: @unchecked Sendable {
         return files.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     }
 
+    /// Файлы удалили снаружи (чистка по сроку/размеру) — забываем найденные пути
+    func forgetAll() { lock.withLock { hits.removeAll(); fileIndex = nil } }
+
     /// Очистка кэша: всё скачанное удаляется, при следующем просмотре скачается заново
     func clear() {
-        lock.withLock { hits.removeAll() }
+        lock.withLock { hits.removeAll(); fileIndex = nil }
         let files = (try? FileManager.default.contentsOfDirectory(at: Self.dir, includingPropertiesForKeys: nil)) ?? []
         for f in files { try? FileManager.default.removeItem(at: f) }
     }

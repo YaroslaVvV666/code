@@ -253,6 +253,7 @@ struct MessageRow: View {
     @Environment(\.lang) private var lang
     @Environment(\.openURL) private var parentOpenURL
     @Environment(\.onBotCommand) private var onBotCommand
+    @Environment(\.saveScope) private var saveScope
     @ObservedObject private var translator = ChatTranslator.shared
     @State private var dragX: CGFloat = 0
     @State private var stickerPop = false        // нажали на стикер — он «пружинит»
@@ -724,6 +725,10 @@ struct MessageRow: View {
                 .overlay(alignment: .bottomTrailing) {
                     if onlyMedia { MessageMeta(message: message, color: .white, onMedia: true).padding(MetaInset.media) }
                 }
+                // «Сохранять в Фото» для этого вида чатов: входящее фото/видео один раз кладётся в галерею
+                .onAppear {
+                    if !mine, !message.isPending { IncomingSaver.consider(messageID: message.id, attachments: mediaItems, scope: saveScope) }
+                }
                 .padding(.top, message.reply == nil ? 0 : 6)
             }
 
@@ -915,6 +920,7 @@ struct MediaBlock: View {
     private var width: CGFloat { fullWidth ?? min(300, UIScreen.main.bounds.width * 0.76) }
     private let gap: CGFloat = 2
     @AppStorage("autoplay") private var autoplay = true
+    @AppStorage("autoplay.gif") private var autoplayGIF = true
     @State private var frames = FrameBoxes()
 
     private func asp(_ i: Int) -> CGFloat {
@@ -1023,13 +1029,17 @@ struct MediaBlock: View {
         ZStack {
             if let data = a.localPreview, let image = PreviewThumbs.image(data, maxPixel: 900) {
                 Image(uiImage: image).resizable().scaledToFill()
+            } else if a.kind == .photo, !pending, let id = a.mediaID ?? a.thumbID {
+                GatedRemoteImage(id: id)                 // автозагрузка фото по этой сети выключена — кнопка «скачать»
             } else if let id = a.thumbID ?? a.mediaID {
                 RemoteImage(id: id)
             } else {
                 Color.gray.opacity(0.3)
             }
-            // автовоспроизведение без звука, как в Telegram (настройка «Автовоспроизведение видео»); GIF крутится всегда
-            if a.kind == .video, autoplay || a.gif, !pending, a.gif || a.size <= 40 * 1024 * 1024, let video = a.mediaItem {
+            // автовоспроизведение без звука, как в Telegram («Автовоспроизведение: Видео / GIF» в «Данных и памяти»);
+            // по сети, где автозагрузка видео выключена, само не играет (не тратит трафик), если видео ещё не на телефоне
+            if a.kind == .video, a.gif ? autoplayGIF : autoplay, !pending, a.gif || a.size <= 40 * 1024 * 1024, let video = a.mediaItem,
+               DataPrefs.autoNow(.video) || a.mediaID.flatMap({ MediaFileCache.shared.cached($0) }) != nil {
                 InlineVideo(item: video).allowsHitTesting(false)
             }
             if a.kind == .video && a.gif {
@@ -1041,7 +1051,7 @@ struct MediaBlock: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(6)
             } else if a.kind == .video {
-                if !(autoplay && !pending) {
+                if !(autoplay && !pending && (DataPrefs.autoNow(.video) || a.mediaID.flatMap({ MediaFileCache.shared.cached($0) }) != nil)) {
                     Image(systemName: "play.fill")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(.white)
@@ -1069,7 +1079,8 @@ struct MediaBlock: View {
         .onAppear {
             // видео сразу сохраняется на телефон — потом смотрится и без сети (как в Telegram)
             // очень большие (больше 100 МБ) сами не качаются — сохранятся, когда их откроют
-            if a.kind == .video, !pending, let id = a.mediaID, a.size <= 100 * 1024 * 1024, !NetworkState.shared.offline {
+            if a.kind == .video, !pending, let id = a.mediaID, a.size <= 100 * 1024 * 1024, !NetworkState.shared.offline,
+               DataPrefs.autoNow(.video) {
                 MediaFileCache.shared.prefetch(id)
             }
         }
@@ -1256,7 +1267,9 @@ struct VoiceBlock: View {
         }
         .onAppear {
             // голосовое сохраняется на телефон — слушается и без сети
-            if let id = attachment.mediaID, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id, fallback: "m4a") }
+            if let id = attachment.mediaID, !NetworkState.shared.offline, DataPrefs.autoNow(.voice) {
+                MediaFileCache.shared.prefetch(id, fallback: "m4a")
+            }
         }
     }
 
@@ -1499,6 +1512,13 @@ struct FileBlock: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onAppear {
+            // автозагрузка файлов («Данные и память»): небольшие файлы сами ложатся на телефон и потом открываются без сети
+            guard !mine, !pending, let id = attachment.mediaID, attachment.size > 0, attachment.size <= DataPrefs.fileLimit,
+                  !NetworkState.shared.offline, DataPrefs.autoNow(.file) else { return }
+            let e = ((attachment.name ?? "") as NSString).pathExtension.lowercased()
+            MediaFileCache.shared.prefetch(id, fallback: e.isEmpty ? "bin" : e)
+        }
     }
 }
 
@@ -1644,7 +1664,9 @@ private struct CircleVideoContent: View {
             }
             Color.clear.onAppear {
                 // кружок сохраняется на телефон — смотрится и без сети
-                if let id = attachment.mediaID, !message.isPending, !NetworkState.shared.offline { MediaFileCache.shared.prefetch(id) }
+                if let id = attachment.mediaID, !message.isPending, !NetworkState.shared.offline, DataPrefs.autoNow(.video) {
+                    MediaFileCache.shared.prefetch(id)
+                }
             }
 
             if playback.started, let player = playback.player, !frozen {
@@ -1726,11 +1748,12 @@ struct QuickLookView: UIViewControllerRepresentable {
 enum FileDownloader {
     /// Скачивает файл из сообщения во временную папку под его настоящим именем
     static func download(mediaID: String, name: String) async -> URL? {
-        guard let remote = ServerConfig.mediaURL(mediaID) else { return nil }
+        let ext = (name as NSString).pathExtension.lowercased()
+        // берём с телефона, если уже скачан (автозагрузка файлов), иначе качаем в кэш — второй раз открывается без сети
+        guard let cachedURL = await MediaFileCache.shared.download(mediaID, fallback: ext.isEmpty ? "bin" : ext) else { return nil }
         do {
-            await MainActor.run { DownloadCenter.shared.set(mediaID, 0) }
-            defer { Task { @MainActor in DownloadCenter.shared.set(mediaID, nil) } }
-            let (temp, _) = try await URLSession.shared.download(from: remote, delegate: DownloadProgressDelegate(id: mediaID))
+            let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.copyItem(at: cachedURL, to: temp)
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             // имя пришло от отправителя: никаких «../», невидимых символов и подмены расширения

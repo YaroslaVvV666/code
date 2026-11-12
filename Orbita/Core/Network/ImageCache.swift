@@ -78,8 +78,10 @@ final class ImageCache: @unchecked Sendable {
         let created = Task.detached(priority: .userInitiated) { () -> UIImage? in
             // файлы на сервере неизменяемые (id = содержимое), поэтому берём из дискового кэша без повторных запросов
             let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30)
+            let fromDisk = URLCache.shared.cachedResponse(for: request) != nil
             guard let (data, response) = try? await URLSession.shared.data(for: request),
                   (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            if !fromDisk { NetUsage.add(.photos, received: data.count) }        // учёт трафика: только то, что пришло из сети
             if let persistKey { AvatarStore.save(data, id: persistKey) }        // аватарку — в постоянный кэш для работы без сети
             return ImageCache.downsample(data, maxPixel: maxPixel)
         }
