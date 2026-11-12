@@ -902,7 +902,7 @@ struct ArchivedChatsView: View {
     }
 
     private func archiveRowBody(_ chat: ChatSummary) -> some View {
-        Button { Haptics.impact(.light); onOpen(chat) } label: {
+        ChatRowTouch(onTap: { Haptics.impact(.light); onOpen(chat) }) {
             HStack(spacing: 12) {
                 AvatarView(name: chat.peer.name, size: 54, avatarID: chat.peer.avatarID).clipShape(Circle())
                 VStack(alignment: .leading, spacing: 4) {
@@ -930,7 +930,6 @@ struct ArchivedChatsView: View {
             .padding(.horizontal, 16).padding(.vertical, 9).contentShape(Rectangle())
             .overlay(alignment: .bottom) { Rectangle().fill(theme.stroke.opacity(0.7)).frame(height: 0.5).padding(.leading, 82) }
         }
-        .buttonStyle(.plain)
     }
 }
 

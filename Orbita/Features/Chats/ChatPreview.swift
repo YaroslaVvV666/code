@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UIKit
 
 /// Предпросмотр переписки без «прочитано»: последние сообщения + лоскуток «Новые сообщения».
 /// Используется и в баннере нового сообщения, и в меню по зажатию чата в списке.
@@ -334,6 +335,48 @@ struct SwipeActionsRow<Content: View>: View {
         return out
     }
 
+    /// Свайп вбок (только горизонтальный — вертикальный сразу уходит в прокрутку списка)
+    private func pan(_ state: UIGestureRecognizer.State, tx: CGFloat, ty: CGFloat, startX: CGFloat) {
+        switch state {
+        case .began, .changed:
+            if tx > 0 && leading.isEmpty && base == 0 { return }
+            var t = Transaction(); t.disablesAnimations = true
+            withTransaction(t) { drag = tx }
+            let now = fullSwipe && !trailing.isEmpty && -(base + tx) > fullAt
+            if now != armed {
+                armed = now
+                Haptics.impact(now ? .medium : .light)
+            }
+        default:
+            let ok = state == .ended
+            let final = base + (ok ? tx : 0)
+            if ok, armed, let first = trailing.first {
+                // протянули до конца — строка уезжает, срабатывает первая капсула (архив)
+                armed = false
+                withAnimation(.easeIn(duration: 0.2)) { leaving = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    first.run()
+                    leaving = false; drag = 0; side = 0
+                    if openID == id { openID = nil }
+                }
+                return
+            }
+            armed = false
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+                if ok, !trailing.isEmpty, final < -trailingFull * 0.4 {
+                    if openID != id || side != -1 { Haptics.select() }
+                    openID = id; side = -1
+                } else if ok, !leading.isEmpty, final > leadingFull * 0.5 {
+                    if openID != id || side != 1 { Haptics.select() }
+                    openID = id; side = 1
+                } else {
+                    openID = nil; side = 0
+                }
+                drag = 0
+            }
+        }
+    }
+
     var body: some View {
         let shownRight = max(0, -offset)
         let shownLeft = max(0, offset)
@@ -375,77 +418,129 @@ struct SwipeActionsRow<Content: View>: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 26 * lift, style: .continuous))
                 .offset(x: offset)
-                .allowsHitTesting(openID != id)
-                .overlay {
-                    if openID == id {
-                        Color.clear.contentShape(Rectangle()).offset(x: offset)
-                            .onTapGesture { close() }
-                    }
-                }
+                // касания строки ловит её системный слой (ChatRowTouch): свайп вбок — сюда, тап по открытой — закрыть
+                .environment(\.rowSwipe, RowSwipeHooks(
+                    pan: { state, tx, ty, startX in pan(state, tx: tx, ty: ty, startX: startX) },
+                    interceptTap: { if openID == id { close(); return true }; return false }))
         }
         .clipped()
         .background(GeometryReader { g in Color.clear.onAppear { width = g.size.width }.onChange(of: g.size.width) { _, w in width = w } })
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 14, coordinateSpace: .local)
-                .onChanged { v in
-                    guard abs(v.translation.width) > abs(v.translation.height) * 1.5, v.startLocation.x > 30 else { return }
-                    if v.translation.width > 0 && leading.isEmpty && base == 0 { return }
-                    var t = Transaction(); t.disablesAnimations = true
-                    withTransaction(t) { drag = v.translation.width }
-                    let now = fullSwipe && !trailing.isEmpty && -(base + v.translation.width) > fullAt
-                    if now != armed {
-                        armed = now
-                        Haptics.impact(now ? .medium : .light)
-                    }
-                }
-                .onEnded { v in
-                    let horizontal = abs(v.translation.width) > abs(v.translation.height) * 1.5 && v.startLocation.x > 30
-                    let final = base + (horizontal ? v.translation.width : 0)
-                    if horizontal, armed, let first = trailing.first {
-                        // протянули до конца — строка уезжает, срабатывает первая капсула (архив)
-                        armed = false
-                        withAnimation(.easeIn(duration: 0.2)) { leaving = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            first.run()
-                            leaving = false; drag = 0; side = 0
-                            if openID == id { openID = nil }
-                        }
-                        return
-                    }
-                    armed = false
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
-                        if horizontal, !trailing.isEmpty, final < -trailingFull * 0.4 {
-                            if openID != id || side != -1 { Haptics.select() }
-                            openID = id; side = -1
-                        } else if horizontal, !leading.isEmpty, final > leadingFull * 0.5 {
-                            if openID != id || side != 1 { Haptics.select() }
-                            openID = id; side = 1
-                        } else {
-                            openID = nil; side = 0
-                        }
-                        drag = 0
-                    }
-                }
-        )
         .onChange(of: openID) { _, new in if new != id { withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { drag = 0; side = 0 } } }
     }
 }
 
+/// Свайп строки: SwipeActionsRow передаёт сюда, что делать со сдвигом вбок и с тапом по открытой строке
+struct RowSwipeHooks {
+    var pan: (UIGestureRecognizer.State, CGFloat, CGFloat, CGFloat) -> Void
+    var interceptTap: () -> Bool
+}
+
+private struct RowSwipeKey: EnvironmentKey { static let defaultValue: RowSwipeHooks? = nil }
+extension EnvironmentValues {
+    var rowSwipe: RowSwipeHooks? {
+        get { self[RowSwipeKey.self] }
+        set { self[RowSwipeKey.self] = newValue }
+    }
+}
+
+/// Строка списка чатов: тап — открыть, долгое нажатие — предпросмотр, свайп вбок — капсулы.
+/// Всё на системных распознавателях (UIKit): они не спорят с прокруткой — повёл пальцем вверх/вниз,
+/// и список сразу листается, а не думает, что строку «зажимают»
 struct ChatRowTouch<Content: View>: View {
     let onTap: () -> Void
-    let onLong: () -> Void
+    var onLong: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
     @Environment(\.theme) private var theme
+    @Environment(\.rowSwipe) private var swipe
     @State private var pressed = false
 
     var body: some View {
         content()
             .background(pressed ? theme.surface : Color.clear)
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onTap)
-            .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 12, perform: onLong, onPressingChanged: { p in
-                withAnimation(.easeOut(duration: 0.12)) { pressed = p }
-            })
+            .overlay {
+                RowTouchLayer(
+                    onTap: {
+                        if swipe?.interceptTap() == true { return }
+                        withAnimation(.easeOut(duration: 0.08)) { pressed = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                            withAnimation(.easeOut(duration: 0.2)) { pressed = false }
+                        }
+                        onTap()
+                    },
+                    onLong: onLong.map { long in {
+                        if swipe?.interceptTap() == true { return }
+                        withAnimation(.easeOut(duration: 0.1)) { pressed = true }
+                        long()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            withAnimation(.easeOut(duration: 0.2)) { pressed = false }
+                        }
+                    } },
+                    onPan: swipe?.pan)
+            }
+    }
+}
+
+private struct RowTouchLayer: UIViewRepresentable {
+    var onTap: () -> Void
+    var onLong: (() -> Void)?
+    var onPan: ((UIGestureRecognizer.State, CGFloat, CGFloat, CGFloat) -> Void)?
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        let c = context.coordinator
+        let tap = UITapGestureRecognizer(target: c, action: #selector(Coordinator.tap(_:)))
+        let hold = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.hold(_:)))
+        hold.minimumPressDuration = 0.4
+        hold.allowableMovement = 8                  // палец поехал — это прокрутка, не «зажатие»
+        let pan = UIPanGestureRecognizer(target: c, action: #selector(Coordinator.pan(_:)))
+        pan.maximumNumberOfTouches = 1
+        c.panRecognizer = pan
+        for g in [tap, hold, pan] as [UIGestureRecognizer] {
+            g.cancelsTouchesInView = false
+            g.delegate = c
+            v.addGestureRecognizer(g)
+        }
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: RowTouchLayer
+        weak var panRecognizer: UIPanGestureRecognizer?
+        private var startX: CGFloat = 0
+        init(parent: RowTouchLayer) { self.parent = parent }
+
+        @objc func tap(_ g: UITapGestureRecognizer) { parent.onTap() }
+        @objc func hold(_ g: UILongPressGestureRecognizer) { if g.state == .began { parent.onLong?() } }
+        @objc func pan(_ g: UIPanGestureRecognizer) {
+            let t = g.translation(in: g.view)
+            if g.state == .began { startX = g.location(in: g.view).x - t.x }
+            parent.onPan?(g.state, t.x, t.y, startX)
+        }
+
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard g === panRecognizer, let pan = g as? UIPanGestureRecognizer else {
+                return g is UILongPressGestureRecognizer ? parent.onLong != nil : true
+            }
+            // вбок — только явно горизонтальное движение и не от самого края (там «назад»)
+            guard parent.onPan != nil else { return false }
+            let v = pan.velocity(in: pan.view)
+            let start = pan.location(in: pan.view).x - pan.translation(in: pan.view).x
+            return abs(v.x) > abs(v.y) * 1.3 && start > 30
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            // тап и долгое нажатие не мешают прокрутке; свайп вбок, начавшись, строку не делит со списком
+            g !== panRecognizer
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            // прокрутка списка ждёт, пока станет ясно, что это не свайп вбок (решается на первом же сдвиге)
+            g === panRecognizer && other is UIPanGestureRecognizer && other.view is UIScrollView
+        }
     }
 }
