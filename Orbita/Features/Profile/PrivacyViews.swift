@@ -45,12 +45,7 @@ struct PrivacyScreen: View {
                             title: s.t("Мои жалобы", "My reports"), showsChevron: true) {
                     showMyReports = true
                 }
-                SettingsDivider()
-                SettingsRow(icon: "headphones", tint: .green,
-                            title: s.t("Техподдержка", "Support"),
-                            value: supportUnread > 0 ? String(supportUnread) : nil, showsChevron: true) {
-                    showSupport = true
-                }
+
                 SettingsDivider()
                 SettingsRow(icon: "lock.shield.fill", tint: .teal, title: s.twoFATitle,
                             value: flow.twoFAEnabled ? s.on : s.off, showsChevron: true) {

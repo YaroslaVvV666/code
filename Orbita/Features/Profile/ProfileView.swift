@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import UIKit
 import Combine
 
 // MARK: - Раздел-заглушка (Чаты, Сообщества)
@@ -69,6 +70,8 @@ struct ProfileView: View {
     @State private var showQR = false
     @State private var showImport = false
     @State private var showAds = false
+    @State private var showHelp = false
+    @State private var showFAQ = false
     @State private var showPlaylist = false
     @State private var musicModel: UserPageModel?
     @AppStorage(Haptics.key) private var haptics = true
@@ -83,6 +86,12 @@ struct ProfileView: View {
     @State private var marqueeOn: Bool = ProfileFirstReveal.done
 
     private var s: Strings { Strings(lang: lang) }
+    /// Окно «Помощь» поверх всего экрана: панель вкладок на это время прячется
+    private func setHelp(_ on: Bool) {
+        session.tabBarHidden = on
+        showHelp = on
+    }
+
     private var name: String { store.profile?.name ?? flow.userName }
     private var shownName: String { store.profile?.displayName ?? flow.userName }
     private var photos: [AvatarPhoto] { store.profile?.avatars ?? [] }
@@ -407,6 +416,15 @@ struct ProfileView: View {
                     SettingsDivider()
                     SettingsRow(icon: "text.alignleft", tint: .orange, title: s.bioLabel, value: bioText,
                                 showsChevron: true) { route = .bio }
+                    if let nid = store.profile?.numID {
+                        SettingsDivider()
+                        // постоянный номер аккаунта, как в Telegram: нажал — скопирован (его спрашивает поддержка)
+                        SettingsRow(icon: "number", tint: .gray, title: "ID", value: String(nid)) {
+                            UIPasteboard.general.string = String(nid)
+                            Haptics.notify(.success)
+                            AppToast.show(s.t("ID скопирован", "ID copied"), icon: "doc.on.doc")
+                        }
+                    }
                 }
 
                 SettingsGroup {
@@ -455,6 +473,15 @@ struct ProfileView: View {
                     SettingsDivider()
                     SettingsRow(icon: "server.rack", tint: .blue, title: s.serverLabel, value: serverHost,
                                 showsChevron: true) { route = .server }
+                }
+
+                // как в Telegram: «Помощь» (волонтёры, бот @support) и «Вопросы об Orbita»
+                SettingsGroup {
+                    SettingsRow(icon: "bubble.left.and.text.bubble.right.fill", tint: .orange, title: s.t("Помощь", "Ask a question"),
+                                showsChevron: true) { setHelp(true) }
+                    SettingsDivider()
+                    SettingsRow(icon: "questionmark.circle.fill", tint: .blue, title: s.t("Вопросы об Orbita", "Orbita FAQ"),
+                                showsChevron: true) { showFAQ = true }
                 }
 
                 TextActionButton(title: s.logout) {
@@ -527,6 +554,19 @@ struct ProfileView: View {
             Button(s.cancel, role: .cancel) {}
         } message: {
             Text(s.deleteWarning)
+        }
+        .overlay {
+            if showHelp {
+                HelpAlert(onAnswers: { setHelp(false); showFAQ = true },
+                          onOK: { setHelp(false); SupportBot.open() },
+                          onDismiss: { setHelp(false) })
+                    .zIndex(50)
+            }
+        }
+        .sheet(isPresented: $showFAQ) {
+            FAQSheet(onAskSupport: { SupportBot.open() })
+                .environment(\.theme, theme).environment(\.lang, lang)
+                .presentationDragIndicator(.visible)
         }
         .fullScreenCover(isPresented: $showEdit) {
             EditProfileView(store: store)

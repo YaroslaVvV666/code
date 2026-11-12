@@ -37,3 +37,15 @@ ORBITA_TEST_URL=http://localhost ORBITA_ADMIN_TOKEN=<из .env> python3 ../Serve
 | cache | redis:7 | realtime-состояние, кэш, события, лимиты |
 | app | собирается из `Dockerfile` | сервер Orbita, мастер + N воркеров |
 | nginx | nginx:1.27-alpine | TLS, «липкая» балансировка, лимит по IP |
+
+## Поддержка (@support)
+
+Официальный бот поддержки — `@support`. Человек пишет ему, сообщение приходит волонтёрам с именем и ID человека,
+ответ волонтёра (смахнуть сообщение → «Ответить») уходит человеку от имени бота.
+
+Владелец бота назначается одним из способов:
+- `ORBITA_SUPPORT_OWNER=@ваш_username` (или числовой ID из профиля) в `.env`, затем перезапуск;
+- или без перезапуска: `curl -X POST -H "X-Admin-Token: $ORBITA_ADMIN_TOKEN" -d '{"user":"@ваш_username"}' https://<сервер>/v1/admin/support/owner`.
+
+Дальше всё в самой переписке с `@support`: `/add @username` или `/add ID` — назначить волонтёра, `/remove`, `/volunteers`, `/stats`.
+Волонтёрам: `/open`, `/reply ID текст`, `/close ID`, `/pause`, `/resume`, `/help`.

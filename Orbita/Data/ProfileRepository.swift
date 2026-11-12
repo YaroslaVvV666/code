@@ -144,6 +144,7 @@ private struct ProfileDTO: Decodable {
     let botOwned: Bool?
     let gender: String?
     let city: String?
+    let numId: Int?
 
     var model: UserProfile {
         UserProfile(id: id, name: name, username: username, bio: bio, avatarID: avatar, phone: phone,
@@ -161,7 +162,7 @@ private struct ProfileDTO: Decodable {
                     orbit: (orbit ?? []).map { OrbitFriend(id: $0.id, name: $0.name, avatarID: $0.avatar, activity: $0.activity?.model) },
                     activity: activity?.model,
                     isBot: bot ?? false, botOwned: botOwned ?? false, monthlyUsers: monthlyUsers,
-                    gender: gender, city: city)
+                    gender: gender, city: city, numID: numId)
     }
 }
 

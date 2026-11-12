@@ -39,6 +39,7 @@ services:
       REDIS_URL: redis://cache:6379/0
       ORBITA_WORKERS: ${ORBITA_WORKERS:-4}
       ORBITA_ADMIN_TOKEN: ${ORBITA_ADMIN_TOKEN:-}
+      ORBITA_SUPPORT_OWNER: ${ORBITA_SUPPORT_OWNER:-}
       # ключ шифрования: задайте ORBITA_MASTER_KEY (base64 32 байта), иначе создастся в томе /data (сделайте бэкап!)
       ORBITA_MASTER_KEY: ${ORBITA_MASTER_KEY:-}
       # медиа в S3 (необязательно): раскомментируйте и заполните

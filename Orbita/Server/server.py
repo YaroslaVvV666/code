@@ -982,7 +982,7 @@ def profile_json(r, me_id=None):
     track = q1("SELECT * FROM tracks WHERE user_id = ? ORDER BY position LIMIT 1", (uid,)) if vis("music") else None
     wall_ok = vis("wall")
     out = {
-        "id": uid, "name": full, "first_name": first, "last_name": last,
+        "id": uid, "num_id": num_id_of(uid), "name": full, "first_name": first, "last_name": last,
         "birthday": dec_profile(r, "birthday_enc", COL["birthday"]) if vis("birthday") else None,
         "avatars": avatar_list(uid) if vis("photos") else [],
         "username": dec_profile(r, "username_enc", COL["username"]),
@@ -5461,6 +5461,354 @@ ensure_system_bot(BOTGOD_ID, BOTGOD_NAME, "BotGod")
 ensure_system_bot(SERVICE_ID, "orbita", "Orbita")
 
 
+# ---------- Числовой ID пользователя (как в Telegram) ----------
+# У каждого — свой постоянный номер: 100001, 100002… Его видно в профиле, по нему находят человека
+# (например, волонтёры поддержки и владелец бота поддержки: /add 100523). Сам id в базе остаётся UUID.
+
+NUM_ID_BASE = 100000
+ensure_column("users", "num_id", "num_id INTEGER")
+DB.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_num_id ON users(num_id)")
+_num_id_lock = threading.Lock()
+
+
+def num_id_of(uid):
+    r = q1("SELECT num_id FROM users WHERE id = ?", (uid,))
+    if not r:
+        return None
+    if r["num_id"]:
+        return int(r["num_id"])
+    with _num_id_lock:
+        for _ in range(20):                       # несколько процессов: уникальный индекс не даст двух одинаковых
+            r = q1("SELECT num_id FROM users WHERE id = ?", (uid,))
+            if r and r["num_id"]:
+                return int(r["num_id"])
+            top = q1("SELECT MAX(num_id) m FROM users")["m"] or NUM_ID_BASE
+            try:
+                run("UPDATE users SET num_id = ? WHERE id = ? AND num_id IS NULL", (int(top) + 1, uid))
+            except Exception:
+                continue
+    r = q1("SELECT num_id FROM users WHERE id = ?", (uid,))
+    return int(r["num_id"]) if r and r["num_id"] else None
+
+
+def backfill_num_ids():
+    for r in q("SELECT id FROM users WHERE num_id IS NULL ORDER BY created_at"):
+        num_id_of(r["id"])
+
+
+def find_user_ref(ref):
+    """«@username», «username» или числовой ID → id пользователя (или None)"""
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    if ref.isdigit():
+        r = q1("SELECT id FROM users WHERE num_id = ?", (int(ref),))
+        return r["id"] if r else None
+    name = ref.lstrip("@").lower()
+    if not re.match(r"^[a-z][a-z0-9_]{3,31}$", name):
+        return None
+    r = q1("SELECT id FROM users WHERE username_idx = ?", (KR.blind_index(name, "username"),))
+    return r["id"] if r else None
+
+
+# ---------- Поддержка: официальный бот @support, отвечают волонтёры ----------
+# Человек пишет боту — сообщение приходит волонтёрам (в их переписку с этим же ботом) с именем и ID человека.
+# Волонтёр отвечает на него («Ответить» / смахнуть) — ответ уходит человеку от имени бота.
+# «✋ Беру» — обращение закрепляется за волонтёром (дальше его сообщения видит только он), «✅ Закрыть» — закрыть.
+# Владелец бота (ORBITA_SUPPORT_OWNER — @username или ID; или /v1/admin/support/owner) назначает волонтёров:
+# /add, /remove, /volunteers, /stats. Волонтёрам: /open, /reply, /close, /pause, /resume, /help.
+
+SUPPORT_ID = "5c0ff0e0-0000-4000-8000-00000005c0ff"
+SUPPORT_NAME = "support"
+BUILTIN_BOTS[SUPPORT_ID] = {"description": "Официальная поддержка Orbita.\n\nОпишите вопрос или проблему одним сообщением — "
+                                           "можно приложить скриншот. Отвечают волонтёры: мы постараемся помочь как можно "
+                                           "быстрее, но ожидание может занять время."}
+BOT_COMMANDS[SUPPORT_ID] = [{"command": "start", "description": "Начать"},
+                            {"command": "help", "description": "Как это работает"}]
+ensure_system_bot(SUPPORT_ID, SUPPORT_NAME, "Orbita Support")
+
+DB.execute("CREATE TABLE IF NOT EXISTS support_agents(user_id TEXT PRIMARY KEY, role TEXT NOT NULL, "
+           "paused INTEGER NOT NULL DEFAULT 0, added_by TEXT, added_at REAL NOT NULL)")
+DB.execute("CREATE TABLE IF NOT EXISTS support_threads(user_id TEXT PRIMARY KEY, status TEXT NOT NULL, assigned TEXT, "
+           "opened_at REAL NOT NULL, updated_at REAL NOT NULL, last_user_at REAL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_threads ON support_threads(status, updated_at)")
+# какое сообщение у волонтёра — копия обращения какого человека (по нему ответ находит адресата)
+DB.execute("CREATE TABLE IF NOT EXISTS support_copies(msg_id TEXT PRIMARY KEY, agent TEXT NOT NULL, user_id TEXT NOT NULL, "
+           "created_at REAL NOT NULL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_copies ON support_copies(user_id, agent)")
+DB.execute("CREATE TABLE IF NOT EXISTS support_log(id TEXT PRIMARY KEY, agent TEXT, user_id TEXT NOT NULL, kind TEXT NOT NULL, "
+           "created_at REAL NOT NULL)")
+
+
+def support_apply_owner_env():
+    for ref in [x for x in os.environ.get("ORBITA_SUPPORT_OWNER", "").replace(",", " ").split() if x]:
+        uid = find_user_ref(ref)
+        if uid:
+            support_set_owner(uid)
+
+
+def support_set_owner(uid):
+    run("DELETE FROM support_agents WHERE user_id = ?", (uid,))
+    run("INSERT INTO support_agents(user_id, role, paused, added_by, added_at) VALUES (?, 'owner', 0, NULL, ?)", (uid, time.time()))
+
+
+def support_role(uid):
+    r = q1("SELECT role FROM support_agents WHERE user_id = ?", (uid,))
+    return r["role"] if r else None
+
+
+def support_label(uid):
+    b = user_brief(uid)
+    nid = num_id_of(uid)
+    return "%s%s · ID %s" % (b["name"], (" (@%s)" % b["username"]) if b.get("username") else "", nid or "—")
+
+
+def support_say(uid, text, buttons=None):
+    """Сообщение от бота сразу (без «печатает…»): волонтёрам и в ответах — без задержки"""
+    row = deliver_dm(SUPPORT_ID, uid, text, [], [], None, silent=False)
+    if buttons:
+        set_inline_markup(row["id"], SUPPORT_ID, buttons)
+    return row
+
+
+def support_agents_for(user_id):
+    """Кому показать сообщение человека: закреплённому волонтёру, иначе всем на смене"""
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    if t and t["assigned"] and q1("SELECT 1 FROM support_agents WHERE user_id = ?", (t["assigned"],)):
+        return [t["assigned"]]
+    return [r["user_id"] for r in q("SELECT user_id FROM support_agents WHERE paused = 0 ORDER BY added_at")
+            if r["user_id"] != user_id]
+
+
+def support_thread_buttons(user_id, taken_by=None):
+    if taken_by:
+        return [[{"text": "✋ Взял(а): " + user_brief(taken_by)["name"], "callback_data": "noop"}],
+                [{"text": "✅ Закрыть обращение", "callback_data": "close:" + user_id}]]
+    return [[{"text": "✋ Беру", "callback_data": "take:" + user_id},
+             {"text": "✅ Закрыть", "callback_data": "close:" + user_id}]]
+
+
+def support_forward(user_id, text, attachments, first):
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    head = ("🆘 Новое обращение\n" if first else "💬 ") + support_label(user_id)
+    body = head + "\n\n" + (text or ("📎 вложение" if attachments else ""))
+    agents = support_agents_for(user_id)
+    for a in agents:
+        row = deliver_dm(SUPPORT_ID, a, body, [], attachments or [], None)
+        set_inline_markup(row["id"], SUPPORT_ID, support_thread_buttons(user_id, t["assigned"] if t else None))
+        run("INSERT INTO support_copies(msg_id, agent, user_id, created_at) VALUES (?,?,?,?)", (row["id"], a, user_id, time.time()))
+    return len(agents)
+
+
+def support_open_thread(user_id):
+    now = time.time()
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    if t and t["status"] == "open":
+        run("UPDATE support_threads SET updated_at = ?, last_user_at = ? WHERE user_id = ?", (now, now, user_id))
+        return False
+    if t:
+        run("UPDATE support_threads SET status = 'open', assigned = NULL, opened_at = ?, updated_at = ?, last_user_at = ? "
+            "WHERE user_id = ?", (now, now, now, user_id))
+    else:
+        run("INSERT INTO support_threads(user_id, status, assigned, opened_at, updated_at, last_user_at) VALUES (?, 'open', NULL, ?,?,?)",
+            (user_id, now, now, now))
+    run("INSERT INTO support_log(id, agent, user_id, kind, created_at) VALUES (?, NULL, ?, 'open', ?)", (uuid.uuid4().hex, user_id, now))
+    return True
+
+
+def support_deliver_answer(agent, user_id, text, attachments):
+    if not text.strip() and not attachments:
+        return False
+    deliver_dm(SUPPORT_ID, user_id, text, [], attachments or [], None)
+    now = time.time()
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    if t:
+        run("UPDATE support_threads SET assigned = COALESCE(assigned, ?), updated_at = ?, status = 'open' WHERE user_id = ?",
+            (agent, now, user_id))
+    run("INSERT INTO support_log(id, agent, user_id, kind, created_at) VALUES (?,?,?, 'reply', ?)", (uuid.uuid4().hex, agent, user_id, now))
+    return True
+
+
+def support_close(agent, user_id, notify=True):
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    if not t or t["status"] != "open":
+        return False
+    run("UPDATE support_threads SET status = 'closed', updated_at = ? WHERE user_id = ?", (time.time(), user_id))
+    run("INSERT INTO support_log(id, agent, user_id, kind, created_at) VALUES (?,?,?, 'close', ?)",
+        (uuid.uuid4().hex, agent, user_id, time.time()))
+    for c in q("SELECT msg_id FROM support_copies WHERE user_id = ?", (user_id,)):
+        set_inline_markup(c["msg_id"], SUPPORT_ID, [[{"text": "✅ Закрыто", "callback_data": "noop"}]])
+    if notify:
+        support_say(user_id, "Обращение закрыто. Если вопрос остался или появился новый — просто напишите сюда.")
+    return True
+
+
+SUPPORT_AGENT_HELP = ("Вы волонтёр поддержки Orbita.\n\n"
+                      "• Обращения приходят сюда с именем и ID человека.\n"
+                      "• Чтобы ответить — смахните сообщение человека (или «Ответить») и напишите ответ: он уйдёт от имени поддержки.\n"
+                      "• ✋ Беру — обращение закреплено за вами, дальше его видите только вы.\n"
+                      "• /open — открытые обращения\n• /reply ID текст — ответить по ID\n• /close ID — закрыть\n"
+                      "• /pause — не получать новые обращения, /resume — снова получать")
+SUPPORT_OWNER_HELP = ("\n\nВы владелец бота поддержки:\n• /add @username или ID — назначить волонтёра\n"
+                      "• /remove @username или ID — снять\n• /volunteers — список\n• /stats — статистика")
+SUPPORT_USER_HELLO = ("Здравствуйте! Это официальная поддержка Orbita.\n\n"
+                      "Опишите ваш вопрос одним сообщением — можно приложить скриншот. Отвечают волонтёры: "
+                      "мы постараемся помочь как можно быстрее, но ожидание может занять время. Ответ придёт сюда.")
+
+
+def support_handle(uid, row, text, attachments):
+    mark_bot_started(SUPPORT_ID, uid)
+    cmd = (text or "").strip()
+    role = support_role(uid)
+    if role:
+        return support_agent_message(uid, role, row, cmd, attachments)
+    low = cmd.lower()
+    if low.startswith("/start"):
+        return bot_reply(SUPPORT_ID, uid, SUPPORT_USER_HELLO)
+    if low.startswith("/help"):
+        return bot_reply(SUPPORT_ID, uid, "Напишите сюда, что случилось, — сообщение получат волонтёры поддержки, "
+                                          "и ответ придёт в этот чат. Ваш ID в Orbita: %s" % (num_id_of(uid) or "—"))
+    rate_limit("support:" + uid, 30, 600)
+    first = support_open_thread(uid)
+    n = support_forward(uid, cmd, attachments, first)
+    if first:
+        if n:
+            bot_reply(SUPPORT_ID, uid, "Спасибо! Обращение передано волонтёрам поддержки — ответ придёт сюда. "
+                                       "Если хотите что-то добавить, просто напишите ещё.")
+        else:
+            bot_reply(SUPPORT_ID, uid, "Спасибо! Сейчас все волонтёры заняты — ваше обращение сохранено, "
+                                       "и вам ответят здесь, как только кто-то освободится.")
+
+
+def support_agent_message(uid, role, row, cmd, attachments):
+    low = cmd.lower()
+    parts = cmd.split(None, 2)
+    head = parts[0].lower() if parts else ""
+    # ответ на копию обращения
+    if row["reply_to"] and not head.startswith("/"):
+        c = q1("SELECT * FROM support_copies WHERE msg_id = ? AND agent = ?", (row["reply_to"], uid))
+        if c:
+            if support_deliver_answer(uid, c["user_id"], cmd, attachments):
+                set_inline_markup(row["reply_to"], SUPPORT_ID,
+                                  [[{"text": "✓ Ответ отправлен", "callback_data": "noop"}],
+                                   [{"text": "✅ Закрыть обращение", "callback_data": "close:" + c["user_id"]}]])
+            return
+    if head in ("/start", "/help"):
+        return support_say(uid, SUPPORT_AGENT_HELP + (SUPPORT_OWNER_HELP if role == "owner" else ""))
+    if head == "/open":
+        rows = q("SELECT * FROM support_threads WHERE status = 'open' ORDER BY last_user_at ASC LIMIT 30")
+        if not rows:
+            return support_say(uid, "Открытых обращений нет 🎉")
+        lines = []
+        for t in rows:
+            mins = int((time.time() - (t["last_user_at"] or t["updated_at"])) / 60)
+            who = (" · у " + user_brief(t["assigned"])["name"]) if t["assigned"] else " · свободно"
+            lines.append("• %s — ждёт %s мин%s" % (support_label(t["user_id"]), mins, who))
+        return support_say(uid, "Открытые обращения (%d):\n\n%s\n\nОтветить: /reply ID текст" % (len(rows), "\n".join(lines)))
+    if head == "/reply":
+        if len(parts) < 3:
+            return support_say(uid, "Формат: /reply ID текст ответа")
+        target = find_user_ref(parts[1])
+        if not target:
+            return support_say(uid, "Не нашёл человека с таким ID или @username.")
+        support_open_thread(target) if not q1("SELECT 1 FROM support_threads WHERE user_id = ?", (target,)) else None
+        support_deliver_answer(uid, target, parts[2], attachments)
+        return support_say(uid, "✓ Ответ отправлен: " + support_label(target))
+    if head == "/close":
+        target = find_user_ref(parts[1]) if len(parts) > 1 else None
+        if not target:
+            return support_say(uid, "Формат: /close ID")
+        return support_say(uid, "✅ Закрыто: " + support_label(target) if support_close(uid, target) else "Это обращение уже закрыто.")
+    if head == "/pause":
+        run("UPDATE support_agents SET paused = 1 WHERE user_id = ?", (uid,))
+        return support_say(uid, "Пауза: новые обращения вам не приходят. Вернуться — /resume")
+    if head == "/resume":
+        run("UPDATE support_agents SET paused = 0 WHERE user_id = ?", (uid,))
+        return support_say(uid, "Снова на смене — новые обращения будут приходить сюда.")
+    if role == "owner":
+        if head in ("/add", "/addvolunteer"):
+            target = find_user_ref(parts[1]) if len(parts) > 1 else None
+            if not target or is_bot_user(target):
+                return support_say(uid, "Формат: /add @username или /add ID (ID есть в профиле человека).")
+            if support_role(target):
+                return support_say(uid, support_label(target) + " уже в команде поддержки.")
+            run("INSERT INTO support_agents(user_id, role, paused, added_by, added_at) VALUES (?, 'volunteer', 0, ?, ?)",
+                (target, uid, time.time()))
+            mark_bot_started(SUPPORT_ID, target)
+            support_say(target, "Вас назначили волонтёром поддержки Orbita 🙌\n\n" + SUPPORT_AGENT_HELP)
+            return support_say(uid, "✓ Волонтёр добавлен: " + support_label(target))
+        if head in ("/remove", "/removevolunteer"):
+            target = find_user_ref(parts[1]) if len(parts) > 1 else None
+            if not target or support_role(target) != "volunteer":
+                return support_say(uid, "Такого волонтёра нет. Список — /volunteers")
+            run("DELETE FROM support_agents WHERE user_id = ?", (target,))
+            run("UPDATE support_threads SET assigned = NULL WHERE assigned = ?", (target,))
+            support_say(target, "Вы больше не волонтёр поддержки Orbita. Спасибо за помощь!")
+            return support_say(uid, "✓ Снят(а): " + support_label(target))
+        if head == "/volunteers":
+            rows = q("SELECT * FROM support_agents ORDER BY role DESC, added_at")
+            lines = ["• %s%s%s" % (support_label(r["user_id"]), " — владелец" if r["role"] == "owner" else "",
+                                   " (пауза)" if r["paused"] else "") for r in rows]
+            return support_say(uid, "Команда поддержки:\n\n" + "\n".join(lines) + "\n\nДобавить — /add @username или ID")
+        if head == "/stats":
+            day = time.time() - 86400
+            opened = q1("SELECT COUNT(*) c FROM support_threads WHERE status = 'open'")["c"]
+            new24 = q1("SELECT COUNT(*) c FROM support_log WHERE kind = 'open' AND created_at > ?", (day,))["c"]
+            rep24 = q1("SELECT COUNT(*) c FROM support_log WHERE kind = 'reply' AND created_at > ?", (day,))["c"]
+            per = q("SELECT agent, COUNT(*) c FROM support_log WHERE kind = 'reply' AND created_at > ? GROUP BY agent ORDER BY c DESC",
+                    (time.time() - 7 * 86400,))
+            lines = "\n".join("• %s — %d" % (user_brief(p["agent"])["name"], p["c"]) for p in per if p["agent"]) or "—"
+            return support_say(uid, "Открыто сейчас: %d\nНовых за сутки: %d\nОтветов за сутки: %d\n\nОтветы за неделю:\n%s"
+                               % (opened, new24, rep24, lines))
+    if head.startswith("/"):
+        return support_say(uid, "Не знаю такой команды. /help — что я умею.")
+    return support_say(uid, "Чтобы ответить человеку, смахните его сообщение (или «Ответить») и напишите ответ. "
+                            "Или: /reply ID текст. Открытые обращения — /open")
+
+
+def support_callback(uid, m, data):
+    role = support_role(uid)
+    if not role or data == "noop":
+        return {"text": "", "show_alert": False}
+    kind, _, user_id = data.partition(":")
+    t = q1("SELECT * FROM support_threads WHERE user_id = ?", (user_id,))
+    if kind == "take":
+        if not t or t["status"] != "open":
+            return {"text": "Обращение уже закрыто.", "show_alert": False}
+        if t["assigned"] and t["assigned"] != uid:
+            return {"text": "Уже взял(а): " + user_brief(t["assigned"])["name"], "show_alert": True}
+        run("UPDATE support_threads SET assigned = ?, updated_at = ? WHERE user_id = ?", (uid, time.time(), user_id))
+        for c in q("SELECT msg_id, agent FROM support_copies WHERE user_id = ?", (user_id,)):
+            set_inline_markup(c["msg_id"], SUPPORT_ID, support_thread_buttons(user_id, uid))
+        bot_user_wake(uid)
+        return {"text": "Обращение за вами. Ответьте на сообщение человека.", "show_alert": False}
+    if kind == "close":
+        ok = support_close(uid, user_id)
+        bot_user_wake(uid)
+        return {"text": "Закрыто." if ok else "Уже закрыто.", "show_alert": False}
+    return {"text": "", "show_alert": False}
+
+
+@route("POST", r"/v1/admin/support/owner", auth=False)
+def admin_support_owner(req, me):
+    """Назначить владельца бота поддержки: {"user": "@username" | "100523"} (нужен ORBITA_ADMIN_TOKEN)"""
+    require_admin(req)
+    uid = find_user_ref(str(req.body_json().get("user", "")))
+    if not uid:
+        raise ApiError(404, "user_not_found")
+    support_set_owner(uid)
+    mark_bot_started(SUPPORT_ID, uid)
+    support_say(uid, "Вы — владелец бота поддержки Orbita.\n\n" + SUPPORT_AGENT_HELP + SUPPORT_OWNER_HELP)
+    req.send_json(200, {"ok": True, "owner": uid, "num_id": num_id_of(uid)})
+
+
+try:
+    backfill_num_ids()
+    support_apply_owner_env()
+except Exception as _e:                              # старт сервера не должен зависеть от этого
+    sys.stderr.write("support/num_id init: %s\n" % _e)
+
+
 def bot_row(uid):
     return q1("SELECT * FROM bots WHERE id = ?", (uid,))
 
@@ -5809,6 +6157,8 @@ def bot_callback(req, me, mid):
         raise ApiError(400, "bad_callback_data")
     if m["sender"] == SERVICE_ID:
         return req.send_json(200, {"answered": True, **service_callback(uid, m, data)})
+    if m["sender"] == SUPPORT_ID:
+        return req.send_json(200, {"answered": True, **support_callback(uid, m, data)})
     bot = bot_row(m["sender"])
     if not bot:
         raise ApiError(400, "not_a_bot")
@@ -9441,6 +9791,8 @@ def send_message(req, me, peer):
     elif peer == BOTGOD_ID:
         mark_bot_started(peer, uid)
         botgod_handle(uid, text, attachments)                   # BotGod — создание и настройка ботов
+    elif peer == SUPPORT_ID:
+        support_handle(uid, row, text, attachments)             # поддержка: человеку — волонтёрам, волонтёру — человеку
     elif peer != uid:
         b = bot_row(peer)
         if b:

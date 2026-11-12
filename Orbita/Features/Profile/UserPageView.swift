@@ -1086,6 +1086,8 @@ struct UserPageView: View {
             ProfileInfoRow(label: s.bioLabel, value: profile.bio),
             ProfileInfoRow(label: s.birthday, value: birthdayValue(profile.birthday),
                            kind: .birthday(today: BirthdayCalc.isToday(profile.birthday))),
+            // постоянный номер аккаунта, как в Telegram (нажатие — скопировать)
+            ProfileInfoRow(label: "ID", value: profile.numID.map(String.init) ?? ""),
         ].filter { !$0.value.isEmpty }
         // и в той же карточке — «Добавить в контакты» и «Заблокировать»
         let actions = infoActions(profile)

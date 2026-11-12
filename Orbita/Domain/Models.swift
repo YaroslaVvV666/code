@@ -294,6 +294,7 @@ struct UserProfile: Equatable {
     var monthlyUsers: Int? = nil        // у бота: сколько пишут за месяц (только если владелец разрешил и их 10 000+)
     var gender: String? = nil           // свой профиль: «m» / «f» — видно только себе (аудитория продвижения)
     var city: String? = nil             // свой профиль: город — видно только себе
+    var numID: Int? = nil               // постоянный числовой ID, как в Telegram (по нему находит поддержка)
     /// Имя с эмодзи-статусом (для шапок профиля)
     var displayName: String { statusEmoji.flatMap { $0.isEmpty ? nil : name + " " + $0 } ?? name }
 }

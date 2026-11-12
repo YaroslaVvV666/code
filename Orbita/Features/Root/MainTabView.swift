@@ -74,7 +74,12 @@ struct MainTabView: View {
         let known = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
         let all = session.devices.sessions
         if !known.isEmpty, newLogin == nil,
-           let fresh = all.filter({ !$0.isCurrent && !known.contains($0.id) }).max(by: { $0.createdAt < $1.createdAt }) {
+           let fresh = all.filter({ s in
+               // тот же телефон после обновления приложения — не «новый вход»
+               guard !s.isCurrent, !known.contains(s.id) else { return false }
+               if let cur = all.first(where: \.isCurrent), cur.device == s.device, cur.ip == s.ip, cur.system == s.system { return false }
+               return true
+           }).max(by: { $0.createdAt < $1.createdAt }) {
             newLogin = fresh
             Haptics.notify(.warning)
         }
