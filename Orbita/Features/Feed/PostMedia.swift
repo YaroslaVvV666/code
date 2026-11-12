@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import UIKit
 import AVKit
 import AVFoundation
 import Combine
@@ -717,7 +718,15 @@ struct MediaViewer: View {
             TabView(selection: $index) {
                 ForEach(Array(media.enumerated()), id: \.offset) { item in
                     page(item.element, at: item.offset).tag(item.offset)
-                        .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { chrome.toggle() }; tick += 1 }
+                        .onTapGesture(coordinateSpace: .global) { p in
+                            // «Листать медиа по нажатию» (Оформление): нажатие у левого/правого края — предыдущее/следующее
+                            let w = UIScreen.main.bounds.width
+                            if UserDefaults.standard.object(forKey: "media.tapPaging") as? Bool ?? true, media.count > 1 {
+                                if p.x < w * 0.18, index > 0 { Haptics.select(); withAnimation(.easeOut(duration: 0.25)) { index -= 1 }; return }
+                                if p.x > w * 0.82, index < media.count - 1 { Haptics.select(); withAnimation(.easeOut(duration: 0.25)) { index += 1 }; return }
+                            }
+                            withAnimation(.easeOut(duration: 0.2)) { chrome.toggle() }; tick += 1
+                        }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))

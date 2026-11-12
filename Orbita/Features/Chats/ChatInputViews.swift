@@ -479,6 +479,7 @@ struct ChatInputBar: View {
 
     /// Стикеры под эмодзи, если в поле только он (как в Telegram). Без вариантных селекторов: ❤ и ❤️ — одно и то же
     private func stickerSuggestions() -> [Sticker]? {
+        guard UserDefaults.standard.object(forKey: "stickers.suggest") as? Bool ?? true else { return nil }   // «Стикеры и эмодзи»
         guard controller.length > 0, controller.length <= 12, model.editing == nil, drafts.isEmpty, model.canWrite else { return nil }
         let typed = controller.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard typed.count == 1, let ch = typed.first, ch.unicodeScalars.contains(where: { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }) else { return nil }

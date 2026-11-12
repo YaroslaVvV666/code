@@ -348,65 +348,6 @@ struct ChoiceGroup: View {
 
 // MARK: - Конфиденциальность
 
-// MARK: - Оформление
-
-struct AppearanceScreen: View {
-    @AppStorage("isDark") private var isDark = true
-    @AppStorage("accent") private var accent = 0
-    @Environment(\.theme) private var theme
-    @Environment(\.lang) private var lang
-
-    private var s: Strings { Strings(lang: lang) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup {
-                HStack(spacing: 14) {
-                    Image(systemName: "circle.lefthalf.filled")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .frame(width: 30, height: 30)
-                        .background(Color.indigo, in: RoundedRectangle(cornerRadius: 8))
-                    Text(s.themeLabel).font(.system(size: 16)).foregroundStyle(theme.text)
-                    Spacer()
-                    ThemeToggle(isDark: $isDark)
-                }
-                .padding(.horizontal, 14)
-                .frame(height: 56)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(s.accentColor.uppercased())
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 30)
-
-                HStack(spacing: 14) {
-                    ForEach(0..<Theme.accents.count, id: \.self) { index in
-                        Button {
-                            Haptics.select()
-                            withAnimation(.easeInOut(duration: 0.25)) { accent = index }
-                        } label: {
-                            Circle()
-                                .fill(Theme.swatch(index))
-                                .frame(width: 42, height: 42)
-                                .overlay {
-                                    if accent == index {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 15, weight: .bold))
-                                            .foregroundStyle(Color.white)
-                                    }
-                                }
-                                .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
-                        }
-                        .buttonStyle(PressStyle())
-                    }
-                }
-                .padding(.horizontal, 24)
-            }
-        }
-    }
-}
 
 // MARK: - Язык
 

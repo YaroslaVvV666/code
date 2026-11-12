@@ -254,6 +254,9 @@ struct MessageRow: View {
     @Environment(\.openURL) private var parentOpenURL
     @Environment(\.onBotCommand) private var onBotCommand
     @Environment(\.saveScope) private var saveScope
+    @AppStorage("chat.radius") private var bubbleRadius = 21.0
+    @AppStorage("chat.textSize") private var chatTextSize = 0          // 0 — системный (16)
+    @AppStorage("emoji.big") private var bigEmoji = true
     @ObservedObject private var translator = ChatTranslator.shared
     @State private var dragX: CGFloat = 0
     @State private var stickerPop = false        // нажали на стикер — он «пружинит»
@@ -278,7 +281,7 @@ struct MessageRow: View {
         return message.attachments[0]
     }
     private var emojiOnly: Bool {
-        message.attachments.isEmpty && message.reply == nil && message.storyReply == nil && message.text.isEmojiOnly
+        bigEmoji && message.attachments.isEmpty && message.reply == nil && message.storyReply == nil && message.text.isEmojiOnly
     }
     /// Одно эмодзи — крупно, два-три — поменьше
     private var emojiSize: CGFloat {
@@ -549,7 +552,8 @@ struct MessageRow: View {
     // MARK: Пузырь
 
     private var shape: UnevenRoundedRectangle {
-        let big: CGFloat = 21, small: CGFloat = 6, join: CGFloat = 7
+        // «Углы блоков с сообщениями» (Оформление): 0…21
+        let big = CGFloat(bubbleRadius), small = min(6, big), join = min(7, big)
         return UnevenRoundedRectangle(
             topLeadingRadius: mine ? big : (isFirst ? big : join),
             bottomLeadingRadius: mine ? big : (isLast ? small : join),
@@ -782,7 +786,8 @@ struct MessageRow: View {
                         .padding(.horizontal, 11).padding(.top, 6)
                         .transition(.opacity)
                 }
-                RichInlineText(text: translated ?? message.text, entities: translated == nil ? message.entities : [], size: 16,
+                RichInlineText(text: translated ?? message.text, entities: translated == nil ? message.entities : [],
+                               size: chatTextSize > 0 ? CGFloat(chatTextSize) : 16,
                                color: textColor, linkColor: mine ? .white : theme.accentColor, filler: filler,
                                detect: interactive)
                     .animation(.easeInOut(duration: 0.25), value: translated)

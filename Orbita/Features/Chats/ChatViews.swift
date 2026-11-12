@@ -2212,10 +2212,12 @@ struct ChatScreen: View {
                             .padding(.top, entry.isFirst ? 7 : 2)
                             // новое сообщение: вырастает из своего угла (входящее — слева, своё — справа), чуть поднимается
                             // снизу и проявляется из лёгкого размытия
-                            .transition(.asymmetric(
-                                insertion: .modifier(active: MessageArrive(on: true, mine: entry.message.mine),
-                                                     identity: MessageArrive(on: false, mine: entry.message.mine)),
-                                removal: .opacity.combined(with: .scale(scale: 0.9))))
+                            .transition(UserDefaults.standard.object(forKey: "anim.messages") as? Bool ?? true
+                                ? .asymmetric(
+                                    insertion: .modifier(active: MessageArrive(on: true, mine: entry.message.mine),
+                                                         identity: MessageArrive(on: false, mine: entry.message.mine)),
+                                    removal: .opacity.combined(with: .scale(scale: 0.9)))
+                                : .opacity)
                         }
                     }
                     Color.clear.frame(height: 1).id("bottom")

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Combine
 
 /// Корень приложения: фон, переключение шагов регистрации и главного экрана
@@ -74,6 +75,17 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: appLock.locked)
+        // «Ночная тема: Системная» — тёмная и светлая тема меняются вместе с iPhone
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                if (UserDefaults.standard.string(forKey: "theme.mode") ?? "manual") == "system" {
+                    let dark = UIScreen.main.traitCollection.userInterfaceStyle == .dark
+                    if dark != isDark { withAnimation(.easeInOut(duration: 0.3)) { isDark = dark } }
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             // автоблокировка: после N минут в фоне (по умолчанию 5); вернулись — Face ID спрашивается сам.
             // Пока приложение открыто — блокировка, если 5 минут ничего не трогали

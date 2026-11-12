@@ -74,10 +74,18 @@ final class ChatAppearanceStore: ObservableObject {
         }
     }
 
-    func appearance(_ chatID: String) -> ChatAppearance { map[chatID] ?? ChatAppearance() }
+    /// "*" — обои и цвет по умолчанию для всех чатов («Оформление → Обои для чатов»); у чата могут быть свои
+    static let global = "*"
+
+    func appearance(_ chatID: String) -> ChatAppearance {
+        map[chatID] ?? (chatID == Self.global ? nil : map[Self.global]) ?? ChatAppearance()
+    }
+
+    /// Чьё фото обоев показывать: своё у чата или общее
+    func photoOwner(_ chatID: String) -> String { map[chatID] != nil || chatID == Self.global ? chatID : Self.global }
 
     func theme(_ base: Theme, for chatID: String) -> Theme {
-        guard let rgb = map[chatID]?.bubble else { return base }
+        guard let rgb = (map[chatID] ?? map[Self.global])?.bubble else { return base }
         return base.withAccent(Self.readable(rgb))
     }
 
@@ -179,7 +187,7 @@ struct ChatWallpaperView: View {
             if a.wallpaper == "photo" {
                 // фон приложения — пока фото читается с диска
                 SpaceBackground(isDark: theme.dark, showStars: false)
-                if let img = photo ?? store.cachedPhoto(chatID) {
+                if let img = photo ?? store.cachedPhoto(store.photoOwner(chatID)) {
                     Color.clear
                         .overlay {
                             Image(uiImage: img).resizable().scaledToFill()
@@ -198,7 +206,7 @@ struct ChatWallpaperView: View {
         .ignoresSafeArea()
         .task(id: "\(a.wallpaper)-\(store.photoTick)") {
             guard a.wallpaper == "photo" else { photo = nil; return }
-            let img = await store.loadPhoto(chatID)
+            let img = await store.loadPhoto(store.photoOwner(chatID))
             withAnimation(.easeOut(duration: 0.2)) { photo = img }
         }
     }

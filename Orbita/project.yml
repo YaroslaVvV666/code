@@ -33,6 +33,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.orbita
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+        # иконки: основная и сменные («Оформление → Иконка приложения»)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: "AppIconOcean AppIconSunset AppIconMainX AppIconFill AppIconFillX AppIconBlue AppIconStar AppIconComet AppIconSpace AppIconNight"
     info:
       path: Info.plist
       properties:
