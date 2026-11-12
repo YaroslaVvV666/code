@@ -131,17 +131,33 @@ final class DevicesStore: ObservableObject {
     @Published private(set) var sessions: [DeviceSession] = []
     @Published private(set) var loaded = false
     @Published var error: APIError?
+    /// «Автоматически завершать сеансы, если сеанс неактивен» — дней
+    @Published private(set) var ttlDays = 180
 
     private let repo: ProfileRepository
 
     init(repo: ProfileRepository) { self.repo = repo }
+
+    func setTTL(_ days: Int) async {
+        let before = ttlDays
+        ttlDays = days
+        do {
+            try await repo.setSessionTTL(days: days)
+            await load()
+        } catch {
+            ttlDays = before
+            self.error = (error as? APIError) ?? .offline
+        }
+    }
 
     var current: DeviceSession? { sessions.first { $0.isCurrent } }
     var others: [DeviceSession] { sessions.filter { !$0.isCurrent } }
 
     func load() async {
         do {
-            sessions = try await repo.sessions()
+            let r = try await repo.sessionList()
+            sessions = r.sessions
+            ttlDays = r.ttlDays
             error = nil
         } catch {
             self.error = (error as? APIError) ?? .offline

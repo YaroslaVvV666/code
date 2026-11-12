@@ -338,6 +338,7 @@ ensure_column("polls", "explanation_enc", "explanation_enc BLOB")
 ensure_column("comments", "parent_id", "parent_id TEXT")
 ensure_column("comments", "reply_to_id", "reply_to_id TEXT")
 ensure_column("users", "last_name_enc", "last_name_enc BLOB")
+ensure_column("users", "session_ttl_days", "session_ttl_days INTEGER")
 ensure_column("users", "birthday_enc", "birthday_enc BLOB")
 ensure_column("users", "privacy_enc", "privacy_enc BLOB")
 ensure_column("posts", "edited_at", "edited_at REAL")
@@ -1196,24 +1197,64 @@ def posts_json(rows, me_id):
 def clean_info(d, ip):
     def field(key, limit=60):
         return " ".join(str(d.get(key, "") or "").split())[:limit]
-    return {"device": field("device") or "Unknown device", "system": field("system"), "app": field("app"), "ip": ip}
+    info = {"device": field("device") or "Unknown device", "system": field("system"), "app": field("app"), "ip": ip}
+    did = field("device_id", 64)
+    if did:
+        info["device_id"] = did                    # постоянный номер установки: тот же телефон после обновления — тот же сеанс
+    return info
 
 
-SESSION_IDLE_DAYS = 30
+SESSION_IDLE_DAYS = 180                             # по умолчанию, как в Telegram — 6 месяцев
+SESSION_TTL_CHOICES = (7, 30, 90, 180, 365)
+
+
+def session_ttl_days(uid):
+    r = q1("SELECT session_ttl_days FROM users WHERE id = ?", (uid,))
+    v = r["session_ttl_days"] if r else None
+    return int(v) if v in SESSION_TTL_CHOICES else SESSION_IDLE_DAYS
+
+
+def session_info(s):
+    raw = dec(s["user_id"], "profile", COL["session"], s["id"], s["info_enc"])
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+def expire_idle_sessions(uid, keep=None):
+    """Сеансы, которыми не пользовались дольше выбранного срока, завершаются сами (текущий — никогда)"""
+    limit = time.time() - session_ttl_days(uid) * 86400
+    rows = q("SELECT id FROM sessions WHERE user_id = ? AND last_active < ?", (uid, limit))
+    newest = q1("SELECT id FROM sessions WHERE user_id = ? ORDER BY last_active DESC LIMIT 1", (uid,))
+    for r in rows:
+        if r["id"] != keep and (not newest or r["id"] != newest["id"]):
+            run("DELETE FROM sessions WHERE id = ?", (r["id"],))
+    if rows:
+        SHARED.ver_bump("uver:" + uid)
 
 
 def new_session(uid, info):
     token = secrets.token_urlsafe(32)
     sid = uuid.uuid4().hex
     now = time.time()
-    # сеансы, которыми не пользовались 30 дней, завершаются сами
-    run("DELETE FROM sessions WHERE last_active < ? AND id NOT IN (SELECT id FROM sessions WHERE user_id = ? ORDER BY last_active DESC LIMIT 1)",
-        (now - SESSION_IDLE_DAYS * 86400, uid))
+    expire_idle_sessions(uid)
+    # то же устройство входит заново (обновили или переустановили приложение) — старый его сеанс заменяется новым,
+    # и «Вход с нового устройства» не приходит: это не новое устройство
+    same_device = False
+    did = (info or {}).get("device_id")
+    if did:
+        for old in q("SELECT * FROM sessions WHERE user_id = ?", (uid,)):
+            if session_info(old).get("device_id") == did:
+                run("DELETE FROM sessions WHERE id = ?", (old["id"],))
+                same_device = True
+        if same_device:
+            SHARED.ver_bump("uver:" + uid)
     run("INSERT INTO sessions(id, user_id, token_hash, info_enc, created_at, last_active) VALUES (?,?,?,?,?,?)",
         (sid, uid, token_hash(token),
          enc(uid, "profile", COL["session"], sid, json.dumps(info, ensure_ascii=False)), now, now))
     try:
-        if q1("SELECT COUNT(*) c FROM sessions WHERE user_id = ?", (uid,))["c"] > 1:
+        if not same_device and q1("SELECT COUNT(*) c FROM sessions WHERE user_id = ?", (uid,))["c"] > 1:
             login_alert(uid, sid, info)            # вход с ещё одного устройства — сообщение от «Orbita» и push
     except Exception as e:                          # уведомление не должно ломать вход
         sys.stderr.write("login alert failed: %s\n" % e)
@@ -2042,13 +2083,7 @@ def delete_avatar(req, me, aid):
 # ---------- сеансы (устройства) ----------
 
 def session_json(s, current_id):
-    info = {}
-    raw = dec(s["user_id"], "profile", COL["session"], s["id"], s["info_enc"])
-    if raw:
-        try:
-            info = json.loads(raw)
-        except ValueError:
-            pass
+    info = session_info(s)
     return {"id": s["id"], "device": info.get("device") or "—", "system": info.get("system", ""),
             "app": info.get("app", ""), "ip": info.get("ip", ""), "created_at": s["created_at"],
             "last_active": s["last_active"], "current": s["id"] == current_id}
@@ -2056,10 +2091,22 @@ def session_json(s, current_id):
 
 @route("GET", r"/v1/sessions")
 def list_sessions(req, me):
+    expire_idle_sessions(me["id"], keep=me["session_id"])
     rows = q("SELECT * FROM sessions WHERE user_id = ? ORDER BY last_active DESC", (me["id"],))
     out = [session_json(s, me["session_id"]) for s in rows]
     out.sort(key=lambda s: not s["current"])
-    req.send_json(200, {"sessions": out})
+    req.send_json(200, {"sessions": out, "ttl_days": session_ttl_days(me["id"])})
+
+
+@route("PUT", r"/v1/sessions/ttl")
+def set_session_ttl(req, me):
+    """«Автоматически завершать сеансы, если сеанс неактивен»: 1 неделя … 1 год"""
+    days = int((req.body_json() or {}).get("days") or 0)
+    if days not in SESSION_TTL_CHOICES:
+        raise ApiError(400, "bad_ttl")
+    run("UPDATE users SET session_ttl_days = ? WHERE id = ?", (days, me["id"]))
+    expire_idle_sessions(me["id"], keep=me["session_id"])
+    req.send_json(200, {"ok": True, "ttl_days": days})
 
 
 @route("DELETE", r"/v1/sessions")

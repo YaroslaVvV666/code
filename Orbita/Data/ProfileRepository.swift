@@ -67,6 +67,8 @@ protocol ProfileRepository: Sendable {
     func friendRequests() async throws -> (incoming: [FriendUser], outgoing: [FriendUser])
     func setFriend(userID: String, add: Bool) async throws -> String
     func sessions() async throws -> [DeviceSession]
+    func sessionList() async throws -> (sessions: [DeviceSession], ttlDays: Int)
+    func setSessionTTL(days: Int) async throws
     func terminateSession(id: String) async throws
     func terminateOtherSessions() async throws
     func loginRequest(qrID: String) async throws -> LoginRequestInfo
@@ -195,7 +197,7 @@ private struct FriendStateDTO: Decodable { let state: String }
 
 private struct UserListDTO: Decodable { let users: [ProfileDTO] }
 
-private struct SessionListDTO: Decodable { let sessions: [SessionDTO] }
+private struct SessionListDTO: Decodable { let sessions: [SessionDTO]; let ttl_days: Int? }
 
 private struct LoginRequestDTO: Decodable {
     let device: String
@@ -297,6 +299,15 @@ struct RemoteProfileRepository: ProfileRepository {
 
     func sessions() async throws -> [DeviceSession] {
         try decodeAPI(SessionListDTO.self, from: try await api.request("GET", "/v1/sessions")).sessions.map(\.model)
+    }
+
+    func sessionList() async throws -> (sessions: [DeviceSession], ttlDays: Int) {
+        let dto = try decodeAPI(SessionListDTO.self, from: try await api.request("GET", "/v1/sessions"))
+        return (dto.sessions.map(\.model), dto.ttl_days ?? 180)
+    }
+
+    func setSessionTTL(days: Int) async throws {
+        _ = try await api.request("PUT", "/v1/sessions/ttl", body: ServerAPI.json(["days": days]))
     }
 
     func terminateSession(id: String) async throws {
