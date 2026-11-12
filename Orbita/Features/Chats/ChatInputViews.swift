@@ -58,6 +58,7 @@ struct ChatInputBar: View {
     @State private var showStickerCreator = false
     @State private var stickerFocus: String?          // набор, который только что сделали — панель откроется на нём
     @State private var kbVisible = false
+    @State private var fieldPressed = false
     @State private var botKeysOpen = true               // клавиатура бота (кнопки вместо обычной) показана
     @State private var showArticle = false              // редактор статьи (сообщение из блоков)
     @State private var articleSeed = ""                 // текст из поля, с которым открывается редактор
@@ -549,6 +550,12 @@ struct ChatInputBar: View {
             }
             .frame(maxWidth: .infinity)
             .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))      // отдельная стеклянная плашка ввода
+            // зажали поле — плашка чуть светлеет
+            .overlay {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white.opacity(fieldPressed ? (theme.dark ? 0.12 : 0.35) : 0))
+                    .allowsHitTesting(false)
+            }
 
             if model.botKeyboard != nil, !recording, !controller.hasContent {
                 // клавиатура бота ⇄ обычная клавиатура
@@ -582,7 +589,7 @@ struct ChatInputBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-        .padding(.bottom, kbVisible ? 22 : 12)      // зазор от клавиатуры — поле не «налезает» на неё
+        .padding(.bottom, kbVisible ? 7 : 12)       // с клавиатурой поле стоит вплотную к ней, как в Telegram
         .animation(.easeOut(duration: 0.2), value: kbVisible)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
             kbVisible = true
@@ -651,7 +658,7 @@ struct ChatInputBar: View {
                 .glassCircle()
                 .padding(8).contentShape(Rectangle()).padding(-8)     // зона нажатия шире видимой кнопки
         }
-        .buttonStyle(.plain)
+        .buttonStyle(LightenOnPress())
     }
 
     private var field: some View {
@@ -663,7 +670,8 @@ struct ChatInputBar: View {
                         .allowsHitTesting(false)
                 }
                 FormattingTextView(controller: controller, textColor: UIColor(theme.text),
-                                   tint: UIColor(theme.accentColor), maxHeight: 130)
+                                   tint: UIColor(theme.accentColor), maxHeight: 130,
+                                   onPress: { on in withAnimation(.easeOut(duration: on ? 0.1 : 0.25)) { fieldPressed = on } })
             }
             .padding(.leading, 14)
 
@@ -1680,5 +1688,20 @@ private struct TrashBinShape: View {
 enum VideoSilencer {
     static func stripAudio(_ url: URL) async -> URL? {
         await VideoEditExport.export(url, edit: VideoEdit(muted: true, asGIF: true))
+    }
+}
+
+
+/// Нажатие — кнопка в стеклянном кружке чуть светлеет (как скрепка в Telegram)
+struct LightenOnPress: ButtonStyle {
+    @Environment(\.theme) private var theme
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay {
+                Circle().fill(Color.white.opacity(configuration.isPressed ? (theme.dark ? 0.14 : 0.4) : 0))
+                    .frame(width: 44, height: 44)
+                    .allowsHitTesting(false)
+            }
+            .animation(.easeOut(duration: configuration.isPressed ? 0.08 : 0.25), value: configuration.isPressed)
     }
 }

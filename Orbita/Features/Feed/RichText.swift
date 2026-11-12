@@ -761,6 +761,8 @@ struct FormattingTextView: UIViewRepresentable {
     let textColor: UIColor
     let tint: UIColor
     var maxHeight: CGFloat? = nil            // задано — поле растёт вместе с текстом (строка ввода в чате)
+    /// Палец лёг на поле / отпустил — поле чуть светлеет, как в Telegram (прокрутке и выделению не мешает)
+    var onPress: ((Bool) -> Void)? = nil
 
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
@@ -779,6 +781,14 @@ struct FormattingTextView: UIViewRepresentable {
         tap.cancelsTouchesInView = false
         tap.delegate = context.coordinator
         tv.addGestureRecognizer(tap)
+        let press = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pressed(_:)))
+        press.minimumPressDuration = 0
+        press.cancelsTouchesInView = false
+        press.delaysTouchesBegan = false
+        press.delaysTouchesEnded = false
+        press.delegate = context.coordinator
+        tv.addGestureRecognizer(press)
+        context.coordinator.onPress = onPress
         return tv
     }
 
@@ -793,6 +803,7 @@ struct FormattingTextView: UIViewRepresentable {
 
     func updateUIView(_ tv: UITextView, context: Context) {
         tv.tintColor = tint
+        context.coordinator.onPress = onPress
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(controller) }
@@ -802,6 +813,14 @@ struct FormattingTextView: UIViewRepresentable {
         init(_ controller: RichComposerController) { self.controller = controller }
 
         @objc func tapped() { controller.onFieldTap?() }
+        var onPress: ((Bool) -> Void)?
+        @objc func pressed(_ g: UILongPressGestureRecognizer) {
+            switch g.state {
+            case .began: onPress?(true)
+            case .ended, .cancelled, .failed: onPress?(false)
+            default: break
+            }
+        }
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }

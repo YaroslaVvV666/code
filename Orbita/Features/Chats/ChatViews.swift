@@ -1337,9 +1337,10 @@ struct ChatScreen: View {
                     }
                     // за полем ввода — лёгкое затемнение и размытие, сообщения видны сквозь него, но нажать на них нельзя
                     .background(alignment: .bottom) {
+                        // полоса между полем и клавиатурой — размыта и чуть затемнена, как в Telegram
                         ZStack {
-                            Rectangle().fill(.ultraThinMaterial).opacity(0.7)
-                            Color.black.opacity(theme.dark ? 0.18 : 0.04)
+                            Rectangle().fill(.ultraThinMaterial).opacity(0.85)
+                            Color.black.opacity(theme.dark ? 0.26 : 0.06)
                         }
                         .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.28),
                                                      .init(color: .black, location: 1)], startPoint: .top, endPoint: .bottom))
