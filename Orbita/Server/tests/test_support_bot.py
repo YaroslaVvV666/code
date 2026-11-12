@@ -78,6 +78,30 @@ def main():
     # закрыть
     send(t_vol, "/close %s" % n_user)
     check("закрыто — человек уведомлён", any("Обращение закрыто" in m["text"] for m in msgs(t_user)))
+
+    # оценка: звёзды → решено ли → комментарий
+    um = msgs(t_user)
+    ask = [m for m in um if "Оцените" in m["text"] and m.get("markup")]
+    check("просят оценить", bool(ask))
+    if ask:
+        five = [b for row in ask[-1]["markup"] for b in row if b["text"] == "★★★★★"][0]
+        s, b, _ = req("POST", "/v1/messages/%s/callback" % ask[-1]["id"], t_user, {"data": five["callback_data"]})
+        check("звёзды приняты", s == 200, b[:200])
+        q2 = [m for m in msgs(t_user) if "Удалось решить" in m["text"] and m.get("markup")]
+        check("спрашивают, решена ли проблема", bool(q2))
+        yes = q2[-1]["markup"][0][0]
+        req("POST", "/v1/messages/%s/callback" % q2[-1]["id"], t_user, {"data": yes["callback_data"]})
+        check("предлагают комментарий", any("комментарий" in m["text"] for m in msgs(t_user)))
+        send(t_user, "Спасибо, всё заработало!")
+        check("спасибо за отзыв", any("Спасибо за отзыв" in m["text"] for m in msgs(t_user)))
+        check("комментарий не открыл новое обращение",
+              not any("Спасибо, всё заработало" in m["text"] and "🆘" in m["text"] for m in msgs(t_vol)))
+        check("волонтёр видит оценку с комментарием",
+              any("Оценка обращения" in m["text"] and "★★★★★" in m["text"] and "всё заработало" in m["text"] for m in msgs(t_vol)))
+        send(t_owner, "/stats")
+        check("/stats показывает среднюю оценку", any("средняя 5.0" in m["text"] for m in msgs(t_owner)))
+        send(t_owner, "/reviews")
+        check("/reviews показывает отзыв", any("Последние отзывы" in m["text"] and "всё заработало" in m["text"] for m in msgs(t_owner)))
     send(t_owner, "/remove %s" % n_vol)
     check("волонтёр снят", any("больше не волонтёр" in m["text"] for m in msgs(t_vol)))
     print("FAILS: %d" % fails)

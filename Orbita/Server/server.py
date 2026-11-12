@@ -5639,8 +5639,72 @@ def support_close(agent, user_id, notify=True):
     for c in q("SELECT msg_id FROM support_copies WHERE user_id = ?", (user_id,)):
         set_inline_markup(c["msg_id"], SUPPORT_ID, [[{"text": "✅ Закрыто", "callback_data": "noop"}]])
     if notify:
-        support_say(user_id, "Обращение закрыто. Если вопрос остался или появился новый — просто напишите сюда.")
+        support_ask_rating(user_id, t["assigned"] or agent)
     return True
+
+
+# ---------- Оценка поддержки: как обслужили (1–5), решена ли проблема, комментарий ----------
+DB.execute("CREATE TABLE IF NOT EXISTS support_ratings(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, agent TEXT, "
+           "service INTEGER, solved TEXT, comment_enc BLOB, step TEXT NOT NULL, created_at REAL NOT NULL, done_at REAL)")
+DB.execute("CREATE INDEX IF NOT EXISTS idx_support_ratings ON support_ratings(user_id, created_at)")
+SOLVED_TEXT = {"yes": "✅ Да", "partly": "🟡 Частично", "no": "❌ Нет"}
+
+
+def support_ask_rating(user_id, agent):
+    rid = uuid.uuid4().hex
+    run("INSERT INTO support_ratings(id, user_id, agent, step, created_at) VALUES (?,?,?, 'service', ?)",
+        (rid, user_id, agent, time.time()))
+    support_say(user_id, "Обращение закрыто. Оцените, пожалуйста, как вам помогли — это займёт пару секунд:",
+                [[{"text": "★" * n, "callback_data": "rate:%s:s:%d" % (rid, n)} for n in (1, 2, 3)],
+                 [{"text": "★" * n, "callback_data": "rate:%s:s:%d" % (rid, n)} for n in (4, 5)]])
+
+
+def support_rating_step(user_id):
+    return q1("SELECT * FROM support_ratings WHERE user_id = ? AND step = 'comment' AND created_at > ? "
+              "ORDER BY created_at DESC LIMIT 1", (user_id, time.time() - 86400))
+
+
+def support_finish_rating(r, comment=None):
+    run("UPDATE support_ratings SET step = 'done', done_at = ?, comment_enc = ? WHERE id = ?",
+        (time.time(), enc(r["user_id"], "messages", COL["msg_text"], r["id"] + ":rate", comment) if comment else None, r["id"]))
+    r = q1("SELECT * FROM support_ratings WHERE id = ?", (r["id"],))
+    support_say(r["user_id"], "Спасибо за отзыв! 💛 Если понадобится помощь — просто напишите сюда.")
+    note = "⭐ Оценка обращения — %s\nОбслуживание: %s\nПроблема решена: %s%s" % (
+        support_label(r["user_id"]), "★" * (r["service"] or 0) + "☆" * (5 - (r["service"] or 0)),
+        SOLVED_TEXT.get(r["solved"] or "", "—"), ("\nКомментарий: " + comment) if comment else "")
+    to = {a["user_id"] for a in q("SELECT user_id FROM support_agents WHERE role = 'owner'")}
+    if r["agent"] and support_role(r["agent"]):
+        to.add(r["agent"])
+    for a in to:
+        support_say(a, note)
+
+
+def support_rating_callback(uid, m, data):
+    _, rid, kind, *rest = data.split(":") + [""]
+    r = q1("SELECT * FROM support_ratings WHERE id = ? AND user_id = ?", (rid, uid))
+    if not r or r["step"] == "done":
+        return {"text": "Спасибо, отзыв уже учтён.", "show_alert": False}
+    val = rest[0] if rest else ""
+    if kind == "s" and r["step"] == "service" and val.isdigit() and 1 <= int(val) <= 5:
+        run("UPDATE support_ratings SET service = ?, step = 'solved' WHERE id = ?", (int(val), rid))
+        set_inline_markup(m["id"], SUPPORT_ID, [[{"text": "Ваша оценка: " + "★" * int(val) + "☆" * (5 - int(val)), "callback_data": "noop"}]])
+        support_say(uid, "Удалось решить вашу проблему?",
+                    [[{"text": SOLVED_TEXT[k], "callback_data": "rate:%s:r:%s" % (rid, k)} for k in ("yes", "partly", "no")]])
+        bot_user_wake(uid)
+        return {"text": "", "show_alert": False}
+    if kind == "r" and r["step"] == "solved" and val in SOLVED_TEXT:
+        run("UPDATE support_ratings SET solved = ?, step = 'comment' WHERE id = ?", (val, rid))
+        set_inline_markup(m["id"], SUPPORT_ID, [[{"text": "Ответ: " + SOLVED_TEXT[val], "callback_data": "noop"}]])
+        support_say(uid, "Хотите что-то добавить? Напишите комментарий одним сообщением — его прочитает команда поддержки.",
+                    [[{"text": "Пропустить", "callback_data": "rate:%s:skip" % rid}]])
+        bot_user_wake(uid)
+        return {"text": "", "show_alert": False}
+    if kind == "skip" and r["step"] == "comment":
+        set_inline_markup(m["id"], SUPPORT_ID, None)
+        support_finish_rating(r)
+        bot_user_wake(uid)
+        return {"text": "", "show_alert": False}
+    return {"text": "", "show_alert": False}
 
 
 SUPPORT_AGENT_HELP = ("Вы волонтёр поддержки Orbita.\n\n"
@@ -5650,7 +5714,7 @@ SUPPORT_AGENT_HELP = ("Вы волонтёр поддержки Orbita.\n\n"
                       "• /open — открытые обращения\n• /reply ID текст — ответить по ID\n• /close ID — закрыть\n"
                       "• /pause — не получать новые обращения, /resume — снова получать")
 SUPPORT_OWNER_HELP = ("\n\nВы владелец бота поддержки:\n• /add @username или ID — назначить волонтёра\n"
-                      "• /remove @username или ID — снять\n• /volunteers — список\n• /stats — статистика")
+                      "• /remove @username или ID — снять\n• /volunteers — список\n• /stats — статистика\n• /reviews — отзывы и оценки")
 SUPPORT_USER_HELLO = ("Здравствуйте! Это официальная поддержка Orbita.\n\n"
                       "Опишите ваш вопрос одним сообщением — можно приложить скриншот. Отвечают волонтёры: "
                       "мы постараемся помочь как можно быстрее, но ожидание может занять время. Ответ придёт сюда.")
@@ -5668,6 +5732,15 @@ def support_handle(uid, row, text, attachments):
     if low.startswith("/help"):
         return bot_reply(SUPPORT_ID, uid, "Напишите сюда, что случилось, — сообщение получат волонтёры поддержки, "
                                           "и ответ придёт в этот чат. Ваш ID в Orbita: %s" % (num_id_of(uid) or "—"))
+    pending = support_rating_step(uid)
+    if pending and cmd and not cmd.startswith("/"):
+        # ждём комментарий к оценке — это он, а не новое обращение
+        for mm in q("SELECT id FROM messages WHERE sender = ? AND recipient = ? AND markup_enc IS NOT NULL "
+                    "ORDER BY created_at DESC LIMIT 3", (SUPPORT_ID, uid)):
+            mk = markup_of(q1("SELECT * FROM messages WHERE id = ?", (mm["id"],))) or []
+            if any(b.get("callback_data") == "rate:%s:skip" % pending["id"] for row_ in mk for b in row_):
+                set_inline_markup(mm["id"], SUPPORT_ID, None)
+        return support_finish_rating(pending, cmd[:1000])
     rate_limit("support:" + uid, 30, 600)
     first = support_open_thread(uid)
     n = support_forward(uid, cmd, attachments, first)
@@ -5758,8 +5831,25 @@ def support_agent_message(uid, role, row, cmd, attachments):
             per = q("SELECT agent, COUNT(*) c FROM support_log WHERE kind = 'reply' AND created_at > ? GROUP BY agent ORDER BY c DESC",
                     (time.time() - 7 * 86400,))
             lines = "\n".join("• %s — %d" % (user_brief(p["agent"])["name"], p["c"]) for p in per if p["agent"]) or "—"
-            return support_say(uid, "Открыто сейчас: %d\nНовых за сутки: %d\nОтветов за сутки: %d\n\nОтветы за неделю:\n%s"
-                               % (opened, new24, rep24, lines))
+            week = time.time() - 7 * 86400
+            rt = q1("SELECT COUNT(*) c, AVG(service) a FROM support_ratings WHERE step = 'done' AND service IS NOT NULL AND done_at > ?", (week,))
+            sv = q1("SELECT COUNT(*) c FROM support_ratings WHERE step = 'done' AND solved = 'yes' AND done_at > ?", (week,))["c"]
+            rating = ("Оценки за неделю: %d, средняя %.1f ★, решено полностью: %d%%" % (rt["c"], rt["a"] or 0, round(100 * sv / rt["c"]))
+                      if rt["c"] else "Оценок за неделю пока нет")
+            return support_say(uid, "Открыто сейчас: %d\nНовых за сутки: %d\nОтветов за сутки: %d\n%s\n\nОтветы за неделю:\n%s\n\nОтзывы — /reviews"
+                               % (opened, new24, rep24, rating, lines))
+        if head == "/reviews":
+            rows = q("SELECT * FROM support_ratings WHERE step = 'done' ORDER BY done_at DESC LIMIT 15")
+            if not rows:
+                return support_say(uid, "Отзывов пока нет.")
+            out = []
+            for r in rows:
+                cm = dec(r["user_id"], "messages", COL["msg_text"], r["id"] + ":rate", r["comment_enc"]) if r["comment_enc"] else ""
+                out.append("%s %s · %s%s%s" % ("★" * (r["service"] or 0), SOLVED_TEXT.get(r["solved"] or "", ""),
+                                              support_label(r["user_id"]),
+                                              (" · волонтёр " + user_brief(r["agent"])["name"]) if r["agent"] else "",
+                                              ("\n   «%s»" % cm) if cm else ""))
+            return support_say(uid, "Последние отзывы:\n\n" + "\n".join(out))
     if head.startswith("/"):
         return support_say(uid, "Не знаю такой команды. /help — что я умею.")
     return support_say(uid, "Чтобы ответить человеку, смахните его сообщение (или «Ответить») и напишите ответ. "
@@ -5767,6 +5857,8 @@ def support_agent_message(uid, role, row, cmd, attachments):
 
 
 def support_callback(uid, m, data):
+    if data.startswith("rate:"):
+        return support_rating_callback(uid, m, data)
     role = support_role(uid)
     if not role or data == "noop":
         return {"text": "", "show_alert": False}
