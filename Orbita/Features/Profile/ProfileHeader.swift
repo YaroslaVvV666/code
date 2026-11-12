@@ -497,6 +497,8 @@ struct AvatarStage: View, Animatable {
     /// Насколько прокручена страница (вверх — плюс): в среднем положении фото едет вместе со страницей,
     /// а не стоит на месте, пока описание под ним уезжает под фото
     var scroll: CGFloat = 0
+    /// Из полноэкранного (3-го) положения сразу в кружок: фото летит на своё место по прямой, а не через шапку
+    var direct = false
 
     var animatableData: CGFloat {
         get { expand }
@@ -510,14 +512,27 @@ struct AvatarStage: View, Animatable {
     var body: some View {
         let e: CGFloat = min(2, max(0, expand))
         let t1: CGFloat = min(1, e)
-        let t2: CGFloat = max(0, e - 1)
-        let w: CGFloat = 112 + (screen.width - 112) * t1
-        let h1: CGFloat = 112 + (headerHeight - 112) * t1
-        let h: CGFloat = h1                                           // на последней ступени фото не растёт, а съезжает в центр
+        var t2: CGFloat = max(0, e - 1)
+        // среднее положение: тянешь страницу вниз — фото растёт за пальцем (верх на месте), отпустил — плавно обратно;
+        // листаешь вверх — фото уезжает вместе со страницей
+        let stretch: CGFloat = max(0, -scroll)
+        let lift: CGFloat = max(0, scroll)
+        var w: CGFloat = 112 + (screen.width - 112) * t1
+        var h: CGFloat = 112 + (headerHeight - 112) * t1 + stretch * max(0, t1 - t2)
+        var y: CGFloat = circleTop * (1 - t1) - lift * max(0, t1 - t2) + (screen.height - headerHeight) / 2 * t2
+        var r: CGFloat = 56 * (1 - t1)
+        var ui: Double = Double(max(0, (t1 - 0.6) / 0.4))
+        if direct {
+            // кратчайший путь: прямая между кружком и фото на весь экран, без захода в шапку
+            let k = e / 2
+            w = 112 + (screen.width - 112) * k
+            h = 112 + (headerHeight - 112) * k
+            y = circleTop + ((screen.height - headerHeight) / 2 - circleTop) * k
+            r = 56 * (1 - k)
+            t2 = k
+            ui = 0
+        }
         let x: CGFloat = (screen.width - w) / 2
-        let y: CGFloat = circleTop * (1 - t1) - scroll * (t1 - t2) + (screen.height - headerHeight) / 2 * t2
-        let r: CGFloat = 56 * (1 - t1)
-        let ui: Double = Double(max(0, (t1 - 0.6) / 0.4))
         return ZStack(alignment: .topLeading) {
             Color.black.opacity(Double(t2))                       // чёрный фон вокруг, как предпросмотр фото
             card(w: w, h: h, r: r, ui: ui, t2: t2)

@@ -382,7 +382,8 @@ struct UserPageView: View {
     @State private var stageForward = true
     @State private var avatarTop: CGFloat = 0          // верх аватарки в координатах страницы
     @State private var pullArmed = true
-    @State private var stageScroll: CGFloat = 0        // прокрутка страницы: раскрытое фото едет вместе с ней
+    @State private var stageScroll: CGFloat = 0
+    @State private var stageDirect = false        // прокрутка страницы: раскрытое фото едет вместе с ней
     @State private var tracker = PageScrollTracker()
     /// Ник страницы и плашка появляются только после того, как раскрытое фото свернулось (иначе ник наезжает на фото)
     @State private var namesReady = true
@@ -763,6 +764,7 @@ struct UserPageView: View {
         guard stage != n else { return }
         Haptics.impact(.light)
         if n == 0 || stage == 0 { stageForward = false }
+        stageDirect = stage == 2 && n == 0            // из полноэкранного — прямо в кружок, по кратчайшей линии
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             stage = n
             if n == 0 { page = 0 }
@@ -812,7 +814,7 @@ struct UserPageView: View {
                            onVertical: { stageDrag($0) },
                         onClose: { setStage(0) },
                            track: model.tracks.first ?? profile.track, queue: model.tracks, player: player,
-                           onMusic: { showPlaylist = true }, scroll: stageScroll)
+                           onMusic: { showPlaylist = true }, scroll: stageScroll, direct: stageDirect)
             .offset(y: -pageTop)
             .allowsHitTesting(stage >= 1)
     }

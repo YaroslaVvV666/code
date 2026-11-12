@@ -65,6 +65,7 @@ struct ProfileView: View {
     @State private var rawOffset: CGFloat = 0          // насколько прокручено: вверх — плюс, потянули вниз — минус
     /// Ступень шапки: 0 — кружок, 1 — фото на всю ширину, 2 — фото на весь экран
     @State private var pullStage = 0
+    @State private var stageDirect = false
     @State private var showEdit = false
     @State private var showStatus = false
     @State private var showQR = false
@@ -237,6 +238,7 @@ struct ProfileView: View {
         guard pullStage != n else { return }
         Haptics.impact(.light)
         if n == 0 || (pullStage == 0 && n >= 1) { stageForward = false }
+        stageDirect = pullStage == 2 && n == 0            // из полноэкранного — прямо в кружок, по кратчайшей линии
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             pullStage = n
             if n == 0 { pageIndex = 0 }
@@ -274,7 +276,7 @@ struct ProfileView: View {
                         onVertical: { stageDrag($0) },
                         onClose: { setStage(0) },
                         track: store.profile?.track, queue: store.profile?.track.map { [$0] } ?? [], player: session.player,
-                        onMusic: { openPlaylist() }, scroll: raw)
+                        onMusic: { openPlaylist() }, scroll: raw, direct: stageDirect)
         }
         .allowsHitTesting(pullStage >= 1)
     }

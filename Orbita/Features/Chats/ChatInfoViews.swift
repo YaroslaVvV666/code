@@ -61,6 +61,7 @@ struct ChatInfoView: View {
     @State private var avatarTop: CGFloat = 0
     @State private var pullArmed = true
     @State private var stageScroll: CGFloat = 0
+    @State private var stageDirect = false
     @State private var tracker = PageScrollTracker()
     private var pageTop: CGFloat { TopInset.value }
     private static let avatarPad: CGFloat = 40
@@ -320,7 +321,7 @@ struct ChatInfoView: View {
                         onStep: { stepPhoto($0, count: count) },
                         onCenter: { setStage(stage == 1 ? 2 : 1) },
                         onVertical: { stageDrag($0) },
-                        onClose: { setStage(0) }, scroll: stageScroll)
+                        onClose: { setStage(0) }, scroll: stageScroll, direct: stageDirect)
                 .offset(y: -pageTop)
                 .allowsHitTesting(st >= 1)
             if st == 2 {
@@ -348,6 +349,7 @@ struct ChatInfoView: View {
         guard stage != n else { return }
         Haptics.impact(.light)
         if n == 0 || stage == 0 { stageForward = false }
+        stageDirect = stage == 2 && n == 0            // из полноэкранного — прямо в кружок, по кратчайшей линии
         withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
             stage = n
             if n == 0 { pagerIndex = 0 }
